@@ -1,0 +1,25 @@
+{
+  "name": "sakura-browser-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:linux": "cargo build --workspace",
+    "build:wasm": "node tools/build-wasm.mjs",
+    "serve": "node tools/local-server.mjs",
+    "test:browser-audio": "node tests/audio-mixer.mjs",
+    "test:browser-catalog": "node tests/local-catalog.mjs",
+    "test:browser-graph": "node tests/graph-renderer.mjs",
+    "test:browser-input": "node tests/input-controller.mjs",
+    "test:browser-runtime-input": "node tests/runtime-session-input-bridge.mjs",
+    "test:browser-state": "node tests/runtime-state-export.mjs",
+    "test:local-server": "node tests/local-server.mjs",
+    "test:rust": "cargo test --workspace",
+    "test:wasm-session": "node tests/session-handle-smoke.mjs",
+    "test:wasm": "node tests/wasm-smoke.mjs",
+    "test": "npm run test:rust && npm run build:wasm && npm run test:wasm && npm run test:wasm-session && npm run test:browser-catalog && npm run test:browser-input && npm run test:browser-runtime-input && npm run test:browser-state && npm run test:browser-audio && npm run test:browser-graph && npm run test:local-server"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

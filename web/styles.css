@@ -1,0 +1,96 @@
+:root {
+  color-scheme: dark;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #101114;
+  color: #e8eaf0;
+}
+
+body {
+  margin: 0;
+}
+
+button {
+  min-height: 36px;
+  border: 1px solid #59606c;
+  border-radius: 6px;
+  background: #d8dee8;
+  color: #15171b;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.session-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.runtime-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+}
+
+.stage {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  background: #07080a;
+}
+
+canvas {
+  width: min(100vw, calc((100vh - 32px) * 16 / 9));
+  max-width: 100%;
+  aspect-ratio: 16 / 9;
+  height: auto;
+  image-rendering: auto;
+}
+
+.panel {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  padding: 16px;
+  border-left: 1px solid #2b3038;
+  background: #181b20;
+}
+
+.status {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.label {
+  color: #aab1bd;
+}
+
+pre {
+  min-height: 180px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #2e3540;
+  border-radius: 6px;
+  background: #0e1014;
+  color: #dfe5ef;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 820px) {
+  .runtime-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .panel {
+    border-left: 0;
+    border-top: 1px solid #2b3038;
+  }
+}

@@ -1,0 +1,197 @@
+# Local proprietary game install / assets
+
+/サクラノ詩/
+/Sakura no Uta*/
+/sakura-no-uta*/
+/game/
+/games/
+/local-game/
+/local-assets/
+/assets-original/
+/assets-local/
+/converted-assets/
+/asset-cache/
+/extract/
+/extracted/
+/out-assets/
+
+# FANZA/DMM downloaded installers, split archives, installers
+
+*.rar
+*.r00
+*.r01
+*.r02
+*.r03
+*.7z
+*.zip
+*.part
+*.bin
+*.cue
+*.iso
+*.exe
+*.msi
+
+# BGI/Ethornell and VN asset formats from real games
+
+*.arc
+*.dat
+*.pak
+*.xp3
+*.pfs
+*.bin
+*.cbg
+*.bgi
+*._bp
+*._bsi
+*.ogg
+*.wav
+*.mp3
+*.m4a
+*.webm
+*.mp4
+*.avi
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tga
+*.webp
+*.ttf
+*.otf
+*.fon
+
+# Allow only synthetic test fixtures to be committed
+
+!/tests/
+!/tests/fixtures/
+!/tests/fixtures/synthetic/
+!/tests/fixtures/synthetic/**
+!/fixtures/
+!/fixtures/synthetic/
+!/fixtures/synthetic/**
+
+# Wine / runtime environment
+
+/.wineprefix
+/.wineprefix32/
+/.wineprefix64/
+/.shader-cache/
+/dxvk-cache/
+/vkd3d-cache/
+*.reg
+*.lnk
+
+# Local scripts and logs
+
+/run-wine.sh
+/*.log
+/wine-*.log
+/debug-*.log
+/trace-*.log
+/screenshots/
+/captures/
+/reference-screenshots/
+/browser-screenshots/
+/diffs/
+/recordings/
+/.playwright-cli/
+
+# Keep shareable templates
+
+!/run-wine.example.sh
+
+# Rust
+
+/target/
+/.wasm-pack/
+/pkg/
+/coverage/
+/tarpaulin-report.html
+
+# Node / frontend
+
+/node_modules/
+/dist/
+/build/
+web/pkg/
+/.next/
+/vite.config.ts.timestamp-*
+/vite.config.js.timestamp-*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# Emscripten / CMake / native builds
+
+/cmake-build-*/
+/CMakeFiles/
+/CMakeCache.txt
+/Makefile
+/compile_commands.json
+/*.o
+/*.a
+/*.so
+/*.dll
+/*.dylib
+
+# Python tooling
+
+/.venv/
+/venv/
+/**pycache**/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Browser / Playwright / test outputs
+
+/test-results/
+/playwright-report/
+/blob-report/
+/chrome-profile/
+/chromium-profile/
+/browser-profile/
+
+# Local databases / caches
+
+*.sqlite
+*.sqlite3
+*.db
+/.cache/
+/.cache/
+/tmp/
+/temp/
+
+# Secrets / local config
+
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.crt
+*.secret
+
+# Tool config
+
+/.commandcode/
+
+# Debug / test output
+
+/output/
+
+# Editor / OS
+
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+*.swp
+*.swo
+*~
