@@ -232,6 +232,9 @@ async function orderInstallFiles(files, core) {
 async function mountCatalog(catalog, summary, core, hooks) {
   const cbgProbe = await probeLocalCbg(catalog, core);
   const audioProbe = await probeLocalAudio(catalog, core);
+  const titleImage = await loadTitleImage(catalog, core);
+  const menuButtons = await loadMenuButtons(catalog, core);
+  const bootScreens = await loadBootScreens(catalog, core);
   const audioMixer = createAudioMixer();
   const playerState = { active: false };
   const fullSummary = {
@@ -416,6 +419,17 @@ async function mountCatalog(catalog, summary, core, hooks) {
     runtimeSessionEntryName: resolveSystemEntryRequest().displayName,
     destroyed: false,
     scenarioPreviewEnabled: runtimeScenarioPreviewEnabled(),
+    titleImage,
+    menuButtons,
+    bootScreens,
+    bootPhase: 0,
+    stage: runtimeScenarioPreviewEnabled()
+      ? "scenario"
+      : bootScreens.length > 0
+        ? "boot"
+        : titleImage
+          ? "title"
+          : "scenario",
     player: null,
     summary: fullSummary,
       safeState: {
@@ -468,6 +482,11 @@ async function mountCatalog(catalog, summary, core, hooks) {
     notifyRuntimeUpdate(hooks, mounted);
     return packet;
   });
+  mounted.startScenario = () => {
+    if (mounted.stage === "scenario" && mounted.player) return;
+    mounted.stage = "scenario";
+    queueScenarioPlayer(catalog, core, mounted, hooks);
+  };
   if (mounted.scenarioPreviewEnabled) {
     queueScenarioPlayer(catalog, core, mounted, hooks);
   }
@@ -1154,6 +1173,45 @@ async function probeLocalCbg(catalog, core) {
     return { image: rgba, summary: { localCbgDecoded: rgba === null ? 0 : 1, localCbgLargeSkipped: largeSkipped } };
   }
   return { image: null, summary: { localCbgDecoded: 0, localCbgLargeSkipped: largeSkipped } };
+}
+
+async function loadBootScreens(catalog, core) {
+  const names = ["makuralogo", "att01", "att02"];
+  const screens = [];
+  for (const name of names) {
+    try {
+      const payload = await catalog.readPayloadByNameBytes(new TextEncoder().encode(name));
+      if (!payload) continue;
+      const image = decodeMountedImage(core, payload);
+      if (image) screens.push({ name, image });
+    } catch (_) {}
+  }
+  return screens;
+}
+
+async function loadMenuButtons(catalog, core) {
+  // Title menu buttons are 4-state sprite sheets (idle/hover/pressed/disabled), states laid out horizontally.
+  const defs = [["Start","SGTitle000000"],["Load","SGTitle000100"],["Config","SGTitle000200"],["Exit","SGTitle000300"]];
+  const out = [];
+  for (const [label, name] of defs) {
+    try {
+      const payload = await catalog.readPayloadByNameBytes(new TextEncoder().encode(name));
+      if (!payload) continue;
+      const image = decodeMountedImage(core, payload);
+      if (image) out.push({ label, image, stateWidth: Math.floor(image.width / 4), stateHeight: image.height });
+    } catch (_) {}
+  }
+  return out;
+}
+
+async function loadTitleImage(catalog, core) {
+  try {
+    const payload = await catalog.readPayloadByNameBytes(new TextEncoder().encode("SGTitle990000"));
+    if (!payload) return null;
+    return decodeMountedImage(core, payload);
+  } catch (_) {
+    return null;
+  }
 }
 
 function decodeMountedImage(core, payload) {

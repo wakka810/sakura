@@ -131,6 +131,41 @@ playAudioButton.addEventListener("click", () => {
 });
 
 installFilesInput.addEventListener("input", scheduleInstallProbe); installFilesInput.addEventListener("change", scheduleInstallProbe);
+canvas.addEventListener("mousemove", (event) => {
+  const mounted = activeInstall;
+  if (!mounted || mounted.stage !== "title") return;
+  const hit = titleMenuHit(mounted, event.clientX, event.clientY);
+  if (hit !== mounted.hoverIndex) {
+    mounted.hoverIndex = hit;
+    paintMountedFrame(mounted);
+  }
+});
+globalThis.sakuraAdvanceBoot = () => {
+  const mounted = activeInstall;
+  if (!mounted) return false;
+  if (mounted.stage === "boot") { if (bootPhaseIsHold(mounted)) { advanceBootPhase(mounted); publishRuntimeState(true); } return true; }
+  if (mounted.stage === "title") { mounted.startScenario?.(); paintMountedFrame(mounted); publishRuntimeState(true); return true; }
+  return false;
+};
+canvas.addEventListener("click", (event) => {
+  const mounted = activeInstall;
+  if (!mounted) return;
+  if (mounted.stage === "boot") {
+    if (bootPhaseIsHold(mounted)) {
+      advanceBootPhase(mounted);
+      publishRuntimeState(true);
+    }
+    return;
+  }
+  if (mounted.stage === "title") {
+    const hit = titleMenuHit(mounted, event.clientX, event.clientY);
+    if (hit === 0) {
+      mounted.startScenario?.();
+      paintMountedFrame(mounted);
+      publishRuntimeState(true);
+    }
+  }
+}, true);
 bindScenarioPlayerInput(canvas, () => activeInstall, () => {
   paintMountedFrame(activeInstall);
   publishRuntimeState(true);
@@ -671,15 +706,253 @@ async function bootServerInstall() {
   }
   bindRuntimeSessionControls();
   paintMountedFrame(activeInstall);
+  if (activeInstall && (activeInstall.stage === "boot" || activeInstall.stage === "title")) stageEnter(activeInstall);
   publishRuntimeState(true);
   renderInstallSummaryText(mounted.summary, true);
 }
 
+const TITLE_MENU = ["Start", "Load", "Config", "Exit"];
+const TITLE_MENU_X = [0.224, 0.405, 0.588, 0.768];
+const TITLE_MENU_Y = 0.812;
+
+function titleLayout(image) {
+  const scale = Math.min(canvas.width / image.width, canvas.height / image.height);
+  const w = Math.round(image.width * scale);
+  const h = Math.round(image.height * scale);
+  const x = Math.floor((canvas.width - w) / 2);
+  const y = Math.floor((canvas.height - h) / 2);
+  return { x, y, w, h };
+}
+
+const TITLE_NOAUTO = typeof location !== "undefined" && (location.search || "").includes("noauto");
+let stageFadeAlpha = 1;
+let stageAnimRunning = false;
+let petals = null;
+let petalLastT = 0;
+
+function initPetals() {
+  petals = [];
+  for (let i = 0; i < 34; i += 1) {
+    petals.push({
+      x: Math.random(), y: Math.random(),
+      size: 6 + Math.random() * 9,
+      vy: 0.018 + Math.random() * 0.022,
+      swayAmp: 0.01 + Math.random() * 0.02,
+      swayPhase: Math.random() * Math.PI * 2,
+      swaySpeed: 0.6 + Math.random() * 0.8,
+      rot: Math.random() * Math.PI * 2,
+      vrot: (Math.random() - 0.5) * 1.2,
+      alpha: 0.55 + Math.random() * 0.4,
+    });
+  }
+}
+
+function drawPetal(ctx, px, py, size, rot, alpha) {
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.rotate(rot);
+  ctx.globalAlpha = alpha;
+  const grad = ctx.createLinearGradient(0, -size, 0, size);
+  grad.addColorStop(0, "rgba(255,255,255,0.95)");
+  grad.addColorStop(1, "rgba(255,210,232,0.9)");
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(0, -size);
+  ctx.quadraticCurveTo(size * 0.7, -size * 0.2, size * 0.25, size);
+  ctx.quadraticCurveTo(0, size * 0.7, -size * 0.25, size);
+  ctx.quadraticCurveTo(-size * 0.7, -size * 0.2, 0, -size);
+  ctx.fill();
+  ctx.restore();
+}
+
+function updateAndDrawPetals(ctx, x, y, w, h, dt) {
+  if (!petals) initPetals();
+  for (const p of petals) {
+    p.y += p.vy * dt;
+    p.swayPhase += p.swaySpeed * dt;
+    p.rot += p.vrot * dt;
+    if (p.y > 1.08) { p.y = -0.08; p.x = Math.random(); }
+    const sx = x + (p.x + Math.sin(p.swayPhase) * p.swayAmp) * w;
+    const sy = y + p.y * h;
+    drawPetal(ctx, sx, sy, p.size, p.rot, p.alpha * stageFadeAlpha);
+  }
+  ctx.globalAlpha = 1;
+}
+
+
+const BOOT_FADE_MS = 450;
+const BOOT_HOLD_MS = [2600, 6000, 6000];  // logo, warning1, warning2 auto-advance holds
+
+function stageEnter(mounted) {
+  mounted.stageEnteredAt = performance.now();
+  startStageAnim(mounted);
+}
+
+function startStageAnim(mounted) {
+  if (stageAnimRunning) return;
+  stageAnimRunning = true;
+  const step = () => {
+    const m = activeInstall;
+    if (!m || (m.stage !== "boot" && m.stage !== "title")) { stageAnimRunning = false; return; }
+    const t = performance.now() - (m.stageEnteredAt ?? 0);
+    stageFadeAlpha = Math.min(1, t / BOOT_FADE_MS);
+    if (m.stage === "boot" && !TITLE_NOAUTO) {
+      const phases = bootPhaseList(m);
+      const cur = phases[Math.min(m.bootPhase, phases.length - 1)];
+      if (t >= cur.dur) advanceBootPhase(m);
+    }
+    paintMountedFrame(m);
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+function imageScratch(image) {
+  if (image.__scratch) return image.__scratch;
+  const c = document.createElement("canvas");
+  c.width = image.width;
+  c.height = image.height;
+  c.getContext("2d", { alpha: true }).putImageData(
+    new ImageData(new Uint8ClampedArray(image.pixels), image.width, image.height), 0, 0);
+  image.__scratch = c;
+  return c;
+}
+
+function paintTitleScreen(mounted) {
+  const image = mounted.titleImage;
+  context.fillStyle = "#000";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.save();
+  context.globalAlpha = stageFadeAlpha;
+  const { x, y, w, h } = titleLayout(image);
+  context.drawImage(imageScratch(image), x, y, w, h);
+  const buttons = mounted.menuButtons ?? [];
+  const scale = w / image.width;
+  const cy = y + h * TITLE_MENU_Y;
+  if (buttons.length > 0) {
+    for (let i = 0; i < buttons.length; i += 1) {
+      const b = buttons[i];
+      const cx = x + w * TITLE_MENU_X[i];
+      const bw = b.stateWidth * scale;
+      const bh = b.stateHeight * scale;
+      const state = mounted.hoverIndex === i ? 1 : 0;
+      context.drawImage(
+        imageScratch(b.image),
+        state * b.stateWidth, 0, b.stateWidth, b.stateHeight,
+        Math.round(cx - bw / 2), Math.round(cy - bh / 2), bw, bh);
+    }
+  } else {
+    context.save();
+    context.font = "bold 36px 'Times New Roman', serif";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillStyle = "#ffffff";
+    for (let i = 0; i < TITLE_MENU.length; i += 1) {
+      context.fillText(TITLE_MENU[i], x + w * TITLE_MENU_X[i], cy);
+    }
+    context.restore();
+  }
+  stageNonBlackSampleCount = 1;
+}
+
+function titleMenuHit(mounted, clientX, clientY) {
+  const image = mounted.titleImage;
+  if (!image) return -1;
+  const rect = canvas.getBoundingClientRect();
+  const px = (clientX - rect.left) * (canvas.width / rect.width);
+  const py = (clientY - rect.top) * (canvas.height / rect.height);
+  const { x, y, w, h } = titleLayout(image);
+  const scale = w / image.width;
+  const cy = y + h * TITLE_MENU_Y;
+  const buttons = mounted.menuButtons ?? [];
+  const count = buttons.length > 0 ? buttons.length : TITLE_MENU.length;
+  for (let i = 0; i < count; i += 1) {
+    const b = buttons[i];
+    const bw = b ? b.stateWidth * scale : w * 0.14;
+    const bh = b ? b.stateHeight * scale : h * 0.1;
+    const cx = x + w * TITLE_MENU_X[i];
+    if (Math.abs(px - cx) < bw / 2 && Math.abs(py - cy) < bh / 2) return i;
+  }
+  return -1;
+}
+
+function paintBootScreen(mounted) {
+  const phases = bootPhaseList(mounted);
+  const i = Math.min(mounted.bootPhase, phases.length - 1);
+  const cur = phases[i];
+  const prev = i > 0 ? phases[i - 1] : { color: "#000" };
+  const t = performance.now() - (mounted.stageEnteredAt ?? 0);
+  const progress = cur.hold ? 1 : Math.min(1, t / cur.dur);
+  context.fillStyle = "#000";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  drawPhaseLayer(prev, 1);
+  drawPhaseLayer(cur, progress);
+  stageNonBlackSampleCount = 1;
+}
+
+// Faithful boot sequence from makerlogo: white->logo->white->att01->att02->black, crossfades+holds (ms).
+function bootPhaseList(mounted) {
+  if (mounted.__bootPhases) return mounted.__bootPhases;
+  const get = (n) => (mounted.bootScreens ?? []).find((sc) => sc.name === n)?.image ?? null;
+  const logo = get("makuralogo"), a1 = get("att01"), a2 = get("att02");
+  const list = [
+    { color: "#fff", dur: 3000 },
+    { image: logo, dur: 3000 },
+    { image: logo, dur: 5000, hold: true },
+    { color: "#fff", dur: 3000 },
+    { image: a1, dur: 2500 },
+    { image: a1, dur: 5000, hold: true },
+    { image: a2, dur: 2500 },
+    { image: a2, dur: 5000, hold: true },
+    { color: "#000", dur: 1500 },
+  ].filter((ph) => ph.color || ph.image);
+  mounted.__bootPhases = list;
+  return list;
+}
+
+function drawPhaseLayer(phase, alpha) {
+  if (!phase) return;
+  context.save();
+  context.globalAlpha = Math.max(0, Math.min(1, alpha));
+  if (phase.color) {
+    context.fillStyle = phase.color;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+  } else if (phase.image) {
+    const { x, y, w, h } = titleLayout(phase.image);
+    context.drawImage(imageScratch(phase.image), x, y, w, h);
+  }
+  context.restore();
+}
+
+function bootPhaseIsHold(mounted) {
+  const phases = bootPhaseList(mounted);
+  return !!phases[Math.min(mounted.bootPhase ?? 0, phases.length - 1)]?.hold;
+}
+
+function advanceBootPhase(mounted) {
+  const phases = bootPhaseList(mounted);
+  mounted.bootPhase = (mounted.bootPhase ?? 0) + 1;
+  if (mounted.bootPhase >= phases.length) {
+    mounted.stage = mounted.titleImage ? "title" : "scenario";
+    if (mounted.stage === "scenario") mounted.startScenario?.();
+  }
+  stageEnter(mounted);
+}
+
 function paintMountedFrame(mounted) {
+  if (mounted.stage === "boot" && mounted.bootScreens?.length) {
+    paintBootScreen(mounted);
+    return;
+  }
+  if (mounted.stage === "title" && mounted.titleImage) {
+    paintTitleScreen(mounted);
+    return;
+  }
   const image = mounted.bootImage;
   if (image === null) {
     paintBootFrame(core);
     renderMountedGraphQueue(mounted);
+    paintScenarioEvent(context, canvas, mounted.player?.event ?? null);
     stageNonBlackSampleCount = 1;
     return;
   }
@@ -764,6 +1037,23 @@ function renderMountedGraphQueue(mounted) {
     drawnImageCount: graphRender.drawnImageCount ?? 0,
     runtimeSlot0EntryCount: graphRender.runtimeSlot0EntryCount ?? 0,
     runtimeSlot0MatchedLayerCount: graphRender.runtimeSlot0MatchedLayerCount ?? 0,
+    debug: {
+      sourceLayers: (graphRender.layers ?? [])
+        .filter((layer) => layer.type === "source-layer")
+        .slice(0, 8)
+        .map((layer) => ({
+          x: layer.x,
+          y: layer.y,
+          width: layer.width,
+          height: layer.height,
+          sourceMemory: layer.sourceMemory ?? null,
+          runtimeMemory: layer.runtimeMemory ?? null,
+        })),
+      titleImageContexts: graphRender.titleImageContexts ?? [],
+      runtimeSlot0Entries: (graphRender.runtimeSlot0?.entries ?? [])
+        .slice(0, 30)
+        .map((entry) => ({ name: entry.name, offset: entry.offset, size: entry.size })),
+    },
   };
 }
 
@@ -777,6 +1067,6 @@ function paintBootFrame(core) {
   context.fillRect(36, 42, 240, 120);
   context.restore();
   context.fillStyle = "#e9edf1";
-  context.font = "24px system-ui, sans-serif";
+  context.font = "24px system-ui, 'Noto Sans CJK JP', sans-serif";
   context.fillText("BGI runtime core loaded", 40, 64);
 }

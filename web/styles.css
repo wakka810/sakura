@@ -33,7 +33,8 @@ button:disabled {
 }
 
 .runtime-shell {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 320px;
 }
@@ -42,6 +43,8 @@ button:disabled {
   display: grid;
   place-items: center;
   min-width: 0;
+  height: 100vh;
+  overflow: hidden;
   background: #07080a;
 }
 
@@ -58,6 +61,9 @@ canvas {
   align-content: start;
   gap: 16px;
   padding: 16px;
+  height: 100vh;
+  overflow-y: auto;
+  box-sizing: border-box;
   border-left: 1px solid #2b3038;
   background: #181b20;
 }

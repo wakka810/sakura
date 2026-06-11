@@ -533,6 +533,7 @@ impl<'a> SystemRuntime<'a> {
                             *service_id,
                             args,
                             frame.vm.last_instruction_offset().unwrap_or(0),
+                            &frame.vm,
                         );
                     }
                     self.host.record_service_event(&event);
@@ -771,6 +772,7 @@ fn record_service_trace(
     service_id: u8,
     args: &[SystemValue<'_>],
     instruction_offset: usize,
+    vm: &crate::system_vm::SystemVm<'_>,
 ) {
     trace.total_service_count += 1;
     if trace.recorded_services.len() == max_recorded_services {
@@ -794,7 +796,7 @@ fn record_service_trace(
         first_string_hash,
         instruction_offset,
         arg_slots: service_arg_slots(args),
-        inline_strings: service_inline_strings(args),
+        inline_strings: service_inline_strings(vm, family, args),
     });
 }
 
@@ -867,7 +869,11 @@ fn string_trace_arg(value: u32, bytes: &[u8]) -> SystemServiceTraceArg {
     }
 }
 
-fn service_inline_strings(args: &[SystemValue<'_>]) -> Vec<SystemServiceTraceInlineString> {
+fn service_inline_strings(
+    vm: &crate::system_vm::SystemVm<'_>,
+    family: crate::SystemCallFamily,
+    args: &[SystemValue<'_>],
+) -> Vec<SystemServiceTraceInlineString> {
     let mut strings = Vec::new();
     for (arg_index, value) in args.iter().enumerate() {
         let Some(bytes) = value.string_bytes() else {
@@ -876,18 +882,75 @@ fn service_inline_strings(args: &[SystemValue<'_>]) -> Vec<SystemServiceTraceInl
         if strings.len() == SYSTEM_SERVICE_TRACE_INLINE_STRING_LIMIT {
             break;
         }
-        let byte_len = bytes
-            .len()
-            .min(SYSTEM_SERVICE_TRACE_INLINE_STRING_MAX_BYTES);
-        strings.push(SystemServiceTraceInlineString {
-            arg_index,
-            byte_len,
-            full_len: bytes.len(),
-            hash: fnv1a64(bytes) as u32,
-            bytes: bytes[..byte_len].to_vec(),
-        });
+        push_inline_string(&mut strings, arg_index, bytes);
+    }
+    // Graph layer/blit calls reference their bound asset by a small integer token
+    // (e.g. a source-layer key) that indexes into auxiliary memory slot 0, where
+    // the engine has written the asset's entry name. That binding is only present
+    // while the graph command executes, so resolve it here at emit time rather
+    // than sampling memory asynchronously from the renderer.
+    if family == crate::SystemCallFamily::Graph {
+        for (arg_index, value) in args.iter().enumerate() {
+            if strings.len() == SYSTEM_SERVICE_TRACE_INLINE_STRING_LIMIT {
+                break;
+            }
+            let SystemValue::Integer(token) = value else {
+                continue;
+            };
+            let token = *token as u32;
+            if token == 0 || token > AUX_TOKEN_MAX_OFFSET {
+                continue;
+            }
+            if strings.iter().any(|existing| existing.arg_index == arg_index) {
+                continue;
+            }
+            let Some(bytes) = vm.aux_token_c_string(0, token as usize) else {
+                continue;
+            };
+            if !looks_like_asset_entry_name(&bytes) {
+                continue;
+            }
+            push_inline_string(&mut strings, arg_index, &bytes);
+        }
     }
     strings
+}
+
+const AUX_TOKEN_MAX_OFFSET: u32 = 0x0001_0000;
+
+fn push_inline_string(
+    strings: &mut Vec<SystemServiceTraceInlineString>,
+    arg_index: usize,
+    bytes: &[u8],
+) {
+    let byte_len = bytes.len().min(SYSTEM_SERVICE_TRACE_INLINE_STRING_MAX_BYTES);
+    strings.push(SystemServiceTraceInlineString {
+        arg_index,
+        byte_len,
+        full_len: bytes.len(),
+        hash: fnv1a64(bytes) as u32,
+        bytes: bytes[..byte_len].to_vec(),
+    });
+}
+
+/// Heuristic gate so aux-token resolution only records strings that look like
+/// real asset entry names (printable ASCII with at least one alphanumeric run),
+/// avoiding noise from unrelated integer arguments that happen to index live
+/// aux memory.
+fn looks_like_asset_entry_name(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 || bytes.len() > SYSTEM_SERVICE_TRACE_INLINE_STRING_MAX_BYTES {
+        return false;
+    }
+    let mut alnum = 0usize;
+    for &byte in bytes {
+        if !(0x20..=0x7e).contains(&byte) {
+            return false;
+        }
+        if byte.is_ascii_alphanumeric() {
+            alnum += 1;
+        }
+    }
+    alnum * 2 >= bytes.len()
 }
 
 fn integer_arg_bounds(args: &[SystemValue<'_>]) -> (usize, u64, u64) {

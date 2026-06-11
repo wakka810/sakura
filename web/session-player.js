@@ -9,7 +9,38 @@ const INITIAL_SCENARIO_MAX_BYTES = 256 * 1024;
 
 const decoder = new TextDecoder("shift_jis");
 
+function asciiName(nameBytes) {
+  if (!nameBytes) return "";
+  let s = "";
+  for (const b of nameBytes) { if (b === 0) break; s += String.fromCharCode(b); }
+  return s;
+}
+
+// Try a specific scenario record by exact entry name (e.g. the opening 00_op_01).
+async function tryScenarioByName(catalog, core, wantName) {
+  for (const record of catalog.recordsByKind(PAYLOAD_KIND_DSC)) {
+    if (asciiName(record.name).toLowerCase() !== wantName) continue;
+    const payload = await catalog.readPayload(record);
+    if (core.payloadKind(payload.slice(0, 16)) !== PAYLOAD_KIND_DSC) return null;
+    const summary = core.dscScriptSummary(payload);
+    if (summary?.kind !== SCENARIO_KIND) return null;
+    const handle = core.scenarioSessionCreate(payload);
+    if (handle === 0) return null;
+    const player = createPlayer(core, handle);
+    if (!player.step()) { core.scenarioSessionDestroy(handle); return null; }
+    player.safeState.scenarioName = wantName;
+    return player;
+  }
+  return null;
+}
+
 export async function createInitialScenarioPlayer(catalog, core) {
+  // Faithful playback starts at the opening narration (00_op_01).
+  const opening = await tryScenarioByName(catalog, core, "00_op_01");
+  if (opening) {
+    createInitialScenarioPlayer.lastProbe = { scanned: 1, skippedLarge: 0, ready: true };
+    return opening;
+  }
   let scanned = 0;
   let skippedLarge = 0;
   createInitialScenarioPlayer.lastProbe = { scanned, skippedLarge, ready: false };
@@ -132,7 +163,7 @@ export function paintScenarioEvent(context, canvas, event) {
   context.strokeStyle = "rgba(255, 255, 255, 0.45)";
   context.strokeRect(x, y, canvas.width - x * 2, boxHeight);
   context.fillStyle = "#f7f3e8";
-  context.font = "24px sans-serif";
+  context.font = "24px 'Noto Sans CJK JP', 'Yu Gothic', 'MS Gothic', sans-serif";
   if (event.kind === EVENT_MESSAGE) {
     drawWrappedText(context, event.text, x + 24, y + 48, canvas.width - x * 2 - 48, 30, 3);
   } else if (event.kind === EVENT_CHOICE) {

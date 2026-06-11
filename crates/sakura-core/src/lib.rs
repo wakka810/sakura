@@ -3,6 +3,8 @@ pub mod audio;
 mod bytes;
 pub mod catalog;
 pub mod dsc;
+pub mod sdc;
+pub mod flagdb;
 pub mod error;
 mod ffi;
 pub mod image;
@@ -36,10 +38,12 @@ pub use catalog::{
     ArchiveId, ArchiveSummary, AssetCatalog, AssetLocation, AssetRecord, DuplicatePolicy,
 };
 pub use dsc::{decompress_dsc, DSC_MAGIC};
+pub use sdc::{decompress_sdc, is_sdc, SDC_MAGIC};
+pub use flagdb::{flag_name_hash, FlagDb, FlagError};
 pub use error::{Result, SakuraError};
 pub use image::{
-    cbg_to_rgba, decode_cbg, decrypt_cbg_stream, read_cbg_metadata, CbgImage, CbgMetadata,
-    CbgPixelFormat, COMPRESSED_BG_MAGIC,
+    cbg_to_rgba, decode_cbg, decode_raw_bitmap, decrypt_cbg_stream, read_cbg_metadata, CbgImage,
+    CbgMetadata, CbgPixelFormat, COMPRESSED_BG_MAGIC,
 };
 pub use install_manifest::InstallManifest;
 pub use render::RgbaSurface;

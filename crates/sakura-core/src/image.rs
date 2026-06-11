@@ -127,6 +127,72 @@ pub fn decode_cbg(data: &[u8]) -> Result<CbgImage> {
     decode_cbg_v1(data, &meta)
 }
 
+/// Maximum width/height accepted for a magic-less raw bitmap. Guards against
+/// misinterpreting non-image payloads (e.g. compiled scripts) as bitmaps.
+const RAW_BITMAP_MAX_DIMENSION: usize = 16384;
+
+/// Decodes a magic-less raw bitmap as produced by DSC-compressed BGI system and
+/// scene graphics (e.g. the `SGCG*` CGs). The header is 16 bytes: `u16` width,
+/// `u16` height, `u32` bits-per-pixel, then 8 reserved bytes, followed by
+/// tightly packed bottom-of-header pixel rows (BGR/BGRA, little-endian).
+///
+/// Validation is strict — the declared dimensions must exactly account for the
+/// remaining payload — so that arbitrary DSC payloads (scripts, tables) are not
+/// mistaken for bitmaps.
+pub fn decode_raw_bitmap(data: &[u8]) -> Result<CbgImage> {
+    if data.len() < 16 {
+        return Err(SakuraError::InvalidImage(
+            "raw bitmap header is truncated".to_owned(),
+        ));
+    }
+    let width = u16::from_le_bytes([data[0], data[1]]);
+    let height = u16::from_le_bytes([data[2], data[3]]);
+    let bits_per_pixel = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+    if width == 0
+        || height == 0
+        || width as usize > RAW_BITMAP_MAX_DIMENSION
+        || height as usize > RAW_BITMAP_MAX_DIMENSION
+    {
+        return Err(SakuraError::InvalidImage(
+            "raw bitmap dimensions are out of range".to_owned(),
+        ));
+    }
+    let (pixel_size, mut format) = match bits_per_pixel {
+        32 => (4usize, CbgPixelFormat::Bgra32),
+        24 => (3usize, CbgPixelFormat::Bgr24),
+        8 => (1usize, CbgPixelFormat::Gray8),
+        other => {
+            return Err(SakuraError::InvalidImage(format!(
+                "unsupported raw bitmap depth {other}"
+            )))
+        }
+    };
+    let stride = (width as usize)
+        .checked_mul(pixel_size)
+        .ok_or_else(|| SakuraError::InvalidImage("raw bitmap stride overflows".to_owned()))?;
+    let body_len = stride
+        .checked_mul(height as usize)
+        .ok_or_else(|| SakuraError::InvalidImage("raw bitmap size overflows".to_owned()))?;
+    let pixels = data
+        .get(16..16usize.checked_add(body_len).unwrap_or(usize::MAX))
+        .ok_or_else(|| SakuraError::InvalidImage("raw bitmap body is truncated".to_owned()))?
+        .to_vec();
+    // Background CGs are stored 32bpp with an all-zero alpha channel that is not
+    // meant as straight transparency; rendering it verbatim would erase the
+    // image. When no pixel carries alpha, treat the bitmap as opaque. Bitmaps
+    // with a genuine alpha gradient (UI parts, masks) keep their alpha.
+    if format == CbgPixelFormat::Bgra32 && pixels.chunks_exact(4).all(|px| px[3] == 0) {
+        format = CbgPixelFormat::Bgr32;
+    }
+    Ok(CbgImage {
+        width,
+        height,
+        stride,
+        format,
+        pixels,
+    })
+}
+
 pub fn cbg_to_rgba(image: &CbgImage) -> Result<Vec<u8>> {
     let width = image.width as usize;
     let height = image.height as usize;
@@ -563,6 +629,51 @@ impl BgiKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn raw_bitmap_header(width: u16, height: u16, bpp: u32) -> Vec<u8> {
+        let mut header = vec![0u8; 16];
+        header[0..2].copy_from_slice(&width.to_le_bytes());
+        header[2..4].copy_from_slice(&height.to_le_bytes());
+        header[4..8].copy_from_slice(&bpp.to_le_bytes());
+        header
+    }
+
+    #[test]
+    fn decodes_raw_bgra_bitmap_with_alpha() -> Result<()> {
+        // 2x1 BGRA: pixel0 = blue opaque, pixel1 = red half-alpha.
+        let mut data = raw_bitmap_header(2, 1, 32);
+        data.extend_from_slice(&[0xff, 0x00, 0x00, 0xff]); // B,G,R,A
+        data.extend_from_slice(&[0x00, 0x00, 0xff, 0x80]);
+        let image = decode_raw_bitmap(&data)?;
+        assert_eq!((image.width, image.height), (2, 1));
+        assert_eq!(image.format, CbgPixelFormat::Bgra32);
+        let rgba = cbg_to_rgba(&image)?;
+        assert_eq!(rgba, vec![0x00, 0x00, 0xff, 0xff, 0xff, 0x00, 0x00, 0x80]);
+        Ok(())
+    }
+
+    #[test]
+    fn treats_zero_alpha_raw_bitmap_as_opaque() -> Result<()> {
+        // A full white image stored 32bpp with an all-zero alpha channel should
+        // render opaque rather than fully transparent.
+        let mut data = raw_bitmap_header(2, 1, 32);
+        data.extend_from_slice(&[0xff, 0xff, 0xff, 0x00]);
+        data.extend_from_slice(&[0xff, 0xff, 0xff, 0x00]);
+        let image = decode_raw_bitmap(&data)?;
+        assert_eq!(image.format, CbgPixelFormat::Bgr32);
+        let rgba = cbg_to_rgba(&image)?;
+        assert_eq!(rgba, vec![0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_non_bitmap_payload_as_raw() {
+        // A compiled-script payload must not be misread as a raw bitmap: the
+        // declared dimensions cannot account for the payload length.
+        let mut data = b"BurikoCompiledScriptVer1.00\0".to_vec();
+        data.resize(256, 0);
+        assert!(decode_raw_bitmap(&data).is_err());
+    }
 
     #[test]
     fn reads_synthetic_cbg_metadata() -> Result<()> {

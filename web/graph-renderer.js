@@ -193,7 +193,7 @@ export function renderGraphQueue(context, canvas, queue, runtime = null) {
 }
 
 function buildGraphRenderModel(events) {
-  const orderedEvents = Array.isArray(events) ? [...events] : [];
+  const orderedEvents = (Array.isArray(events) ? events : []).map(foldInlineStringsIntoSamples);
   const namedAssetContexts = buildNamedAssetContexts(orderedEvents);
   const auxValueEntryContexts = buildAuxValueEntryContexts(orderedEvents);
   const titleImageContexts = buildTitleImageContexts(orderedEvents, namedAssetContexts);
@@ -810,11 +810,14 @@ async function resolveNamedGraphPayload(runtime, archiveName, entryName) {
       await runtime.catalog.readPayloadByArchiveAndNameBytes(archiveBytes, entryBytes)
     ) ?? await runtime.catalog.readPayloadByNameBytes(entryBytes);
   }
+  const direct = (
+    await runtime.catalog.readPayloadByArchiveAndNameBytes(archiveBytes, entryBytes)
+  ) ?? await runtime.catalog.readPayloadByNameBytes(entryBytes);
+  if (direct instanceof Uint8Array) {
+    return direct;
+  }
   const parentPayload = await runtime.catalog.readPayloadByNameBytes(archiveBytes);
-  const nested = parentPayload ? readArc20EntryPayload(parentPayload, entryName) : null;
-  return nested
-    ?? await runtime.catalog.readPayloadByArchiveAndNameBytes(archiveBytes, entryBytes)
-    ?? await runtime.catalog.readPayloadByNameBytes(entryBytes);
+  return parentPayload ? readArc20EntryPayload(parentPayload, entryName) : null;
 }
 
 async function readArchiveOffsetPayload(runtime, archiveOffset) {
@@ -1549,6 +1552,52 @@ function buildAuxValueEntryContexts(events) {
 
 function sanitizeSampleHint(value) {
   return typeof value === "string" ? value.replace(/\0/g, "").trim() : "";
+}
+
+// Emit-time inline strings (resolved by the core from aux memory at the exact
+// instant a graph command runs) are a reliable alternative to asynchronous
+// memory sampling. Fold them into memorySamples as aux-offset asciiHints so the
+// existing asset/title resolution can consume them uniformly.
+function foldInlineStringsIntoSamples(event) {
+  const inline = Array.isArray(event?.inlineStrings) ? event.inlineStrings : [];
+  if (inline.length === 0) {
+    return event;
+  }
+  const args = Array.isArray(event?.args) ? event.args : [];
+  const existing = Array.isArray(event?.memorySamples) ? event.memorySamples : [];
+  const synthetic = [];
+  for (const item of inline) {
+    const text = sanitizeSampleHint(typeof item?.text === "string" ? item.text : "");
+    if (!text || !isLikelyEntryName(text)) {
+      continue;
+    }
+    const argIndex = Number.isInteger(item?.argIndex) ? item.argIndex : -1;
+    const rawValue = argIndex >= 0 && args[argIndex] ? (args[argIndex].value ?? 0) >>> 0 : 0;
+    const duplicate = existing.some(
+      (sample) =>
+        sample.argIndex === argIndex
+        && Array.isArray(sample.asciiHints)
+        && sample.asciiHints.includes(text),
+    );
+    if (duplicate) {
+      continue;
+    }
+    synthetic.push({
+      kind: "aux-offset",
+      argIndex,
+      rawValue,
+      address: 0,
+      byteLength: text.length,
+      nonZeroCount: text.length,
+      previewHex: "",
+      previewU32: [],
+      asciiHints: [text],
+    });
+  }
+  if (synthetic.length === 0) {
+    return event;
+  }
+  return { ...event, memorySamples: [...existing, ...synthetic] };
 }
 
 function isLikelyArchiveName(value) {

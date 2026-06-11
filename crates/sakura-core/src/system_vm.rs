@@ -1466,6 +1466,15 @@ impl<'a> SystemVm<'a> {
         read_sparse_c_string(self.aux_mem.get(slot)?, offset)
     }
 
+    /// Reads a NUL-terminated string from an auxiliary memory slot at the given
+    /// byte offset. Used to resolve graph layer/archive tokens (small integer
+    /// arguments that index into aux slot 0) into their bound asset entry names
+    /// at the exact instant a graph service call is recorded, while the binding
+    /// is still present in aux memory.
+    pub(crate) fn aux_token_c_string(&self, slot: usize, offset: usize) -> Option<Vec<u8>> {
+        self.read_aux_c_string(slot, offset)
+    }
+
     fn read_program_c_string(&self, offset: usize) -> Option<Vec<u8>> {
         let tail = self.program.data().get(offset..)?;
         let len = tail.iter().position(|byte| *byte == 0)?;
@@ -1500,6 +1509,8 @@ impl<'a> SystemVm<'a> {
     }
 
     fn read_global_value(&self, slot: usize, offset: usize, width: u8) -> SystemValue<'a> {
+        if slot == 0 && self.script_index == 8 && (0x1d000..0x1f000).contains(&offset) {
+        }
         if width == 2 {
             if let Some(value) = self
                 .global_slots
@@ -2154,7 +2165,7 @@ struct SprintfSpec {
 fn service_accepts_pointer_strings(family: SystemCallFamily, service_id: u8) -> bool {
     match family {
         SystemCallFamily::System => {
-            matches!(service_id, 0x30 | 0x31 | 0x32 | 0x34 | 0x35 | 0x40)
+            matches!(service_id, 0x30 | 0x31 | 0x32 | 0x34 | 0x35 | 0x40 | 0x88 | 0x8a | 0x8b)
         }
         SystemCallFamily::Sound => true,
         _ => false,

@@ -627,9 +627,15 @@ fn image_rgba_dimensions(data: &[u8]) -> crate::Result<(usize, usize)> {
     if let Ok(meta) = read_cbg_metadata(data) {
         return Ok((meta.width as usize, meta.height as usize));
     }
+    if let Ok(image) = crate::image::decode_raw_bitmap(data) {
+        return Ok((image.width as usize, image.height as usize));
+    }
     let decompressed = decompress_dsc(data)?;
-    let meta = read_cbg_metadata(&decompressed)?;
-    Ok((meta.width as usize, meta.height as usize))
+    if let Ok(meta) = read_cbg_metadata(&decompressed) {
+        return Ok((meta.width as usize, meta.height as usize));
+    }
+    let image = crate::image::decode_raw_bitmap(&decompressed)?;
+    Ok((image.width as usize, image.height as usize))
 }
 
 fn decode_image_rgba(data: &[u8]) -> crate::Result<RgbaSurface> {
@@ -637,8 +643,16 @@ fn decode_image_rgba(data: &[u8]) -> crate::Result<RgbaSurface> {
         let rgba = cbg_to_rgba(&image)?;
         return RgbaSurface::from_rgba(u32::from(image.width), u32::from(image.height), rgba);
     }
+    if let Ok(image) = crate::image::decode_raw_bitmap(data) {
+        let rgba = cbg_to_rgba(&image)?;
+        return RgbaSurface::from_rgba(u32::from(image.width), u32::from(image.height), rgba);
+    }
     let decompressed = decompress_dsc(data)?;
-    let image = decode_cbg(&decompressed)?;
+    if let Ok(image) = decode_cbg(&decompressed) {
+        let rgba = cbg_to_rgba(&image)?;
+        return RgbaSurface::from_rgba(u32::from(image.width), u32::from(image.height), rgba);
+    }
+    let image = crate::image::decode_raw_bitmap(&decompressed)?;
     let rgba = cbg_to_rgba(&image)?;
     RgbaSurface::from_rgba(u32::from(image.width), u32::from(image.height), rgba)
 }

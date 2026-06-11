@@ -7,10 +7,17 @@ use crate::sniff::PayloadKind;
 use crate::script_library::ScriptLibrary;
 use crate::system_bytecode::SystemCallFamily;
 use crate::system_vm::{SystemValue, SystemVm, SystemVmEvent};
+use crate::flagdb::{FlagDb, FlagError};
 use crate::system_vm_ops::system_value_integer;
 use std::collections::BTreeMap;
 
 const HOST_ALLOC_BASE: u32 = 0x2000_0000;
+
+/// Logical name scrdrv passes to the System file-query services (0x30/0x31/0x34/0x35)
+/// when it loads the strings database. In retail layouts this asset lives inside
+/// `data01xxx.arc`; in the user's install it is the standalone `BGI.gdb` sidecar,
+/// so the host resolves this name against `Runtime::strings_db` rather than the catalog.
+const STRINGS_DB_QUERY_NAME: &[u8] = b"StringsDB";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SystemHostRunSummary {
@@ -80,6 +87,7 @@ pub struct SystemAssetRequest {
 enum FileQueryTarget<'a> {
     Asset(&'a AssetRecord),
     Archive(&'a ArchiveSummary),
+    StringsDb(&'a [u8]),
 }
 
 impl<'a> FileQueryTarget<'a> {
@@ -87,6 +95,7 @@ impl<'a> FileQueryTarget<'a> {
         match self {
             Self::Asset(record) => record.name().as_bytes(),
             Self::Archive(summary) => summary.name().map(ArcName::as_bytes).unwrap_or(&[]),
+            Self::StringsDb(_) => STRINGS_DB_QUERY_NAME,
         }
     }
 
@@ -94,6 +103,7 @@ impl<'a> FileQueryTarget<'a> {
         match self {
             Self::Asset(record) => record.location().size,
             Self::Archive(summary) => summary.archive_len().min(u32::MAX as usize) as u32,
+            Self::StringsDb(data) => data.len().min(u32::MAX as usize) as u32,
         }
     }
 }
@@ -272,6 +282,7 @@ pub struct SystemHost<'a> {
     graph_1f: Graph1fState,
     scrmain_init: ScrmainInitState,
     archive_bindings: BTreeMap<u32, ArchiveBindingState>,
+    flags: FlagDb,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,6 +296,7 @@ pub(crate) struct SystemHostSnapshot {
     pub graph_1f: Graph1fState,
     pub scrmain_init: ScrmainInitState,
     pub archive_bindings: BTreeMap<u32, ArchiveBindingState>,
+    pub flags: FlagDb,
 }
 
 impl<'a> SystemHost<'a> {
@@ -303,6 +315,7 @@ impl<'a> SystemHost<'a> {
             graph_1f: Graph1fState::default(),
             scrmain_init: ScrmainInitState::default(),
             archive_bindings: BTreeMap::new(),
+            flags: FlagDb::new(),
         }
     }
 
@@ -321,6 +334,7 @@ impl<'a> SystemHost<'a> {
             graph_1f: Graph1fState::default(),
             scrmain_init: ScrmainInitState::default(),
             archive_bindings: BTreeMap::new(),
+            flags: FlagDb::new(),
         }
     }
 
@@ -339,6 +353,7 @@ impl<'a> SystemHost<'a> {
             graph_1f: Graph1fState::default(),
             scrmain_init: ScrmainInitState::default(),
             archive_bindings: BTreeMap::new(),
+            flags: FlagDb::new(),
         }
     }
 
@@ -361,6 +376,7 @@ impl<'a> SystemHost<'a> {
             graph_1f: self.graph_1f,
             scrmain_init: self.scrmain_init,
             archive_bindings: self.archive_bindings.clone(),
+            flags: self.flags.clone(),
         }
     }
 
@@ -379,6 +395,7 @@ impl<'a> SystemHost<'a> {
             graph_1f: snapshot.graph_1f,
             scrmain_init: snapshot.scrmain_init,
             archive_bindings: snapshot.archive_bindings,
+            flags: snapshot.flags,
         }
     }
 
@@ -620,6 +637,7 @@ impl<'a> SystemHost<'a> {
             FileQueryTarget::Archive(summary) => self
                 .runtime?
                 .archive_data_by_name(summary.name()?.as_bytes()),
+            FileQueryTarget::StringsDb(data) => Some(data),
         }
     }
 
@@ -627,15 +645,29 @@ impl<'a> SystemHost<'a> {
         let catalog = self.catalog?;
         args.iter().rev().find_map(|value| {
             let name = value.string_bytes()?;
-            catalog
-                .find_by_query_name_bytes(name)
-                .map(FileQueryTarget::Asset)
+            self.strings_db_target(name)
+                .or_else(|| {
+                    catalog
+                        .find_by_query_name_bytes(name)
+                        .map(FileQueryTarget::Asset)
+                })
                 .or_else(|| {
                     catalog
                         .find_archive_by_query_name_bytes(name)
                         .map(FileQueryTarget::Archive)
                 })
         })
+    }
+
+    /// Resolves scrdrv's `StringsDB` file query to the mounted strings-database
+    /// sidecar. Without this the query would match the `data01xxx.arc` archive
+    /// (the other argument scrdrv passes) and the load would hand back archive
+    /// bytes, which scrdrv rejects as a corrupted strings database.
+    fn strings_db_target(&self, name: &[u8]) -> Option<FileQueryTarget<'a>> {
+        if !name.eq_ignore_ascii_case(STRINGS_DB_QUERY_NAME) {
+            return None;
+        }
+        self.runtime?.strings_db().map(FileQueryTarget::StringsDb)
     }
 
     fn record_asset_query(&mut self, service_id: u8, args: &[SystemValue<'_>]) {
@@ -769,15 +801,82 @@ impl<'a> SystemHost<'a> {
         match service_id {
             0x21 => Some(self.archive_query_result(args)),
             0x33 => Some(SystemHostResult::Void),
-            0x88 => Some(self.archive_binding_result(args)),
+            0x88 => Some(self.cflag_ensure(args)),
+            0x8a => Some(self.cflag_setrange(args)),
+            0x8b => Some(self.cflag_getbit(args)),
             0xe9 => Some(self.archive_descriptor_result(args)),
             0x6a => Some(self.scrmain_init.service_6a(args)),
-            0x8b => Some(self.scrmain_init.service_8b(args)),
-            0x8a => Some(self.scrmain_init.service_8a(args)),
-            0x5f => Some(self.scrmain_init.service_5f(args)),
+            0x5f => Some(SystemHostResult::Void),
             0x11 => Some(self.scrmain_init.service_11(args)),
             0x16 => Some(self.scrmain_init.service_16(args)),
             _ => None,
+        }
+    }
+
+    /// CFlag ensure (System 0x88, BGI sub_483A30 -> sub_4662A0 -> sub_444F10):
+    /// pop bitcount, read name string, create/resize the named bit-array.
+    /// Pushes BOOL success (the engine returns `sub_444F10(...) == 0`).
+    fn cflag_ensure(&mut self, args: &[SystemValue<'_>]) -> SystemHostResult {
+        let Some((si, name)) = flag_name_arg(args) else {
+            return SystemHostResult::Integer(0);
+        };
+        let name = name.to_vec();
+        let bitcount = nth_integer_arg(args, si + 1)
+            .or_else(|| args.iter().filter_map(system_value_integer).last())
+            .unwrap_or(0) as usize;
+        self.flags.ensure(&name, bitcount);
+        SystemHostResult::Integer(1)
+    }
+
+    /// CFlag set-range (System 0x8a, BGI sub_483AE0 -> sub_4662D0 -> sub_4450D0):
+    /// pop count, value, start, read name; set/clear bits [start, start+count).
+    /// Pushes the engine's mapped status (0 ok, 1 not-found, 2 oob, 3 bad-len).
+    fn cflag_setrange(&mut self, args: &[SystemValue<'_>]) -> SystemHostResult {
+        let Some((si, name)) = flag_name_arg(args) else {
+            return SystemHostResult::Integer(1);
+        };
+        let name = name.to_vec();
+        let start = nth_integer_arg(args, si + 1).unwrap_or(0) as usize;
+        let value = nth_integer_arg(args, si + 2).unwrap_or(0) != 0;
+        let count = nth_integer_arg(args, si + 3).unwrap_or(0) as usize;
+        let status = match self.flags.set_range(&name, start, count, value) {
+            Ok(()) => 0u64,
+            Err(FlagError::NotFound) => 1,
+            Err(FlagError::OutOfRange) => 2,
+            Err(FlagError::BadLength) => 3,
+        };
+        SystemHostResult::Integer(status)
+    }
+
+    /// CFlag get-bit (System 0x8b, BGI sub_483BA0 -> sub_4662F0 -> sub_445170):
+    /// pop bit, read name, pop out-pointer; write the bit value (DWORD) to
+    /// `*out` and push the status (0 ok, 1 not-found, 2 oob).
+    fn cflag_getbit(&mut self, args: &[SystemValue<'_>]) -> SystemHostResult {
+        let Some((si, name)) = flag_name_arg(args) else {
+            return SystemHostResult::Integer(1);
+        };
+        let name = name.to_vec();
+        let bit = nth_integer_arg(args, si + 1).unwrap_or(0) as usize;
+        let (status, value) = match self.flags.get_bit(&name, bit) {
+            Ok(v) => (0u64, u64::from(v)),
+            Err(FlagError::NotFound) => (1, 0),
+            Err(FlagError::OutOfRange) => (2, 0),
+            Err(FlagError::BadLength) => (3, 0),
+        };
+        let out_arg = si.checked_sub(1).and_then(|i| args.get(i));
+        let mut effect = SystemHostEffect::new();
+        if let Some(addr) = out_arg.and_then(system_value_local_address) {
+            effect.push_local_write(addr, 2, value);
+        } else if let Some(addr) = out_arg.and_then(system_value_integer) {
+            effect.push_write(addr as u32, 2, value);
+        }
+        if effect.writes().is_empty() {
+            SystemHostResult::Integer(status)
+        } else {
+            SystemHostResult::ValueAndEffect {
+                value: SystemHostValue::Integer(status),
+                effect,
+            }
         }
     }
 
@@ -1038,6 +1137,15 @@ impl ScrmainInitState {
     fn service_16(&mut self, _args: &[SystemValue<'_>]) -> SystemHostResult {
         SystemHostResult::Integer(0)
     }
+}
+
+/// Finds the flag-name string operand and its index within the arg slice
+/// (there is exactly one string arg in the CFlag services).
+fn flag_name_arg<'b>(args: &'b [SystemValue<'_>]) -> Option<(usize, &'b [u8])> {
+    args.iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, value)| value.string_bytes().map(|bytes| (i, bytes)))
 }
 
 fn nth_integer_arg(args: &[SystemValue<'_>], index: usize) -> Option<u64> {

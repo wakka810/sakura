@@ -27,6 +27,7 @@ pub struct Runtime {
     catalog: AssetCatalog,
     scripts: ScriptLibrary,
     archive_data: Vec<Option<Vec<u8>>>,
+    strings_db: Option<Vec<u8>>,
     input: RuntimeInputState,
 }
 
@@ -37,6 +38,7 @@ impl Runtime {
             catalog: AssetCatalog::new(),
             scripts: ScriptLibrary::new(),
             archive_data: Vec::new(),
+            strings_db: None,
             input: RuntimeInputState::default(),
         }
     }
@@ -176,6 +178,18 @@ impl Runtime {
     pub fn archive_data_by_name(&self, name: &[u8]) -> Option<&[u8]> {
         let archive = self.catalog.find_archive_by_name_bytes(name)?;
         self.archive_data.get(archive.id().index())?.as_deref()
+    }
+
+    /// Mounts the standalone strings-database sidecar (the install's `BGI.gdb`,
+    /// `SDC FORMAT` blob). Unlike scripts and media it is not packed inside an
+    /// `*.arc` archive, so scrdrv's `StringsDB` file query is resolved against
+    /// this blob rather than against the catalog.
+    pub fn mount_strings_db(&mut self, data: Vec<u8>) {
+        self.strings_db = Some(data);
+    }
+
+    pub fn strings_db(&self) -> Option<&[u8]> {
+        self.strings_db.as_deref()
     }
 
     pub fn archive_len_by_name(&self, name: &[u8]) -> Option<usize> {

@@ -107,6 +107,7 @@ pub struct ScenarioVm<'a> {
     max_code_address: usize,
     halted: bool,
     string_stack: Vec<StringOperand>,
+    int_stack: Vec<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +158,7 @@ impl<'a> ScenarioVm<'a> {
             max_code_address: 0,
             halted: false,
             string_stack: Vec::new(),
+            int_stack: Vec::new(),
         }
     }
 
@@ -194,6 +196,7 @@ impl<'a> ScenarioVm<'a> {
             max_code_address: checkpoint.max_code_address,
             halted: checkpoint.halted,
             string_stack,
+            int_stack: Vec::new(),
         })
     }
 
@@ -202,6 +205,7 @@ impl<'a> ScenarioVm<'a> {
             let offset = self.cursor;
             let opcode = self.read_opcode()?;
             match opcode {
+                0x0000 => { let v = self.read_i32()?; self.int_stack.push(v); }
                 0x0001 => self.read_code_address_operand()?,
                 0x0003 => self.read_string_address_operand()?,
                 0x001c => {
@@ -216,6 +220,7 @@ impl<'a> ScenarioVm<'a> {
 
             if matches!(opcode, 0x007e | 0x007f | 0x00fe) {
                 self.string_stack.clear();
+                self.int_stack.clear();
             }
             if matches!(opcode, 0x001b | 0x00f4)
                 && self.max_code_address < self.cursor - self.program.header.code_offset
@@ -224,6 +229,29 @@ impl<'a> ScenarioVm<'a> {
             }
         }
         Ok(ScenarioEvent::Halted)
+    }
+
+    /// Walks the whole script recording an opcode histogram (debug/audit).
+    pub fn opcode_histogram(&mut self) -> Result<std::collections::BTreeMap<u32, usize>> {
+        let mut hist = std::collections::BTreeMap::new();
+        while !self.halted {
+            let offset = self.cursor;
+            let opcode = self.read_opcode()?;
+            *hist.entry(opcode).or_insert(0usize) += 1;
+            match opcode {
+                0x0001 => self.read_code_address_operand()?,
+                0x0003 => self.read_string_address_operand()?,
+                0x001c => { let _ = self.handle_user_function(offset)?; }
+                0x0140 | 0x0143 => { let _ = self.handle_message(offset, opcode)?; }
+                0x0160 => { let _ = self.handle_choice(offset, opcode)?; }
+                _ => self.read_template_operands(opcode)?,
+            }
+            if matches!(opcode, 0x007e | 0x007f | 0x00fe) { self.string_stack.clear(); }
+            if matches!(opcode, 0x001b | 0x00f4)
+                && self.max_code_address < self.cursor - self.program.header.code_offset
+            { self.halted = true; }
+        }
+        Ok(hist)
     }
 
     fn read_opcode(&mut self) -> Result<u32> {

@@ -1133,7 +1133,11 @@ fn write_service_trace_summary(
     write_u32(out, 36, u32::from(summary.event_limited));
 
     let mut cursor = 40usize;
-    for event in &trace.recorded_services {
+    for event in trace
+        .recorded_services
+        .iter()
+        .take(RUNTIME_SERVICE_TRACE_MAX_EVENTS)
+    {
         write_u32(out, cursor, event.event_index as u32);
         write_u32(out, cursor + 4, event.depth as u32);
         write_u32(out, cursor + 8, family_code(event.family).into());
@@ -2926,6 +2930,286 @@ mod tests {
 
     #[test]
     #[ignore = "requires SAKURA_INSTALL_DIR pointing at the user-owned local install"]
+    fn zz_trace_title_flow() -> Result<()> {
+        let game_dir = env::var_os("SAKURA_INSTALL_DIR")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                SakuraError::InvalidRuntime(
+                    "SAKURA_INSTALL_DIR is required for this ignored local-install probe"
+                        .to_owned(),
+                )
+            })?;
+        let mut runtime = Runtime::new(RuntimeConfig::default());
+        for path in collect_archive_files(&game_dir)? {
+            let data = fs::read(&path).map_err(|error| {
+                SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
+            })?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
+        }
+
+        // Mount the standalone strings-database sidecar (BGI.gdb, SDC FORMAT)
+        // so scrdrv's StringsDB file query resolves to it instead of falling
+        // through to the data01xxx.arc archive match.
+        if let Ok(strings_db) = fs::read(game_dir.join("BGI.gdb")) {
+            runtime.mount_strings_db(strings_db);
+        }
+
+        let entry_index = runtime
+            .script_index_by_name(b"scrdrv._bp")
+            .ok_or_else(|| SakuraError::InvalidRuntime("scrdrv._bp is missing".to_owned()))?;
+        let entry = runtime
+            .scripts()
+            .id_from_index(entry_index)
+            .ok_or_else(|| SakuraError::InvalidRuntime("scrdrv._bp id missing".to_owned()))?;
+
+        // Helper: resolve a script index to its mounted name (lossy UTF-8).
+        let name_of = |idx: usize| -> String {
+            runtime
+                .scripts()
+                .id_from_index(idx)
+                .and_then(|id| runtime.scripts().name_by_id(id))
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                .unwrap_or_else(|| "<unknown>".to_owned())
+        };
+
+        let host = SystemHost::with_runtime(&runtime);
+        let mut system = SystemRuntime::new(runtime.scripts(), host);
+        system.push_script(entry, Vec::new())?;
+
+        println!(
+            "zz_trace_title_flow_version=1 entry_index={} entry_name={}",
+            entry_index,
+            name_of(entry_index),
+        );
+
+        // Ordered list of DISTINCT scripts as they are entered (by transition).
+        let mut ordered: Vec<usize> = Vec::new();
+        // First-seen ordered set (deduped) for the final report.
+        let mut first_seen: Vec<usize> = Vec::new();
+        let mut last_script: Option<usize> = None;
+        let mut title_entered = false;
+        let mut total_events = 0usize;
+        let mut step = 0usize;
+
+        // Record the initial frame before any stepping.
+        if let Some(frame) = system.current_frame_state() {
+            let idx = frame.script_index;
+            println!(
+                "zz_trace script_index_change step=init script_index={} name={}",
+                idx,
+                name_of(idx),
+            );
+            ordered.push(idx);
+            first_seen.push(idx);
+            last_script = Some(idx);
+            if idx == 6 {
+                title_entered = true;
+            }
+        }
+
+        while total_events < 600 {
+            let (summary, trace) = system.run_with_service_trace(1, 100_000, 4)?;
+            total_events += summary.event_count.max(1);
+            step += 1;
+
+            // (a) detect script_index transitions.
+            if let Some(frame) = system.current_frame_state() {
+                let idx = frame.script_index;
+                if last_script != Some(idx) {
+                    println!(
+                        "zz_trace script_index_change step={} events={} script_index={} name={} cursor={} last_off=0x{:x}",
+                        step,
+                        total_events,
+                        idx,
+                        name_of(idx),
+                        frame.cursor,
+                        frame.last_instruction_offset,
+                    );
+                    ordered.push(idx);
+                    if !first_seen.contains(&idx) {
+                        first_seen.push(idx);
+                    }
+                    if idx == 6 {
+                        // (b) title (script index 6) entered.
+                        title_entered = true;
+                        println!("zz_trace TITLE_ENTERED step={}", step);
+                    }
+                    last_script = Some(idx);
+                }
+            }
+
+            // (c) UserScriptCall dispatch + last-loaded-script host state.
+            if summary.user_call_event_count > 0
+                || summary.user_load_event_count > 0
+                || summary.host_state.last_loaded_script_string_len != 0
+            {
+                println!(
+                    "zz_trace host_state step={} user_calls={} user_loads={} loaded_len={} loaded_hash=0x{:x} loaded_found={} last_event_kind={:?}",
+                    step,
+                    summary.user_call_event_count,
+                    summary.user_load_event_count,
+                    summary.host_state.last_loaded_script_string_len,
+                    summary.host_state.last_loaded_script_string_hash,
+                    summary.host_state.last_loaded_script_found,
+                    summary.last_event_kind,
+                );
+            }
+
+            // Service events: surface program-load (System 0x40) and any inline
+            // strings, which reveal which script name is being requested/branched on.
+            for event in &trace.recorded_services {
+                let strings: Vec<String> = event
+                    .inline_strings
+                    .iter()
+                    .map(|inline| {
+                        let end = inline
+                            .bytes
+                            .iter()
+                            .position(|byte| *byte == 0)
+                            .unwrap_or(inline.bytes.len());
+                        String::from_utf8_lossy(&inline.bytes[..end]).into_owned()
+                    })
+                    .collect();
+                let is_load = matches!(event.family, crate::SystemCallFamily::System)
+                    && event.service_id == 0x40;
+                if is_load || !strings.is_empty() {
+                    println!(
+                        "zz_trace service step={} family={:?} service=0x{:02x} from_script={} ({}) offset=0x{:x} args={} strings={:?}",
+                        step,
+                        event.family,
+                        event.service_id,
+                        event.script_index,
+                        name_of(event.script_index),
+                        event.instruction_offset,
+                        event.arg_count,
+                        strings,
+                    );
+                }
+            }
+
+            if summary.completed && summary.event_count == 0 {
+                println!("zz_trace completed step={} total_events={}", step, total_events);
+                break;
+            }
+        }
+
+        // Final report.
+        let ordered_names: Vec<String> = ordered.iter().map(|idx| name_of(*idx)).collect();
+        let distinct_names: Vec<String> = first_seen.iter().map(|idx| name_of(*idx)).collect();
+        println!("zz_trace REPORT steps={} total_events={}", step, total_events);
+        println!("zz_trace REPORT transitions_in_order={:?}", ordered_names);
+        println!("zz_trace REPORT distinct_scripts_first_seen={:?}", distinct_names);
+        println!(
+            "zz_trace REPORT distinct_indices_first_seen={:?}",
+            first_seen,
+        );
+        println!("zz_trace REPORT title_index_6_entered={}", title_entered);
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires SAKURA_INSTALL_DIR pointing at the user-owned local install"]
+    fn zz_disasm_scrdrv_strings_db() -> Result<()> {
+        use crate::system_bytecode::{SystemInstructionKind, SystemProgram};
+
+        let game_dir = env::var_os("SAKURA_INSTALL_DIR")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                SakuraError::InvalidRuntime(
+                    "SAKURA_INSTALL_DIR is required for this ignored local-install probe"
+                        .to_owned(),
+                )
+            })?;
+        let mut runtime = Runtime::new(RuntimeConfig::default());
+        for path in collect_archive_files(&game_dir)? {
+            let data = fs::read(&path).map_err(|error| {
+                SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
+            })?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
+        }
+        let entry_index = runtime
+            .script_index_by_name(b"scrdrv._bp")
+            .ok_or_else(|| SakuraError::InvalidRuntime("scrdrv._bp is missing".to_owned()))?;
+        let id = runtime
+            .scripts()
+            .id_from_index(entry_index)
+            .ok_or_else(|| SakuraError::InvalidRuntime("scrdrv._bp id missing".to_owned()))?;
+        let script = runtime
+            .scripts()
+            .script(id)
+            .ok_or_else(|| SakuraError::InvalidRuntime("scrdrv._bp script missing".to_owned()))?;
+        let program = SystemProgram::parse(script.decompressed())?;
+
+        // Scan the decompressed program for interesting ASCII names.
+        let bytes = script.decompressed();
+        for needle in [b"title".as_slice(), b"scrmain".as_slice(), b"StringsDB".as_slice()] {
+            let mut from = 0usize;
+            while let Some(pos) = bytes[from..]
+                .windows(needle.len())
+                .position(|w| w.eq_ignore_ascii_case(needle))
+            {
+                let at = from + pos;
+                let end = bytes[at..]
+                    .iter()
+                    .position(|b| *b == 0)
+                    .map(|p| at + p)
+                    .unwrap_or(bytes.len());
+                println!(
+                    "scan {:?} @0x{:x}: {:?}",
+                    String::from_utf8_lossy(needle),
+                    at,
+                    String::from_utf8_lossy(&bytes[at..end.min(at + 32)])
+                );
+                from = at + 1;
+            }
+        }
+
+        let ranges = [(0x60usize, 0x140usize), (0xd60usize, 0xe90usize)];
+        for (start, stop) in ranges {
+            println!("--- disasm 0x{start:x}..0x{stop:x} ---");
+            let mut offset = start;
+            while offset < stop && offset < program.code_end() {
+                let instruction = program.decode(offset)?;
+                let detail = match &instruction.kind {
+                    SystemInstructionKind::GetString { bytes, target, .. } => format!(
+                        "GetString target={:?} bytes={:?}",
+                        target,
+                        bytes.map(|b| String::from_utf8_lossy(b).into_owned())
+                    ),
+                    SystemInstructionKind::GetCodeOffset { target, .. } => {
+                        format!("GetCodeOffset target={target:?}")
+                    }
+                    SystemInstructionKind::ServiceCall {
+                        family, service_id, ..
+                    } => format!("ServiceCall {family:?} service=0x{service_id:02x}"),
+                    SystemInstructionKind::Branch { kind } => format!("Branch {kind:?}"),
+                    other => format!("{other:?}"),
+                };
+                println!(
+                    "disasm 0x{:04x}: 0x{:02x} {}",
+                    offset, instruction.opcode, detail
+                );
+                offset = instruction.next_offset;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires SAKURA_INSTALL_DIR pointing at the user-owned local install"]
     fn traces_real_scrdrv_session_graph_inline_strings() -> Result<()> {
         let game_dir = env::var_os("SAKURA_INSTALL_DIR")
             .map(PathBuf::from)
@@ -3454,7 +3738,7 @@ mod tests {
             let (_summary, _trace) = system_runtime.run_with_service_trace(1, 100_000, 4)?;
             let frame = system_runtime.current_frame_state();
             if frame.as_ref().is_some_and(|state| {
-                state.script_index == 6
+                state.script_index == 8
                     && state.cursor == 0x370
                     && state.last_instruction_offset == 0x36e
             }) {
@@ -3630,7 +3914,7 @@ mod tests {
             let (_summary, _trace) = system_runtime.run_with_service_trace(1, 100_000, 4)?;
             let frame = system_runtime.current_frame_state();
             if frame.as_ref().is_some_and(|state| {
-                state.script_index == 6 && state.last_instruction_offset == 0x36e
+                state.script_index == 8 && state.last_instruction_offset == 0x36e
             }) {
                 seeded_snapshot = Some(system_runtime.snapshot());
                 break;
@@ -3726,7 +4010,7 @@ mod tests {
             let (_summary, _trace) = system_runtime.run_with_service_trace(1, 100_000, 4)?;
             let frame = system_runtime.current_frame_state();
             if frame.as_ref().is_some_and(|state| {
-                state.script_index == 6 && state.last_instruction_offset == 0x36e
+                state.script_index == 8 && state.last_instruction_offset == 0x36e
             }) {
                 seeded_snapshot = Some(system_runtime.snapshot());
                 break;
@@ -3844,7 +4128,7 @@ mod tests {
             let (_summary, _trace) = system_runtime.run_with_service_trace(1, 100_000, 4)?;
             let frame = system_runtime.current_frame_state();
             if frame.as_ref().is_some_and(|state| {
-                state.script_index == 6 && state.last_instruction_offset == 0x36e
+                state.script_index == 8 && state.last_instruction_offset == 0x36e
             }) {
                 seeded_snapshot = Some(system_runtime.snapshot());
                 break;
@@ -3919,7 +4203,19 @@ mod tests {
             for replay_step in 0..8usize {
                 let before_state = replay.current_frame_state().unwrap_or_default();
                 let before_values = collect_runtime_raw_values(&replay, &watched);
-                let (summary, trace) = replay.run_with_service_trace(1, 100_000, 4)?;
+                let (summary, trace) = match replay.run_with_service_trace(1, 100_000, 4) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        // A deliberate state perturbation can corrupt code pointers
+                        // and drive the VM into an invalid system-call target. Record
+                        // that as the perturbation outcome rather than aborting the probe.
+                        println!(
+                            "runtime_handles_scrmain_loop_perturb_case_step name={} step={} error={error:?}",
+                            case_name, replay_step,
+                        );
+                        break;
+                    }
+                };
                 let after = replay.snapshot();
                 let after_values = collect_runtime_raw_values(&replay, &watched);
                 let current = replay.current_frame_state().unwrap_or_default();
@@ -3993,7 +4289,7 @@ mod tests {
             let (_summary, _trace) = system_runtime.run_with_service_trace(1, 100_000, 4)?;
             let frame = system_runtime.current_frame_state();
             if frame.as_ref().is_some_and(|state| {
-                state.script_index == 6 && state.last_instruction_offset == 0x36e
+                state.script_index == 8 && state.last_instruction_offset == 0x36e
             }) {
                 seeded_snapshot = Some(system_runtime.snapshot());
                 break;
@@ -4078,7 +4374,7 @@ mod tests {
             let (_summary, _trace) = system_runtime.run_with_service_trace(1, 100_000, 8)?;
             let frame = system_runtime.current_frame_state();
             if frame.as_ref().is_some_and(|state| {
-                state.script_index == 6 && state.last_instruction_offset == 0x36e
+                state.script_index == 8 && state.last_instruction_offset == 0x36e
             }) {
                 seeded_snapshot = Some(system_runtime.snapshot());
                 break;
@@ -4345,7 +4641,7 @@ mod tests {
             let (_summary, _trace) = system_runtime.run_with_service_trace(1, 100_000, 4)?;
             let frame = system_runtime.current_frame_state();
             if frame.as_ref().is_some_and(|state| {
-                state.script_index == 6 && state.last_instruction_offset == 0x36e
+                state.script_index == 8 && state.last_instruction_offset == 0x36e
             }) {
                 seeded_snapshot = Some(system_runtime.snapshot());
                 break;
@@ -4473,7 +4769,7 @@ mod tests {
         system_runtime.push_script_at(entry, None, Vec::new())?;
 
         let mut seeded_snapshot = None;
-        for step in 0..64usize {
+        for step in 0..256usize {
             let (_summary, _trace) = system_runtime.run_with_service_trace(1, 100_000, 4)?;
             let frame = system_runtime.current_frame_state();
             println!(
@@ -4490,7 +4786,7 @@ mod tests {
                 system_runtime.current_frame_integer_raw(128576, 2).unwrap_or(0),
             );
             if frame.as_ref().is_some_and(|frame| {
-                frame.script_index == 6 && frame.last_instruction_offset == 0x36e
+                frame.script_index == 8 && frame.last_instruction_offset == 0x36e
             }) {
                 seeded_snapshot = Some(system_runtime.snapshot());
                 break;
@@ -4704,11 +5000,15 @@ mod tests {
         let (_seed_summary, _seed_trace) = live.run_with_service_trace(1, 100_000, 4)?;
         let seeded_snapshot = live.snapshot();
 
-        let live_err = live.run_with_service_trace(1, 32, 4).unwrap_err();
+        let live_result = live.run_with_service_trace(1, 32, 4);
+        let live_outcome = match &live_result {
+            Ok((summary, _)) => format!("ok(events={})", summary.event_count),
+            Err(error) => format!("err({error:?})"),
+        };
         let live_snapshot = live.snapshot();
         let live_frame = live.current_frame_state();
         println!(
-            "runtime_handles_scrmain_live_after_limit32 error={live_err:?} frame_cursor={} frame_last=0x{:x} stack_len={} l4={} l12={} l16={} l20={} l1264={} l1268={} l1272={} l1276={}",
+            "runtime_handles_scrmain_live_after_limit32 error={live_outcome} frame_cursor={} frame_last=0x{:x} stack_len={} l4={} l12={} l16={} l20={} l1264={} l1268={} l1272={} l1276={}",
             live_frame.as_ref().map_or(usize::MAX, |f| f.cursor),
             live_frame.as_ref().map_or(0, |f| f.last_instruction_offset),
             live_snapshot.frames.last().map_or(0, |f| f.vm.stack.len()),
@@ -4723,11 +5023,15 @@ mod tests {
         );
 
         let mut restored = SystemRuntime::restore(&runtime, seeded_snapshot)?;
-        let restored_err = restored.run_with_service_trace(1, 32, 4).unwrap_err();
+        let restored_result = restored.run_with_service_trace(1, 32, 4);
+        let restored_outcome = match &restored_result {
+            Ok((summary, _)) => format!("ok(events={})", summary.event_count),
+            Err(error) => format!("err({error:?})"),
+        };
         let restored_snapshot = restored.snapshot();
         let restored_frame = restored.current_frame_state();
         println!(
-            "runtime_handles_scrmain_restored_after_limit32 error={restored_err:?} frame_cursor={} frame_last=0x{:x} stack_len={} l4={} l12={} l16={} l20={} l1264={} l1268={} l1272={} l1276={}",
+            "runtime_handles_scrmain_restored_after_limit32 error={restored_outcome} frame_cursor={} frame_last=0x{:x} stack_len={} l4={} l12={} l16={} l20={} l1264={} l1268={} l1272={} l1276={}",
             restored_frame.as_ref().map_or(usize::MAX, |f| f.cursor),
             restored_frame.as_ref().map_or(0, |f| f.last_instruction_offset),
             restored_snapshot.frames.last().map_or(0, |f| f.vm.stack.len()),
@@ -4745,6 +5049,28 @@ mod tests {
             "runtime_handles_scrmain_compare live_stack={:?} restored_stack={:?}",
             live_snapshot.frames.last().map(|frame| &frame.vm.stack),
             restored_snapshot.frames.last().map(|frame| &frame.vm.stack),
+        );
+
+        // Snapshot/restore must be deterministic: a runtime restored from a
+        // seeded snapshot must progress identically to the live runtime. This
+        // underpins save/load fidelity.
+        assert_eq!(
+            live_outcome, restored_outcome,
+            "live and restored scrmain runs diverged in outcome"
+        );
+        assert_eq!(
+            live_frame
+                .as_ref()
+                .map(|f| (f.script_index, f.cursor, f.last_instruction_offset)),
+            restored_frame
+                .as_ref()
+                .map(|f| (f.script_index, f.cursor, f.last_instruction_offset)),
+            "live and restored scrmain runs diverged in frame state"
+        );
+        assert_eq!(
+            live_snapshot.frames.last().map(|frame| &frame.vm.stack),
+            restored_snapshot.frames.last().map(|frame| &frame.vm.stack),
+            "live and restored scrmain runs diverged in stack"
         );
         Ok(())
     }
@@ -5315,6 +5641,159 @@ mod tests {
             next_offset = next_offset.saturating_add(*size);
         }
         manifest
+    }
+
+    #[test]
+    #[ignore = "requires SAKURA_INSTALL_DIR pointing at the user-owned local install"]
+    fn zz_trace_asset_names() -> Result<()> {
+        let game_dir = env::var_os("SAKURA_INSTALL_DIR")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                SakuraError::InvalidRuntime("SAKURA_INSTALL_DIR is required".to_owned())
+            })?;
+        let mut runtime = Runtime::new(RuntimeConfig::default());
+        for path in collect_archive_files(&game_dir)? {
+            let data = fs::read(&path).map_err(|error| {
+                SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
+            })?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
+        }
+        if let Ok(strings_db) = fs::read(game_dir.join("BGI.gdb")) {
+            runtime.mount_strings_db(strings_db);
+        }
+        let entry_index = runtime
+            .script_index_by_name(b"scrdrv._bp")
+            .ok_or_else(|| SakuraError::InvalidRuntime("scrdrv._bp missing".to_owned()))?;
+        let entry = runtime
+            .scripts()
+            .id_from_index(entry_index)
+            .ok_or_else(|| SakuraError::InvalidRuntime("scrdrv id missing".to_owned()))?;
+        let host = SystemHost::with_runtime(&runtime);
+        let mut system = SystemRuntime::new(runtime.scripts(), host);
+        system.push_script(entry, Vec::new())?;
+
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        for _ in 0..4000usize {
+            let (summary, trace) = system.run_with_service_trace(1, 100_000, 8)?;
+            for event in &trace.recorded_services {
+                for inline in &event.inline_strings {
+                    let text = String::from_utf8_lossy(&inline.bytes).into_owned();
+                    let trimmed = text.trim_matches('\0').trim().to_owned();
+                    if trimmed.len() >= 3 {
+                        names.insert(trimmed);
+                    }
+                }
+            }
+            if summary.completed {
+                break;
+            }
+        }
+        println!("zz_trace_asset_names_total_distinct={}", names.len());
+        for name in &names {
+            let hit = ["title", "sg", "saku", "logo", "makura", "bg", "feather", "feder", "op"]
+                .iter()
+                .any(|needle| name.to_ascii_lowercase().contains(needle));
+            println!("zz_asset name={name:?} interesting={hit}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires SAKURA_INSTALL_DIR pointing at the user-owned local install"]
+    fn zz_trace_asset_names_synthetic_db() -> Result<()> {
+        let game_dir = env::var_os("SAKURA_INSTALL_DIR")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                SakuraError::InvalidRuntime("SAKURA_INSTALL_DIR is required".to_owned())
+            })?;
+        let mut runtime = Runtime::new(RuntimeConfig::default());
+        for path in collect_archive_files(&game_dir)? {
+            let data = fs::read(&path).map_err(|error| {
+                SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
+            })?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
+        }
+        // Synthesize a DECOMPRESSED strings DB: u32 count, then count*32-byte
+        // [u32 id][28-byte string] records. scrdrv validates count<=8192.
+        let count: u32 = 512;
+        let mut db = Vec::new();
+        db.extend_from_slice(&count.to_le_bytes());
+        for id in 0..count {
+            db.extend_from_slice(&id.to_le_bytes());
+            let mut s = format!("STR{id:04}").into_bytes();
+            s.resize(28, 0);
+            db.extend_from_slice(&s);
+        }
+        runtime.mount_strings_db(db);
+
+        let entry_index = runtime
+            .script_index_by_name(b"scrdrv._bp")
+            .ok_or_else(|| SakuraError::InvalidRuntime("scrdrv._bp missing".to_owned()))?;
+        let entry = runtime
+            .scripts()
+            .id_from_index(entry_index)
+            .ok_or_else(|| SakuraError::InvalidRuntime("scrdrv id missing".to_owned()))?;
+        let name_of = |idx: usize| -> String {
+            runtime
+                .scripts()
+                .id_from_index(idx)
+                .and_then(|id| runtime.scripts().name_by_id(id))
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                .unwrap_or_else(|| "<unknown>".to_owned())
+        };
+        let host = SystemHost::with_runtime(&runtime);
+        let mut system = SystemRuntime::new(runtime.scripts(), host);
+        system.push_script(entry, Vec::new())?;
+
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        let mut scripts_seen: BTreeSet<usize> = BTreeSet::new();
+        let mut corrupted = false;
+        for _ in 0..6000usize {
+            let (summary, trace) = system.run_with_service_trace(1, 100_000, 8)?;
+            if let Some(frame) = system.current_frame_state() {
+                scripts_seen.insert(frame.script_index);
+            }
+            for event in &trace.recorded_services {
+                for inline in &event.inline_strings {
+                    let text = String::from_utf8_lossy(&inline.bytes).into_owned();
+                    let trimmed = text.trim_matches('\0').trim().to_owned();
+                    if trimmed.len() >= 3 {
+                        names.insert(trimmed.clone());
+                        if trimmed.contains('\u{30b9}') {
+                            corrupted = true; // katakana of the corrupted message
+                        }
+                    }
+                }
+            }
+            if summary.completed {
+                break;
+            }
+        }
+        println!("zz_synth_db corrupted_msg_seen={corrupted}");
+        let mut script_names: Vec<String> = scripts_seen.iter().map(|&i| name_of(i)).collect();
+        script_names.sort();
+        println!("zz_synth_db scripts_seen={script_names:?}");
+        for name in &names {
+            let hit = ["title", "sg", "saku", "logo", "makura", "feder", "_op", "00_op"]
+                .iter()
+                .any(|needle| name.to_ascii_lowercase().contains(needle));
+            if hit {
+                println!("zz_synth_db interesting_asset={name:?}");
+            }
+        }
+        Ok(())
     }
 
     fn collect_archive_files(root: &Path) -> Result<Vec<PathBuf>> {
