@@ -1,13 +1,13 @@
 use crate::archive::ArcName;
 use crate::catalog::{ArchiveSummary, AssetCatalog, AssetRecord};
 use crate::error::Result;
+use crate::flagdb::{FlagDb, FlagError};
 use crate::runtime::Runtime;
 use crate::runtime_input::RuntimeInputState;
-use crate::sniff::PayloadKind;
 use crate::script_library::ScriptLibrary;
+use crate::sniff::PayloadKind;
 use crate::system_bytecode::SystemCallFamily;
 use crate::system_vm::{SystemValue, SystemVm, SystemVmEvent};
-use crate::flagdb::{FlagDb, FlagError};
 use crate::system_vm_ops::system_value_integer;
 use std::collections::BTreeMap;
 
@@ -678,13 +678,10 @@ impl<'a> SystemHost<'a> {
                 continue;
             };
             fallback.get_or_insert(name);
-            if self
-                .catalog
-                .is_some_and(|catalog| {
-                    catalog.find_by_query_name_bytes(name).is_some()
-                        || catalog.find_archive_by_query_name_bytes(name).is_some()
-                })
-            {
+            if self.catalog.is_some_and(|catalog| {
+                catalog.find_by_query_name_bytes(name).is_some()
+                    || catalog.find_archive_by_query_name_bytes(name).is_some()
+            }) {
                 matched = Some(name);
                 break;
             }
@@ -911,7 +908,10 @@ impl<'a> SystemHost<'a> {
             .copied()
             .find(|value| (*value as u32) >= 0x2000_0000)
             .unwrap_or(0) as u32;
-        let key = integer_args.last().copied().unwrap_or(u64::from(archive_len)) as u32;
+        let key = integer_args
+            .last()
+            .copied()
+            .unwrap_or(u64::from(archive_len)) as u32;
         let entry_count = self.archive_entry_count_for_base(base).unwrap_or(0);
         let state = ArchiveBindingState {
             base,
@@ -948,7 +948,12 @@ impl<'a> SystemHost<'a> {
             .next()
             .unwrap_or(0) as u32;
         let ints_before_binding: Vec<u64> = binding_index
-            .map(|index| args[..index].iter().filter_map(system_value_integer).collect())
+            .map(|index| {
+                args[..index]
+                    .iter()
+                    .filter_map(system_value_integer)
+                    .collect()
+            })
             .unwrap_or_default();
         let flags = ints_before_binding.last().copied().unwrap_or(0) as u32;
         let binding_len = ints_before_binding
@@ -970,8 +975,16 @@ impl<'a> SystemHost<'a> {
             effect.push_write(binding.saturating_add(4), 2, u64::from(flags));
             if let Some(descriptor) = descriptor {
                 effect.push_write(binding.saturating_add(8), 2, u64::from(descriptor.base));
-                effect.push_write(binding.saturating_add(12), 2, u64::from(descriptor.archive_len));
-                effect.push_write(binding.saturating_add(16), 2, u64::from(descriptor.entry_count));
+                effect.push_write(
+                    binding.saturating_add(12),
+                    2,
+                    u64::from(descriptor.archive_len),
+                );
+                effect.push_write(
+                    binding.saturating_add(16),
+                    2,
+                    u64::from(descriptor.entry_count),
+                );
                 effect.push_write(binding.saturating_add(20), 2, u64::from(descriptor.key));
             } else {
                 effect.push_write(binding.saturating_add(20), 2, u64::from(key));
@@ -1297,9 +1310,7 @@ fn section_read(size: u32, args: &[SystemValue<'_>]) -> SectionRead {
             len: size as usize,
         };
     };
-    let requested = integers
-        .next_back()
-        .unwrap_or(u64::from(size)) as usize;
+    let requested = integers.next_back().unwrap_or(u64::from(size)) as usize;
     let offset = integers.next_back().unwrap_or(0);
     let size = size as usize;
     let offset = (offset as usize).min(size);

@@ -9,6 +9,7 @@ import {
 import { countSoundTracePrefix, safeServiceTraceState } from "./service-trace-state.js";
 import { emptyHostState } from "./host-state.js";
 import { createInitialScenarioPlayer } from "./session-player.js";
+import { normalizeScenarioRoute } from "./scenario-routes.js";
 import { createAudioMixer } from "./audio-mixer.js";
 import { PRIORITY_GRAPH_SERVICE_IDS } from "./graph-renderer.js";
 
@@ -235,6 +236,10 @@ async function mountCatalog(catalog, summary, core, hooks) {
   const titleImage = await loadTitleImage(catalog, core);
   const menuButtons = await loadMenuButtons(catalog, core);
   const bootScreens = await loadBootScreens(catalog, core);
+  const messageWindow = await loadMessageWindow(catalog, core);
+  const logWindow = await loadLogWindow(catalog, core);
+  const userDataWindow = await loadUserDataWindow(catalog, core);
+  const configWindow = await loadConfigWindow(catalog, core);
   const audioMixer = createAudioMixer();
   const playerState = { active: false };
   const fullSummary = {
@@ -422,6 +427,10 @@ async function mountCatalog(catalog, summary, core, hooks) {
     titleImage,
     menuButtons,
     bootScreens,
+    messageWindow,
+    logWindow,
+    userDataWindow,
+    configWindow,
     bootPhase: 0,
     stage: runtimeScenarioPreviewEnabled()
       ? "scenario"
@@ -483,9 +492,32 @@ async function mountCatalog(catalog, summary, core, hooks) {
     return packet;
   });
   mounted.startScenario = () => {
-    if (mounted.stage === "scenario" && mounted.player) return;
+    if (mounted.stage === "scenario" && (mounted.player || mounted.scenarioPlayerQueued)) {
+      return mounted.scenarioPlayerPromise ?? Promise.resolve(mounted.player ?? null);
+    }
     mounted.stage = "scenario";
-    queueScenarioPlayer(catalog, core, mounted, hooks);
+    return queueScenarioPlayer(catalog, core, mounted, hooks);
+  };
+  mounted.loadScenarioFromStorage = async (slotIndex = 0) => {
+    let loadResult = null;
+    mounted.stage = "scenario";
+    const player = await queueScenarioPlayer(catalog, core, mounted, hooks, {
+      afterReady: async (readyPlayer) => {
+        loadResult = await readyPlayer.loadFromStorage(slotIndex);
+        return loadResult;
+      },
+    });
+    if (!player) {
+      return { ok: false, bytes: 0, reason: "no_player" };
+    }
+    if (loadResult === null) {
+      loadResult = await player.loadFromStorage(slotIndex);
+    }
+    mounted.summary.localRuntimeScenarioSessionLoadBytes = player.safeState.lastLoadBytes ?? 0;
+    mounted.safeState.player = player.safeState;
+    hooks.paint?.(mounted);
+    notifyUpdate(hooks, mounted);
+    return loadResult;
   };
   if (mounted.scenarioPreviewEnabled) {
     queueScenarioPlayer(catalog, core, mounted, hooks);
@@ -802,36 +834,77 @@ function startSystemRuntime(catalog, core, mounted, hooks) {
     });
 }
 
-function queueScenarioPlayer(catalog, core, mounted, hooks) {
-  globalThis.setTimeout(() => {
-    void createInitialScenarioPlayer(catalog, core).then((player) => {
-      if (!isActive(hooks, mounted) || player === null) {
-        player?.destroy();
-        if (isActive(hooks, mounted)) {
-          const probe = createInitialScenarioPlayer.lastProbe;
-          mounted.summary.localRuntimeScenarioSessionScanCount = probe.scanned;
-          mounted.summary.localRuntimeScenarioSessionScanSkipLarge = probe.skippedLarge;
-          notifyUpdate(hooks, mounted);
-        }
+function queueScenarioPlayer(catalog, core, mounted, hooks, options = {}) {
+  if (mounted.scenarioPlayerQueued || mounted.player) {
+    return mounted.scenarioPlayerPromise ?? Promise.resolve(mounted.player ?? null);
+  }
+  mounted.scenarioPlayerQueued = true;
+  const requestedScenario = new URLSearchParams(window.location.search).get("scenarioName") ?? "";
+  const preferredScenario = /^[A-Za-z0-9_]+$/.test(requestedScenario)
+    ? requestedScenario
+    : "00_op_01";
+  const route = normalizeScenarioRoute(
+    new URLSearchParams(window.location.search).get("route"),
+  );
+  const promise = createInitialScenarioPlayer(catalog, core, preferredScenario, route).then(async (player) => {
+    if (!isActive(hooks, mounted) || player === null) {
+      player?.destroy();
+      if (isActive(hooks, mounted)) {
+        const probe = createInitialScenarioPlayer.lastProbe;
+        mounted.summary.localRuntimeScenarioSessionScanCount = probe.scanned;
+        mounted.summary.localRuntimeScenarioSessionScanSkipLarge = probe.skippedLarge;
+        notifyUpdate(hooks, mounted);
+      }
+      return null;
+    }
+    mounted.player = player;
+    player.skin = mounted.messageWindow;
+    player.logSkin = mounted.logWindow;
+    player.userDataSkin = mounted.userDataWindow;
+    player.configSkin = mounted.configWindow;
+    player.audioMixer = mounted.audioMixer;
+    if (typeof options.afterReady === "function") {
+      await options.afterReady(player);
+    }
+    const playerState = player.safeState;
+    mounted.summary.localRuntimeScenarioSessionReady = Number(playerState.active === true);
+    mounted.summary.localRuntimeScenarioSessionEventKind = playerState.eventKind ?? 0;
+    mounted.summary.localRuntimeScenarioSessionMode = playerState.mode ?? 0;
+    mounted.summary.localRuntimeScenarioSessionPayloadBytes = playerState.payloadLength ?? 0;
+    mounted.summary.localRuntimeScenarioSessionSaveBytes = playerState.lastSaveBytes ?? 0;
+    mounted.summary.localRuntimeScenarioSessionLoadBytes = playerState.lastLoadBytes ?? 0;
+    mounted.summary.localRuntimeScenarioSessionScanCount = playerState.scanCount ?? 0;
+    mounted.summary.localRuntimeScenarioSessionScanSkipLarge = playerState.scanSkippedLarge ?? 0;
+    mounted.safeState.player = playerState;
+    mounted.safeState.scriptCount =
+      mounted.summary.localScenarioScripts + mounted.summary.localSystemScripts;
+    hooks.paint?.(mounted);
+    notifyUpdate(hooks, mounted);
+    player.startAutomatic(() => {
+      if (!isActive(hooks, mounted)) {
         return;
       }
-      mounted.player = player;
-      const playerState = player.safeState;
-      mounted.summary.localRuntimeScenarioSessionReady = Number(playerState.active === true);
-      mounted.summary.localRuntimeScenarioSessionEventKind = playerState.eventKind ?? 0;
-      mounted.summary.localRuntimeScenarioSessionMode = playerState.mode ?? 0;
-      mounted.summary.localRuntimeScenarioSessionPayloadBytes = playerState.payloadLength ?? 0;
-      mounted.summary.localRuntimeScenarioSessionSaveBytes = playerState.lastSaveBytes ?? 0;
-      mounted.summary.localRuntimeScenarioSessionLoadBytes = playerState.lastLoadBytes ?? 0;
-      mounted.summary.localRuntimeScenarioSessionScanCount = playerState.scanCount ?? 0;
-      mounted.summary.localRuntimeScenarioSessionScanSkipLarge = playerState.scanSkippedLarge ?? 0;
-      mounted.safeState.player = playerState;
-      mounted.safeState.scriptCount =
-        mounted.summary.localScenarioScripts + mounted.summary.localSystemScripts;
+      mounted.safeState.player = player.safeState;
+      mounted.summary.localRuntimeScenarioSessionEventKind = player.safeState.eventKind ?? 0;
+      mounted.summary.localRuntimeScenarioSessionMode = player.safeState.mode ?? 0;
+      mounted.summary.localRuntimeScenarioSessionPayloadBytes =
+        player.safeState.payloadLength ?? 0;
       hooks.paint?.(mounted);
       notifyUpdate(hooks, mounted);
     });
-  }, 500);
+    return player;
+  }).catch(() => {
+    if (isActive(hooks, mounted)) {
+      mounted.summary.localRuntimeScenarioSessionReady = 0;
+      notifyUpdate(hooks, mounted);
+    }
+    return null;
+  }).finally(() => {
+    mounted.scenarioPlayerQueued = false;
+    mounted.scenarioPlayerPromise = null;
+  });
+  mounted.scenarioPlayerPromise = promise;
+  return promise;
 }
 
 function queueScriptProbe(catalog, core, fullSummary, hooks) {
@@ -1210,6 +1283,187 @@ async function loadTitleImage(catalog, core) {
     if (!payload) return null;
     return decodeMountedImage(core, payload);
   } catch (_) {
+    return null;
+  }
+}
+
+async function loadMessageWindow(catalog, core) {
+  const controlNames = Array.from(
+    { length: 10 },
+    (_, index) => `SGMsgWnd000${index}00`,
+  );
+  const [panel, nameplate, ...controlImages] = await Promise.all([
+    loadNamedImage(catalog, core, "SGMsgWnd990000"),
+    loadNamedImage(catalog, core, "SGMsgWnd990100"),
+    ...controlNames.map((name) => loadNamedImage(catalog, core, name)),
+  ]);
+  return {
+    panel,
+    nameplate,
+    controls: controlImages
+      .filter((image) => image !== null)
+      .map((image) => ({
+        image,
+        stateWidth: Math.floor(image.width / 4),
+        stateHeight: image.height,
+      })),
+  };
+}
+
+async function loadLogWindow(catalog, core) {
+  const [
+    lineUp,
+    lineDown,
+    pageUp,
+    pageDown,
+    thumb,
+    voice,
+    panel,
+    track,
+  ] = await Promise.all([
+    loadNamedImage(catalog, core, "SGLogWnd000000"),
+    loadNamedImage(catalog, core, "SGLogWnd000100"),
+    loadNamedImage(catalog, core, "SGLogWnd010000"),
+    loadNamedImage(catalog, core, "SGLogWnd010100"),
+    loadNamedImage(catalog, core, "SGLogWnd100000"),
+    loadNamedImage(catalog, core, "SGLogWnd200000"),
+    loadNamedImage(catalog, core, "SGLogWnd990000"),
+    loadNamedImage(catalog, core, "SGLogWnd990100"),
+  ]);
+  return {
+    panel,
+    track,
+    lineUp: logControl(lineUp),
+    lineDown: logControl(lineDown),
+    pageUp: logControl(pageUp),
+    pageDown: logControl(pageDown),
+    thumb: logControl(thumb),
+    voice: logControl(voice),
+  };
+}
+
+async function loadUserDataWindow(catalog, core) {
+  const [
+    saveBase,
+    loadBase,
+    saveSlot,
+    loadSlot,
+    previous,
+    next,
+    load,
+    back,
+    save,
+    ...digits
+  ] = await Promise.all([
+    loadNamedImage(catalog, core, "SGUsDtWnd990000"),
+    loadNamedImage(catalog, core, "SGUsDtWnd990100"),
+    loadNamedImage(catalog, core, "SGUsDtWnd900000"),
+    loadNamedImage(catalog, core, "SGUsDtWnd900100"),
+    loadNamedImage(catalog, core, "SGUsDtWnd100000"),
+    loadNamedImage(catalog, core, "SGUsDtWnd100100"),
+    loadNamedImage(catalog, core, "SGUsDtWnd200000"),
+    loadNamedImage(catalog, core, "SGUsDtWnd200100"),
+    loadNamedImage(catalog, core, "SGUsDtWnd200600"),
+    ...Array.from(
+      { length: 10 },
+      (_, index) => loadNamedImage(catalog, core, `SGUsDtWnd00000${index}`),
+    ),
+  ]);
+  return {
+    saveBase,
+    loadBase,
+    saveSlot,
+    loadSlot,
+    buttons: { previous, next, load, back, save },
+    digits,
+  };
+}
+
+async function loadConfigWindow(catalog, core) {
+  const [
+    base,
+    sliderMarker,
+    windowed,
+    fullscreen,
+    skipRead,
+    skipAll,
+    choiceSkipOff,
+    choiceSkipOn,
+    choiceAutoOff,
+    choiceAutoOn,
+    instantTransitionOff,
+    instantTransitionOn,
+    carryVoiceOff,
+    carryVoiceOn,
+    reset,
+    title,
+    back,
+    ...faces
+  ] = await Promise.all([
+    loadNamedImage(catalog, core, "SGCnfgWnd990000"),
+    loadNamedImage(catalog, core, "SGCnfgWnd000000"),
+    loadNamedImage(catalog, core, "SGCnfgWnd010000"),
+    loadNamedImage(catalog, core, "SGCnfgWnd010100"),
+    loadNamedImage(catalog, core, "SGCnfgWnd020000"),
+    loadNamedImage(catalog, core, "SGCnfgWnd020100"),
+    loadNamedImage(catalog, core, "SGCnfgWnd030000"),
+    loadNamedImage(catalog, core, "SGCnfgWnd030100"),
+    loadNamedImage(catalog, core, "SGCnfgWnd040000"),
+    loadNamedImage(catalog, core, "SGCnfgWnd040100"),
+    loadNamedImage(catalog, core, "SGCnfgWnd050000"),
+    loadNamedImage(catalog, core, "SGCnfgWnd050100"),
+    loadNamedImage(catalog, core, "SGCnfgWnd060000"),
+    loadNamedImage(catalog, core, "SGCnfgWnd060100"),
+    loadNamedImage(catalog, core, "SGCnfgWnd200000"),
+    loadNamedImage(catalog, core, "SGCnfgWnd200100"),
+    loadNamedImage(catalog, core, "SGCnfgWnd200200"),
+    ...[
+      "SGCnfgWnd100000",
+      "SGCnfgWnd100100",
+      "SGCnfgWnd100200",
+      "SGCnfgWnd100300",
+      "SGCnfgWnd100400",
+      "SGCnfgWnd100500",
+      "SGCnfgWnd110000",
+      "SGCnfgWnd110100",
+    ].map((name) => loadNamedImage(catalog, core, name)),
+  ]);
+  return {
+    base,
+    sliderMarker,
+    rows: {
+      window: windowed,
+      fullscreen,
+      skipRead,
+      skipAll,
+      choiceSkipOff,
+      choiceSkipOn,
+      choiceAutoOff,
+      choiceAutoOn,
+      instantTransitionOff,
+      instantTransitionOn,
+      carryVoiceOff,
+      carryVoiceOn,
+    },
+    buttons: { reset, title, back },
+    faces,
+  };
+}
+
+function logControl(image) {
+  if (image === null) return null;
+  return {
+    image,
+    stateWidth: Math.floor(image.width / 2),
+    stateHeight: image.height,
+  };
+}
+
+async function loadNamedImage(catalog, core, name) {
+  try {
+    const payload = await catalog.readPayloadByNameBytes(new TextEncoder().encode(name));
+    return payload ? decodeMountedImage(core, payload) : null;
+  } catch {
     return null;
   }
 }

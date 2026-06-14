@@ -114,8 +114,8 @@ mod tests {
     use super::*;
     use crate::system_runtime::SystemServiceTraceEvent;
 
-    fn empty_arg_slots() -> [crate::system_runtime::SystemServiceTraceArg; SYSTEM_SERVICE_TRACE_ARG_SLOTS]
-    {
+    fn empty_arg_slots(
+    ) -> [crate::system_runtime::SystemServiceTraceArg; SYSTEM_SERVICE_TRACE_ARG_SLOTS] {
         [crate::system_runtime::SystemServiceTraceArg::default(); SYSTEM_SERVICE_TRACE_ARG_SLOTS]
     }
 

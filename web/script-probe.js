@@ -20,10 +20,10 @@ export async function probeLocalScripts(catalog, core) {
     localScenarioEventChoices: 0,
     localScenarioVmFirstEvents: 0,
     localScenarioVmFirstInvalid: 0,
-    localScenarioVmFirstEventKinds: Array(5).fill(0),
+    localScenarioVmFirstEventKinds: Array(7).fill(0),
     localScenarioSessionProbes: 0,
     localScenarioSessionInvalid: 0,
-    localScenarioSessionEventKinds: Array(5).fill(0),
+    localScenarioSessionEventKinds: Array(7).fill(0),
     localScenarioSessionModes: Array(5).fill(0),
     localScenarioSessionBacklogEntries: 0,
     localScenarioSessionRestoreMatches: 0,
@@ -339,7 +339,7 @@ function formatKindCounts(counts) {
 }
 
 function formatScenarioEventKindCounts(counts) {
-  const labels = ["none", "message", "choice", "user_function", "halted"];
+  const labels = ["none", "message", "choice", "user_function", "halted", "graph", "wait"];
   return counts
     .map((count, kind) => ({ kind, count }))
     .filter(({ count }) => count > 0)

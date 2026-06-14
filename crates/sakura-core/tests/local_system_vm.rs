@@ -998,7 +998,8 @@ fn traces_userdata_sys34_from_scrdrv_context() -> TestResult<()> {
 
     println!("local_userdata_sys34_from_scrdrv_context_probe_version=1");
     for step in 0..24usize {
-        let (summary, trace) = system_runtime.run_with_service_trace(1, MAX_INSTRUCTIONS_PER_EVENT, 4)?;
+        let (summary, trace) =
+            system_runtime.run_with_service_trace(1, MAX_INSTRUCTIONS_PER_EVENT, 4)?;
         let frame = system_runtime.current_frame_state();
         let head = trace.recorded_services.first();
         println!(
@@ -1035,7 +1036,10 @@ fn traces_userdata_sys34_from_scrdrv_context() -> TestResult<()> {
                     let text = system_runtime
                         .current_frame_bytes_raw(slot.value, slot.len as usize)
                         .map(|bytes| {
-                            let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+                            let end = bytes
+                                .iter()
+                                .position(|byte| *byte == 0)
+                                .unwrap_or(bytes.len());
                             String::from_utf8_lossy(&bytes[..end]).into_owned()
                         })
                         .unwrap_or_else(|| "<unreadable>".to_owned());
@@ -1078,7 +1082,9 @@ fn traces_scrdrv_sys33_context_and_codeptr_state() -> TestResult<()> {
     let mut system_runtime = SystemRuntime::new(scripts, host);
     system_runtime.push_script(scrdrv, Vec::new())?;
 
-    let watched = [1044u32, 260, 123420, 123424, 128560, 128564, 128576, 144576, 603604];
+    let watched = [
+        1044u32, 260, 123420, 123424, 128560, 128564, 128576, 144576, 603604,
+    ];
     println!("local_scrdrv_sys33_context_probe_version=1");
     for step in 0..64usize {
         let frame_before = system_runtime.current_frame_state();
@@ -1087,7 +1093,9 @@ fn traces_scrdrv_sys33_context_and_codeptr_state() -> TestResult<()> {
             .map(|address| {
                 format!(
                     "0x{address:x}={:#010x}",
-                    system_runtime.current_frame_integer_raw(*address, 2).unwrap_or(0)
+                    system_runtime
+                        .current_frame_integer_raw(*address, 2)
+                        .unwrap_or(0)
                 )
             })
             .collect::<Vec<_>>()
@@ -1100,7 +1108,9 @@ fn traces_scrdrv_sys33_context_and_codeptr_state() -> TestResult<()> {
             .map(|address| {
                 format!(
                     "0x{address:x}={:#010x}",
-                    system_runtime.current_frame_integer_raw(*address, 2).unwrap_or(0)
+                    system_runtime
+                        .current_frame_integer_raw(*address, 2)
+                        .unwrap_or(0)
                 )
             })
             .collect::<Vec<_>>()
@@ -1180,7 +1190,10 @@ fn traces_scrdrv_sys44_strings() -> TestResult<()> {
                     step,
                     frame
                         .as_ref()
-                        .map(|frame| format!("{}:0x{:x}", frame.script_index, frame.last_instruction_offset))
+                        .map(|frame| format!(
+                            "{}:0x{:x}",
+                            frame.script_index, frame.last_instruction_offset
+                        ))
                         .unwrap_or_else(|| "none".to_owned()),
                     format_arg_slots(event)
                 );
@@ -1208,11 +1221,8 @@ fn traces_scrdrv_runtime_transition_services() -> TestResult<()> {
 
     println!("local_scrdrv_runtime_transition_probe_version=1");
     for step in 0..320usize {
-        let (summary, trace, pending_asset) = system_runtime.run_with_service_trace_until_asset(
-            1,
-            MAX_INSTRUCTIONS_PER_EVENT,
-            16,
-        )?;
+        let (summary, trace, pending_asset) =
+            system_runtime.run_with_service_trace_until_asset(1, MAX_INSTRUCTIONS_PER_EVENT, 16)?;
         let frame = system_runtime.current_frame_state();
         if let Some(pending) = pending_asset {
             println!(
@@ -1268,8 +1278,13 @@ fn traces_scrdrv_runtime_transition_services() -> TestResult<()> {
                     if slot.kind != 2 {
                         continue;
                     }
-                    if let Some(bytes) = system_runtime.current_frame_bytes_raw(slot.value, slot.len as usize) {
-                        let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+                    if let Some(bytes) =
+                        system_runtime.current_frame_bytes_raw(slot.value, slot.len as usize)
+                    {
+                        let end = bytes
+                            .iter()
+                            .position(|byte| *byte == 0)
+                            .unwrap_or(bytes.len());
                         let text = String::from_utf8_lossy(&bytes[..end]);
                         println!(
                             "local_scrdrv_runtime_transition_arg_string step={} arg={} addr=0x{:x} len={} text={}",
@@ -1304,7 +1319,9 @@ fn dumps_scrdrv_transition_instruction_window() -> TestResult<()> {
     let program = SystemProgram::parse(script.decompressed())?;
 
     println!("local_scrdrv_transition_instruction_window_version=1");
-    for offset in [0x20eusize, 0xd7a, 0xf06, 0xf19, 0x1047, 0x1080, 0x1e9d, 0x1f21, 0x20d4] {
+    for offset in [
+        0x20eusize, 0xd7a, 0xf06, 0xf19, 0x1047, 0x1080, 0x1e9d, 0x1f21, 0x20d4,
+    ] {
         for cursor in offset.saturating_sub(12)..=offset.saturating_add(24) {
             let Ok(instruction) = program.decode(cursor) else {
                 continue;
@@ -1374,7 +1391,12 @@ fn probes_scrdrv_transition_host_results() -> TestResult<()> {
                 ];
                 let before = watch_addresses
                     .iter()
-                    .map(|address| format!("{address:08x}={:08x}", vm.host_local_integer(*address, 2).unwrap_or(0)))
+                    .map(|address| {
+                        format!(
+                            "{address:08x}={:08x}",
+                            vm.host_local_integer(*address, 2).unwrap_or(0)
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(",");
                 if let Some(effect) = result.effect() {
@@ -1387,7 +1409,12 @@ fn probes_scrdrv_transition_host_results() -> TestResult<()> {
                 }
                 let after = watch_addresses
                     .iter()
-                    .map(|address| format!("{address:08x}={:08x}", vm.host_local_integer(*address, 2).unwrap_or(0)))
+                    .map(|address| {
+                        format!(
+                            "{address:08x}={:08x}",
+                            vm.host_local_integer(*address, 2).unwrap_or(0)
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(",");
                 println!(
@@ -1446,14 +1473,21 @@ fn experiments_scrdrv_transition_service_return_overrides() -> TestResult<()> {
         let mut last_frame = "none".to_owned();
         for step in 0..220usize {
             let event = vm.next_event()?;
-            last_frame = format!("{}:0x{:x}", scrdrv.index(), vm.last_instruction_offset().unwrap_or(0));
+            last_frame = format!(
+                "{}:0x{:x}",
+                scrdrv.index(),
+                vm.last_instruction_offset().unwrap_or(0)
+            );
             if let SystemVmEvent::ServiceCall {
                 family: sakura_core::SystemCallFamily::Graph,
                 service_id,
                 ..
             } = &event
             {
-                graph_events.push(format!("{service_id:02x}@0x{:x}", vm.last_instruction_offset().unwrap_or(0)));
+                graph_events.push(format!(
+                    "{service_id:02x}@0x{:x}",
+                    vm.last_instruction_offset().unwrap_or(0)
+                ));
                 if graph_events.len() >= 12 {
                     break;
                 }
@@ -1466,7 +1500,9 @@ fn experiments_scrdrv_transition_service_return_overrides() -> TestResult<()> {
                         ..
                     },
                     Some(target),
-                ) if *service_id == target => Some(sakura_core::SystemHostResult::Integer(override_value)),
+                ) if *service_id == target => {
+                    Some(sakura_core::SystemHostResult::Integer(override_value))
+                }
                 _ => host.event_result(&event),
             };
             let Some(result) = result else {
@@ -1524,7 +1560,10 @@ fn probes_scrdrv_title_graph_state_windows() -> TestResult<()> {
             }
             continue;
         }
-        if !matches!(event.service_id, 0x4c | 0x65 | 0x80 | 0x85 | 0x88 | 0x89 | 0x9c | 0x9d | 0xe8) {
+        if !matches!(
+            event.service_id,
+            0x4c | 0x65 | 0x80 | 0x85 | 0x88 | 0x89 | 0x9c | 0x9d | 0xe8
+        ) {
             if summary.completed {
                 break;
             }
@@ -1824,7 +1863,10 @@ fn traces_scrdrv_title_graph_image_context() -> TestResult<()> {
             continue;
         };
         if event.family != sakura_core::SystemCallFamily::Graph
-            || !matches!(event.service_id, 0x4c | 0x56 | 0x16 | 0x11 | 0x13 | 0x18 | 0x57)
+            || !matches!(
+                event.service_id,
+                0x4c | 0x56 | 0x16 | 0x11 | 0x13 | 0x18 | 0x57
+            )
         {
             if summary.completed {
                 break;
@@ -2075,7 +2117,9 @@ fn traces_scrdrv_title_graph_transition_sequence() -> TestResult<()> {
     system_runtime.push_script(scrdrv, Vec::new())?;
 
     println!("local_scrdrv_title_graph_transition_sequence_version=1");
-    let interesting = [0x31u8, 0x32, 0x34, 0x37, 0x38, 0x94, 0x95, 0x96, 0x98, 0x99, 0x9a];
+    let interesting = [
+        0x31u8, 0x32, 0x34, 0x37, 0x38, 0x94, 0x95, 0x96, 0x98, 0x99, 0x9a,
+    ];
     let mut captured = Vec::new();
     for step in 0..640usize {
         let (summary, trace) =
@@ -2167,7 +2211,10 @@ fn traces_scrdrv_data01_archive_aux_bytes() -> TestResult<()> {
                         step,
                         frame
                             .as_ref()
-                            .map(|frame| format!("{}:0x{:x}", frame.script_index, frame.last_instruction_offset))
+                            .map(|frame| format!(
+                                "{}:0x{:x}",
+                                frame.script_index, frame.last_instruction_offset
+                            ))
                             .unwrap_or_else(|| "none".to_owned()),
                         archive_address,
                         format_probe_bytes(&bytes)
@@ -2349,10 +2396,7 @@ fn traces_script_bp_system_88_context() -> TestResult<()> {
         );
         if let Some(event) = trace.recorded_services.first() {
             if event.family == sakura_core::SystemCallFamily::System && event.service_id == 0x88 {
-                println!(
-                    "local_script_bp_system_88_args={}",
-                    format_arg_slots(event)
-                );
+                println!("local_script_bp_system_88_args={}", format_arg_slots(event));
                 return Ok(());
             }
         }
@@ -2449,7 +2493,9 @@ fn dumps_script_29_archive_entry_block() -> TestResult<()> {
     let id = scripts
         .id_from_index(29)
         .ok_or("script index 29 is missing")?;
-    let script = scripts.script(id).ok_or("script index 29 payload is missing")?;
+    let script = scripts
+        .script(id)
+        .ok_or("script index 29 payload is missing")?;
     let program = SystemProgram::parse(script.decompressed())?;
 
     println!("local_script_29_archive_block_dump_version=1");
@@ -2486,9 +2532,7 @@ fn steps_script_29_archive_entry_block_live() -> TestResult<()> {
     println!("local_script_29_archive_block_live_version=1");
     for step in 0..260usize {
         let frame = system_runtime.current_frame_state().unwrap_or_default();
-        if frame.script_index == 29
-            && (0x9b..=0x1f9).contains(&frame.last_instruction_offset)
-        {
+        if frame.script_index == 29 && (0x9b..=0x1f9).contains(&frame.last_instruction_offset) {
             println!(
                 "local_script_29_live_before step={} frame={} local24={} local28={} local2c={} local30={} local38={} local3c={} local40={} local44={} local48={} local208={} local20a={} local354={} local45c={} local464={} local468={} stack_hint=g128600:{}",
                 step,
@@ -2514,9 +2558,7 @@ fn steps_script_29_archive_entry_block_live() -> TestResult<()> {
 
         let (summary, trace) =
             system_runtime.run_with_service_trace(1, MAX_INSTRUCTIONS_PER_EVENT, 8)?;
-        if frame.script_index == 29
-            && (0x9b..=0x1f9).contains(&frame.last_instruction_offset)
-        {
+        if frame.script_index == 29 && (0x9b..=0x1f9).contains(&frame.last_instruction_offset) {
             let current = system_runtime.current_frame_state().unwrap_or_default();
             println!(
                 "local_script_29_live_after step={} completed={} limited={} frame={} trace={} local24={} local28={} local2c={} local30={} local38={} local3c={} local40={} local44={} local48={} local208={} local20a={} local354={} local45c={} local464={} local468={}",
@@ -2579,7 +2621,8 @@ fn traces_scrdrv_loaded_call_frame_alignment() -> TestResult<()> {
             .id_from_index(before.script_index)
             .map(|id| describe_script_id(scripts, id))
             .unwrap_or_else(|| format!("invalid:{}", before.script_index));
-        let (summary, trace) = system_runtime.run_with_service_trace(1, MAX_INSTRUCTIONS_PER_EVENT, 8)?;
+        let (summary, trace) =
+            system_runtime.run_with_service_trace(1, MAX_INSTRUCTIONS_PER_EVENT, 8)?;
         let after = system_runtime.current_frame_state().unwrap_or_default();
         let after_name = scripts
             .id_from_index(after.script_index)
@@ -2643,7 +2686,10 @@ fn traces_bitmap_bp_graph_string_arguments() -> TestResult<()> {
                 .enumerate()
                 .filter_map(|(index, value)| {
                     value.string_bytes().map(|bytes| {
-                        let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+                        let end = bytes
+                            .iter()
+                            .position(|byte| *byte == 0)
+                            .unwrap_or(bytes.len());
                         (
                             index,
                             String::from_utf8_lossy(&bytes[..end]).into_owned(),
@@ -2892,7 +2938,9 @@ fn describe_instruction_kind(kind: &SystemInstructionKind<'_>) -> String {
             bytes,
         } => format!(
             "getstr:disp={displacement} target={} bytes={}",
-            target.map(|value| format!("0x{value:x}")).unwrap_or_else(|| "none".to_owned()),
+            target
+                .map(|value| format!("0x{value:x}"))
+                .unwrap_or_else(|| "none".to_owned()),
             bytes
                 .map(|value| format_script_name(value, 64))
                 .unwrap_or_else(|| "none".to_owned())
@@ -2902,7 +2950,9 @@ fn describe_instruction_kind(kind: &SystemInstructionKind<'_>) -> String {
             target,
         } => format!(
             "getcode:disp={displacement} target={}",
-            target.map(|value| format!("0x{value:x}")).unwrap_or_else(|| "none".to_owned())
+            target
+                .map(|value| format!("0x{value:x}"))
+                .unwrap_or_else(|| "none".to_owned())
         ),
         SystemInstructionKind::Branch { kind } => format!("branch:{kind:?}"),
         SystemInstructionKind::WidthOperand { width } => format!("width:{width}"),
@@ -3445,7 +3495,6 @@ fn format_arg_slots(event: &sakura_core::SystemServiceTraceEvent) -> String {
         .collect::<Vec<_>>()
         .join("|")
 }
-
 
 fn system_value_kind_label(value: &sakura_core::SystemValue<'_>) -> &'static str {
     match value {

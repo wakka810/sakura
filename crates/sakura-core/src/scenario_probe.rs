@@ -62,6 +62,32 @@ pub fn write_scenario_first_event_packet(payload: &[u8], out: &mut [u8]) -> Resu
             write_u32(out, 16, saturating_u32(function.name.len()));
             write_u32(out, 28, saturating_u32(function.string_args.len()));
         }
+        ScenarioEvent::Graph(command) => {
+            write_u32(out, 4, 5);
+            write_u32(out, 8, command.opcode);
+            write_u32(out, 12, saturating_u32(command.offset));
+            write_u32(out, 24, saturating_u32(command.int_args.len()));
+            write_u32(out, 28, saturating_u32(command.string_args.len()));
+        }
+        ScenarioEvent::Sound(command) => {
+            write_u32(out, 4, 7);
+            write_u32(out, 8, command.opcode);
+            write_u32(out, 12, saturating_u32(command.offset));
+            write_u32(out, 24, saturating_u32(command.int_args.len()));
+            write_u32(out, 28, saturating_u32(command.string_args.len()));
+        }
+        ScenarioEvent::Wait(wait) => {
+            write_u32(out, 4, 6);
+            write_u32(out, 8, wait.opcode);
+            write_u32(out, 12, saturating_u32(wait.offset));
+            write_u32(out, 24, wait.duration_ms);
+        }
+        ScenarioEvent::MessageControl(control) => {
+            write_u32(out, 4, 8);
+            write_u32(out, 8, control.opcode);
+            write_u32(out, 12, saturating_u32(control.offset));
+            write_u32(out, 24, control.duration_ms);
+        }
         ScenarioEvent::Halted => write_u32(out, 4, 4),
     }
     Ok(())

@@ -33,7 +33,8 @@ function deallocWasm(exports, ptr, len) {
 }
 
 export function createCore(exports) {
-const error = 0xffffffff;
+  const error = 0xffffffff;
+  const movieFrameBuffers = new Map();
   return {
     version: () => exports.sakura_engine_abi_version(),
     arc20EntryCount: (prefix, archiveLength) => {
@@ -213,6 +214,71 @@ const error = 0xffffffff;
       } finally {
         deallocWasm(exports, ptr, payload.byteLength);
       }
+    },
+    movieDecoderCreate: (payload) => {
+      const ptr = allocWasm(exports, payload.byteLength);
+      try {
+        new Uint8Array(exports.memory.buffer, ptr, payload.byteLength).set(payload);
+        const handle = exports.sakura_movie_decoder_create(ptr, payload.byteLength);
+        if (handle === 0) {
+          return 0;
+        }
+        const rgbaLength = exports.sakura_movie_decoder_rgba_len(handle);
+        if (rgbaLength === error || rgbaLength === 0) {
+          exports.sakura_movie_decoder_destroy(handle);
+          return 0;
+        }
+        const framePtr = allocWasm(exports, rgbaLength);
+        if (framePtr === 0) {
+          exports.sakura_movie_decoder_destroy(handle);
+          return 0;
+        }
+        movieFrameBuffers.set(handle, { ptr: framePtr, length: rgbaLength });
+        return handle;
+      } finally {
+        deallocWasm(exports, ptr, payload.byteLength);
+      }
+    },
+    movieDecoderDestroy: (handle) => {
+      const frame = movieFrameBuffers.get(handle);
+      if (frame) {
+        deallocWasm(exports, frame.ptr, frame.length);
+        movieFrameBuffers.delete(handle);
+      }
+      return exports.sakura_movie_decoder_destroy(handle) === 1;
+    },
+    movieDecoderReset: (handle) => (
+      exports.sakura_movie_decoder_reset(handle) === 1
+    ),
+    movieDecoderWidth: (handle) => exports.sakura_movie_decoder_width(handle),
+    movieDecoderHeight: (handle) => exports.sakura_movie_decoder_height(handle),
+    movieDecoderFrameRate: (handle) => (
+      exports.sakura_movie_decoder_frame_rate_milli(handle) / 1000
+    ),
+    movieDecoderDecodeNext: (handle) => (
+      exports.sakura_movie_decoder_decode_next(handle) === 1
+    ),
+    movieDecoderDecodedFrames: (handle) => (
+      exports.sakura_movie_decoder_decoded_frames(handle)
+    ),
+    movieDecoderRgba: (handle) => {
+      const frame = movieFrameBuffers.get(handle);
+      if (!frame) {
+        return null;
+      }
+      const written = exports.sakura_movie_decoder_rgba_write(
+        handle,
+        frame.ptr,
+        frame.length,
+      );
+      if (written !== frame.length) {
+        return null;
+      }
+      return new Uint8ClampedArray(
+        exports.memory.buffer,
+        frame.ptr,
+        frame.length,
+      );
     },
     dscScriptSummary: (payload) => writeFixedPacket(
       exports,
@@ -647,6 +713,7 @@ const error = 0xffffffff;
     },
     scenarioSessionDestroy: (handle) => exports.sakura_scenario_session_destroy(handle),
     scenarioSessionClone: (handle) => exports.sakura_scenario_session_clone(handle),
+    scenarioSessionMode: (handle) => exports.sakura_scenario_session_mode(handle),
     scenarioSessionAdvanceMessage: (handle) => (
       exports.sakura_scenario_session_advance_message(handle)
     ),
@@ -786,6 +853,10 @@ function parseScenarioSessionStepPacket(packet) {
     eventKind: view.getUint32(4, true),
     mode: view.getUint32(8, true),
     eventCount: view.getUint32(12, true),
+    field16: view.getUint32(16, true),
+    field20: view.getUint32(20, true),
+    field24: view.getUint32(24, true),
+    field28: view.getUint32(28, true),
     nameLength: view.getUint32(16, true),
     textLength: view.getUint32(20, true),
     optionCount: view.getUint32(24, true),

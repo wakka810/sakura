@@ -308,10 +308,13 @@ impl AssetCatalog {
 
 fn archive_query_matches(query: &[u8], candidate: &[u8]) -> bool {
     query.len() == candidate.len()
-        && query.iter().zip(candidate).all(|(left, right)| match *left {
-            b'x' | b'X' => right.is_ascii_digit(),
-            _ => left.eq_ignore_ascii_case(right),
-        })
+        && query
+            .iter()
+            .zip(candidate)
+            .all(|(left, right)| match *left {
+                b'x' | b'X' => right.is_ascii_digit(),
+                _ => left.eq_ignore_ascii_case(right),
+            })
 }
 
 fn asset_name_matches(query: &[u8], candidate: &[u8]) -> bool {

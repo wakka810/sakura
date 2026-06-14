@@ -197,6 +197,7 @@ fn step_session(handle: u32, out: &mut [u8]) -> Result<usize> {
                 event_index,
                 name,
                 text,
+                ..
             } => Some(BacklogEntry {
                 event_index: *event_index,
                 name: name.map(Vec::from),
@@ -334,23 +335,48 @@ impl SessionStore {
 fn event_payload(event: &SessionEvent<'_>) -> Vec<u8> {
     let mut payload = Vec::new();
     match event {
-        SessionEvent::Message { name, text, .. } => {
+        SessionEvent::Message {
+            int_args,
+            name,
+            text,
+            ..
+        } => {
+            write_i32_values(&mut payload, int_args);
             if let Some(name) = name {
                 payload.extend_from_slice(name);
             }
             payload.extend_from_slice(text);
         }
-        SessionEvent::Choice { options, .. } => {
+        SessionEvent::Choice {
+            int_args, options, ..
+        } => {
+            write_i32_values(&mut payload, int_args);
             for option in options {
                 write_len_prefixed(&mut payload, option);
             }
         }
         SessionEvent::UserFunction { function, .. } => {
+            write_i32_values(&mut payload, &function.int_args);
             payload.extend_from_slice(function.name);
             for arg in &function.string_args {
                 write_len_prefixed(&mut payload, arg);
             }
         }
+        SessionEvent::Graph { command, .. } => {
+            write_i32_values(&mut payload, &command.int_args);
+            for arg in &command.string_args {
+                write_len_prefixed(&mut payload, arg);
+            }
+            write_array_args(&mut payload, &command.array_args);
+        }
+        SessionEvent::Sound { command, .. } => {
+            write_i32_values(&mut payload, &command.int_args);
+            for arg in &command.string_args {
+                write_len_prefixed(&mut payload, arg);
+            }
+        }
+        SessionEvent::Wait { .. } => {}
+        SessionEvent::MessageControl { .. } => {}
         SessionEvent::Halted => {}
     }
     payload
@@ -358,14 +384,55 @@ fn event_payload(event: &SessionEvent<'_>) -> Vec<u8> {
 
 fn write_event_lengths(out: &mut [u8], event: &SessionEvent<'_>, payload_len: usize) {
     match event {
-        SessionEvent::Message { name, text, .. } => {
+        SessionEvent::Message {
+            opcode,
+            int_args,
+            name,
+            text,
+            ..
+        } => {
             write_u32(out, 16, name.map_or(0, |value| saturating_u32(value.len())));
             write_u32(out, 20, saturating_u32(text.len()));
+            write_u32(out, 24, *opcode);
+            write_u32(out, 28, saturating_u32(int_args.len()));
         }
-        SessionEvent::Choice { options, .. } => write_u32(out, 24, saturating_u32(options.len())),
+        SessionEvent::Choice {
+            opcode,
+            int_args,
+            options,
+            ..
+        } => {
+            write_u32(out, 16, saturating_u32(int_args.len()));
+            write_u32(out, 24, saturating_u32(options.len()));
+            write_u32(out, 28, *opcode);
+        }
         SessionEvent::UserFunction { function, .. } => {
             write_u32(out, 16, saturating_u32(function.name.len()));
+            write_u32(out, 20, saturating_u32(function.int_args.len()));
+            write_u32(out, 24, saturating_u32(function.offset));
             write_u32(out, 28, saturating_u32(function.string_args.len()));
+        }
+        SessionEvent::Graph { command, .. } => {
+            write_u32(out, 16, saturating_u32(command.int_args.len()));
+            write_u32(out, 20, saturating_u32(command.string_args.len()));
+            write_u32(out, 24, command.opcode);
+            write_u32(out, 28, saturating_u32(command.offset));
+        }
+        SessionEvent::Sound { command, .. } => {
+            write_u32(out, 16, saturating_u32(command.int_args.len()));
+            write_u32(out, 20, saturating_u32(command.string_args.len()));
+            write_u32(out, 24, command.opcode);
+            write_u32(out, 28, saturating_u32(command.offset));
+        }
+        SessionEvent::Wait { wait, .. } => {
+            write_u32(out, 16, wait.duration_ms);
+            write_u32(out, 24, wait.opcode);
+            write_u32(out, 28, saturating_u32(wait.offset));
+        }
+        SessionEvent::MessageControl { control, .. } => {
+            write_u32(out, 16, control.duration_ms);
+            write_u32(out, 24, control.opcode);
+            write_u32(out, 28, saturating_u32(control.offset));
         }
         SessionEvent::Halted => {}
     }
@@ -375,6 +442,26 @@ fn write_event_lengths(out: &mut [u8], event: &SessionEvent<'_>, payload_len: us
 fn write_len_prefixed(out: &mut Vec<u8>, value: &[u8]) {
     out.extend_from_slice(&saturating_u32(value.len()).to_le_bytes());
     out.extend_from_slice(value);
+}
+
+fn write_i32_values(out: &mut Vec<u8>, values: &[i32]) {
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+fn write_array_args(out: &mut Vec<u8>, values: &[crate::scenario::ScenarioArrayArg]) {
+    if values.is_empty() {
+        return;
+    }
+    out.extend_from_slice(b"ARRY");
+    out.extend_from_slice(&saturating_u32(values.len()).to_le_bytes());
+    for value in values {
+        out.extend_from_slice(&saturating_u32(value.index).to_le_bytes());
+        out.extend_from_slice(&value.address.to_le_bytes());
+        out.extend_from_slice(&saturating_u32(value.bytes.len()).to_le_bytes());
+        out.extend_from_slice(&value.bytes);
+    }
 }
 
 fn trim_backlog(backlog: &mut VecDeque<BacklogEntry>, limit: usize) {
@@ -389,6 +476,10 @@ fn session_event_code(event: &SessionEvent<'_>) -> u32 {
         SessionEvent::Choice { .. } => 2,
         SessionEvent::UserFunction { .. } => 3,
         SessionEvent::Halted => 4,
+        SessionEvent::Graph { .. } => 5,
+        SessionEvent::Wait { .. } => 6,
+        SessionEvent::Sound { .. } => 7,
+        SessionEvent::MessageControl { .. } => 8,
     }
 }
 
@@ -487,6 +578,7 @@ mod tests {
         let mut snapshot = vec![0; len];
         assert_eq!(snapshot_write(handle, &mut snapshot)?, len);
         assert_eq!(snapshot.get(..8), Some(SNAPSHOT_MAGIC.as_slice()));
+        assert_eq!(read_u32(&snapshot, 8)?, 4);
         assert_eq!(read_u32(&snapshot, 12)?, 3);
         assert_eq!(read_u32(&snapshot, 60)?, 2);
         assert_eq!(
@@ -510,6 +602,121 @@ mod tests {
         assert_eq!(read_u32(&packet, 4)?, 1);
         assert_eq!(current_payload(restored)?, b"second");
         destroy_session(restored)?;
+
+        let mut v3_snapshot = Vec::with_capacity(snapshot.len() - 4);
+        v3_snapshot.extend_from_slice(&snapshot[..80]);
+        v3_snapshot[8..12].copy_from_slice(&3u32.to_le_bytes());
+        v3_snapshot.extend_from_slice(&snapshot[84..]);
+        let v3_restored =
+            create_session_from_dsc_payload(&build_synthetic_dsc(&synthetic_script()))?;
+        restore_snapshot(v3_restored, &v3_snapshot)?;
+        assert_eq!(session_mode(v3_restored)?, 3);
+        destroy_session(v3_restored)?;
+
+        let mut v2_snapshot = Vec::with_capacity(snapshot.len() - 12);
+        v2_snapshot.extend_from_slice(&snapshot[..72]);
+        v2_snapshot[8..12].copy_from_slice(&2u32.to_le_bytes());
+        v2_snapshot.extend_from_slice(&snapshot[84..]);
+        let v2_restored =
+            create_session_from_dsc_payload(&build_synthetic_dsc(&synthetic_script()))?;
+        restore_snapshot(v2_restored, &v2_snapshot)?;
+        assert_eq!(session_mode(v2_restored)?, 3);
+        destroy_session(v2_restored)?;
+
+        let mut legacy_snapshot = Vec::with_capacity(snapshot.len() - 20);
+        legacy_snapshot.extend_from_slice(&snapshot[..64]);
+        legacy_snapshot[8..12].copy_from_slice(&1u32.to_le_bytes());
+        legacy_snapshot.extend_from_slice(&snapshot[84..]);
+        let legacy_restored =
+            create_session_from_dsc_payload(&build_synthetic_dsc(&synthetic_script()))?;
+        restore_snapshot(legacy_restored, &legacy_snapshot)?;
+        assert_eq!(session_mode(legacy_restored)?, 3);
+        destroy_session(legacy_restored)?;
+        destroy_session(handle)?;
+        Ok(())
+    }
+
+    #[test]
+    fn graph_array_payload_and_vm_memory_survive_snapshot_restore() -> Result<()> {
+        let dsc = build_synthetic_dsc(&synthetic_motion_script());
+        let handle = create_session_from_dsc_payload(&dsc)?;
+        let mut packet = vec![0; SCENARIO_SESSION_STEP_PACKET_LEN];
+
+        step_session(handle, &mut packet)?;
+        assert_eq!(read_u32(&packet, 4)?, 5);
+        assert_eq!(read_u32(&packet, 16)?, 3);
+        assert_eq!(read_u32(&packet, 24)?, 0x030e);
+        let payload = current_payload(handle)?;
+        assert_eq!(&payload[..12], &[1, 0, 0, 0, 1, 0, 0, 0, 39, 0, 0, 0]);
+        assert_eq!(&payload[12..16], b"ARRY");
+        assert_eq!(read_u32(&payload, 16)?, 1);
+        assert_eq!(read_u32(&payload, 20)?, 1);
+        assert_eq!(read_u32(&payload, 24)?, 0x240);
+        assert_eq!(read_u32(&payload, 28)?, 0x120);
+        assert_eq!(read_u32(&payload, 32)?, 1);
+
+        let len = snapshot_len(handle)?;
+        let mut snapshot = vec![0; len];
+        snapshot_write(handle, &mut snapshot)?;
+        let restored = create_session_from_dsc_payload(&dsc)?;
+        restore_snapshot(restored, &snapshot)?;
+        step_session(restored, &mut packet)?;
+        assert_eq!(read_u32(&packet, 24)?, 0x0308);
+        assert_eq!(current_payload(restored)?, 1i32.to_le_bytes());
+
+        destroy_session(restored)?;
+        destroy_session(handle)?;
+        Ok(())
+    }
+
+    #[test]
+    fn number_variables_survive_snapshot_restore() -> Result<()> {
+        let dsc = build_synthetic_dsc(&synthetic_random_set_script());
+        let handle = create_session_from_dsc_payload(&dsc)?;
+        let mut packet = vec![0; SCENARIO_SESSION_STEP_PACKET_LEN];
+
+        step_session(handle, &mut packet)?;
+        assert_eq!(read_u32(&packet, 4)?, 3);
+
+        let len = snapshot_len(handle)?;
+        let mut snapshot = vec![0; len];
+        snapshot_write(handle, &mut snapshot)?;
+        assert_eq!(read_u32(&snapshot, 8)?, 4);
+        assert_eq!(read_u32(&snapshot, 80)?, 1);
+
+        let restored = create_session_from_dsc_payload(&dsc)?;
+        restore_snapshot(restored, &snapshot)?;
+        step_session(restored, &mut packet)?;
+        assert_eq!(read_u32(&packet, 4)?, 5);
+        assert_eq!(current_payload(restored)?, (-34i32).to_le_bytes());
+
+        destroy_session(restored)?;
+        destroy_session(handle)?;
+        Ok(())
+    }
+
+    #[test]
+    fn message_control_uses_wait_compatible_packet_fields() -> Result<()> {
+        let mut script = synthetic_v1_header();
+        append_opcode(&mut script, 0x0150);
+        append_push_int(&mut script, 625);
+        append_opcode(&mut script, 0x0153);
+        append_opcode(&mut script, 0x001b);
+        let handle = create_session_from_dsc_payload(&build_synthetic_dsc(&script))?;
+        let mut packet = vec![0; SCENARIO_SESSION_STEP_PACKET_LEN];
+
+        step_session(handle, &mut packet)?;
+        assert_eq!(read_u32(&packet, 4)?, 8);
+        assert_eq!(read_u32(&packet, 16)?, 150);
+        assert_eq!(read_u32(&packet, 24)?, 0x0150);
+        assert!(current_payload(handle)?.is_empty());
+
+        step_session(handle, &mut packet)?;
+        assert_eq!(read_u32(&packet, 4)?, 8);
+        assert_eq!(read_u32(&packet, 16)?, 625);
+        assert_eq!(read_u32(&packet, 24)?, 0x0153);
+        assert!(current_payload(handle)?.is_empty());
+
         destroy_session(handle)?;
         Ok(())
     }
@@ -545,6 +752,43 @@ mod tests {
         script
     }
 
+    fn synthetic_motion_script() -> Vec<u8> {
+        let mut script = synthetic_v1_header();
+        append_push_address(&mut script, 0x240);
+        append_push_int(&mut script, 1);
+        append_opcode(&mut script, 0x0009);
+        script.extend_from_slice(&2i32.to_le_bytes());
+        append_opcode(&mut script, 0x007f);
+        script.extend_from_slice(&0i32.to_le_bytes());
+        script.extend_from_slice(&0i32.to_le_bytes());
+        append_push_int(&mut script, 1);
+        append_push_address(&mut script, 0x240);
+        append_push_int(&mut script, 1);
+        append_push_int(&mut script, 39);
+        append_opcode(&mut script, 0x030e);
+        append_push_address(&mut script, 0x240);
+        append_opcode(&mut script, 0x0008);
+        script.extend_from_slice(&2i32.to_le_bytes());
+        append_opcode(&mut script, 0x0308);
+        append_opcode(&mut script, 0x001b);
+        script
+    }
+
+    fn synthetic_random_set_script() -> Vec<u8> {
+        let mut script = synthetic_v1_header();
+        append_push_int(&mut script, 51);
+        append_push_int(&mut script, 90);
+        append_push_int(&mut script, -45);
+        append_push_string(&mut script, 56);
+        append_opcode(&mut script, 0x001c);
+        append_push_int(&mut script, 51);
+        append_opcode(&mut script, 0x00e1);
+        append_opcode(&mut script, 0x0300);
+        append_opcode(&mut script, 0x001b);
+        script.extend_from_slice(b"RandomNumberSet\0");
+        script
+    }
+
     fn synthetic_v1_header() -> Vec<u8> {
         let mut script = Vec::new();
         script.extend_from_slice(BURIKO_SCRIPT_V1_MAGIC);
@@ -556,6 +800,16 @@ mod tests {
 
     fn append_push_string(script: &mut Vec<u8>, address: i32) {
         append_opcode(script, 0x0003);
+        script.extend_from_slice(&address.to_le_bytes());
+    }
+
+    fn append_push_int(script: &mut Vec<u8>, value: i32) {
+        append_opcode(script, 0x0000);
+        script.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn append_push_address(script: &mut Vec<u8>, address: i32) {
+        append_opcode(script, 0x0002);
         script.extend_from_slice(&address.to_le_bytes());
     }
 

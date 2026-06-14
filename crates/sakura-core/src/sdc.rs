@@ -144,9 +144,9 @@ fn lz_decompress(input: &[u8], decompressed_len: usize) -> Result<Vec<u8>> {
             out.extend_from_slice(run);
             cursor = end;
         } else {
-            let offset_byte = *input
-                .get(cursor + 1)
-                .ok_or_else(|| SakuraError::InvalidDsc("SDC back-reference truncated".to_owned()))?;
+            let offset_byte = *input.get(cursor + 1).ok_or_else(|| {
+                SakuraError::InvalidDsc("SDC back-reference truncated".to_owned())
+            })?;
             let count = usize::from((control >> 3) & 0xF) + 2;
             let offset = usize::from(offset_byte) + 2 + 256 * usize::from(control & 7);
             if offset > out.len() {

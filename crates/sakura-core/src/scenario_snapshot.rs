@@ -1,9 +1,13 @@
 use crate::error::{Result, SakuraError};
-use crate::scenario::ScenarioVmCheckpoint;
+use crate::scenario::{ScenarioNumericValue, ScenarioVmCheckpoint};
 use crate::session::{PlayerConfig, SessionMode, SessionSnapshot};
 
 pub const SNAPSHOT_MAGIC: &[u8; 8] = b"SKRSLT1\0";
-pub const SNAPSHOT_FIXED_LEN: usize = 64;
+pub const SNAPSHOT_FIXED_LEN: usize = 84;
+const V3_SNAPSHOT_FIXED_LEN: usize = 80;
+const V2_SNAPSHOT_FIXED_LEN: usize = 72;
+const LEGACY_SNAPSHOT_FIXED_LEN: usize = 64;
+const SNAPSHOT_VERSION: u32 = 4;
 
 pub fn snapshot_len(snapshot: &SessionSnapshot) -> Result<usize> {
     SNAPSHOT_FIXED_LEN
@@ -17,6 +21,19 @@ pub fn snapshot_len(snapshot: &SessionSnapshot) -> Result<usize> {
                     SakuraError::InvalidRuntime("snapshot string stack length overflows".to_owned())
                 })?,
         )
+        .and_then(|len| {
+            len.checked_add(snapshot.checkpoint().numeric_stack().len().checked_mul(8)?)
+        })
+        .and_then(|len| len.checked_add(snapshot.checkpoint().memory().len().checked_mul(8)?))
+        .and_then(|len| {
+            len.checked_add(
+                snapshot
+                    .checkpoint()
+                    .number_variables()
+                    .len()
+                    .checked_mul(8)?,
+            )
+        })
         .and_then(|len| len.checked_add(snapshot.choice_history().len().checked_mul(4)?))
         .ok_or_else(|| SakuraError::InvalidRuntime("snapshot length overflows".to_owned()))
 }
@@ -31,7 +48,7 @@ pub fn write_snapshot(snapshot: &SessionSnapshot, out: &mut [u8]) -> Result<usiz
 
     out[..required].fill(0);
     out[..SNAPSHOT_MAGIC.len()].copy_from_slice(SNAPSHOT_MAGIC);
-    write_u32(out, 8, 1);
+    write_u32(out, 8, SNAPSHOT_VERSION);
     write_u32(out, 12, session_mode_code(snapshot.mode()));
     write_u64(out, 16, snapshot.event_count());
     write_u32(out, 24, checked_u32(snapshot.checkpoint().cursor())?);
@@ -56,11 +73,47 @@ pub fn write_snapshot(snapshot: &SessionSnapshot, out: &mut [u8]) -> Result<usiz
     );
     write_u32(out, 56, checked_u32(snapshot.choice_history().len())?);
     write_u32(out, 60, snapshot_mode_option_count(snapshot.mode())?);
+    write_u32(
+        out,
+        64,
+        checked_u32(snapshot.checkpoint().numeric_stack().len())?,
+    );
+    write_u32(out, 68, checked_u32(snapshot.checkpoint().memory().len())?);
+    write_u32(out, 72, snapshot.checkpoint().time_count_ms());
+    write_u32(out, 76, snapshot.checkpoint().random_state());
+    write_u32(
+        out,
+        80,
+        checked_u32(snapshot.checkpoint().number_variables().len())?,
+    );
 
     let mut cursor = SNAPSHOT_FIXED_LEN;
     for value in snapshot.checkpoint().string_stack() {
         out[cursor..cursor + 4].copy_from_slice(&value.to_le_bytes());
         cursor += 4;
+    }
+    for value in snapshot.checkpoint().numeric_stack() {
+        match value {
+            ScenarioNumericValue::Integer(value) => {
+                write_u32(out, cursor, 0);
+                write_u32(out, cursor + 4, *value as u32);
+            }
+            ScenarioNumericValue::Address(address) => {
+                write_u32(out, cursor, 1);
+                write_u32(out, cursor + 4, *address);
+            }
+        }
+        cursor += 8;
+    }
+    for (address, byte) in snapshot.checkpoint().memory() {
+        write_u32(out, cursor, *address);
+        write_u32(out, cursor + 4, u32::from(*byte));
+        cursor += 8;
+    }
+    for (key, value) in snapshot.checkpoint().number_variables() {
+        write_u32(out, cursor, *key as u32);
+        write_u32(out, cursor + 4, *value as u32);
+        cursor += 8;
     }
     for value in snapshot.choice_history() {
         write_u32(out, cursor, checked_u32(*value)?);
@@ -70,16 +123,46 @@ pub fn write_snapshot(snapshot: &SessionSnapshot, out: &mut [u8]) -> Result<usiz
 }
 
 pub fn parse_snapshot(data: &[u8]) -> Result<SessionSnapshot> {
-    if data.len() < SNAPSHOT_FIXED_LEN || data.get(..SNAPSHOT_MAGIC.len()) != Some(SNAPSHOT_MAGIC) {
+    if data.len() < LEGACY_SNAPSHOT_FIXED_LEN
+        || data.get(..SNAPSHOT_MAGIC.len()) != Some(SNAPSHOT_MAGIC)
+    {
         return Err(SakuraError::InvalidRuntime(
             "scenario snapshot magic is invalid".to_owned(),
         ));
     }
-    if read_u32(data, 8)? != 1 {
+    let version = read_u32(data, 8)?;
+    if !matches!(version, 1 | 2 | 3 | SNAPSHOT_VERSION) {
         return Err(SakuraError::InvalidRuntime(
             "scenario snapshot version is unsupported".to_owned(),
         ));
     }
+    let fixed_len = match version {
+        1 => LEGACY_SNAPSHOT_FIXED_LEN,
+        2 => {
+            if data.len() < V2_SNAPSHOT_FIXED_LEN {
+                return Err(SakuraError::InvalidRuntime(
+                    "scenario snapshot v2 header is truncated".to_owned(),
+                ));
+            }
+            V2_SNAPSHOT_FIXED_LEN
+        }
+        3 => {
+            if data.len() < V3_SNAPSHOT_FIXED_LEN {
+                return Err(SakuraError::InvalidRuntime(
+                    "scenario snapshot v3 header is truncated".to_owned(),
+                ));
+            }
+            V3_SNAPSHOT_FIXED_LEN
+        }
+        _ => {
+            if data.len() < SNAPSHOT_FIXED_LEN {
+                return Err(SakuraError::InvalidRuntime(
+                    "scenario snapshot v4 header is truncated".to_owned(),
+                ));
+            }
+            SNAPSHOT_FIXED_LEN
+        }
+    };
     let mode = parse_session_mode(read_u32(data, 12)?, usize_from_u32(read_u32(data, 60)?)?)?;
     let event_count = read_u64(data, 16)?;
     let cursor = usize_from_u32(read_u32(data, 24)?)?;
@@ -97,10 +180,30 @@ pub fn parse_snapshot(data: &[u8]) -> Result<SessionSnapshot> {
     .validated()?;
     let string_stack_len = usize_from_u32(read_u32(data, 52)?)?;
     let choice_history_len = usize_from_u32(read_u32(data, 56)?)?;
-    let required = SNAPSHOT_FIXED_LEN
+    let numeric_stack_len = if version == 1 {
+        0
+    } else {
+        usize_from_u32(read_u32(data, 64)?)?
+    };
+    let memory_len = if version == 1 {
+        0
+    } else {
+        usize_from_u32(read_u32(data, 68)?)?
+    };
+    let time_count_ms = if version >= 3 { read_u32(data, 72)? } else { 0 };
+    let random_state = if version >= 3 { read_u32(data, 76)? } else { 1 };
+    let number_variable_len = if version >= 4 {
+        usize_from_u32(read_u32(data, 80)?)?
+    } else {
+        0
+    };
+    let required = fixed_len
         .checked_add(string_stack_len.checked_mul(4).ok_or_else(|| {
             SakuraError::InvalidRuntime("snapshot string stack length overflows".to_owned())
         })?)
+        .and_then(|len| len.checked_add(numeric_stack_len.checked_mul(8)?))
+        .and_then(|len| len.checked_add(memory_len.checked_mul(8)?))
+        .and_then(|len| len.checked_add(number_variable_len.checked_mul(8)?))
         .and_then(|len| len.checked_add(choice_history_len.checked_mul(4)?))
         .ok_or_else(|| SakuraError::InvalidRuntime("snapshot length overflows".to_owned()))?;
     if data.len() != required {
@@ -108,11 +211,51 @@ pub fn parse_snapshot(data: &[u8]) -> Result<SessionSnapshot> {
             "scenario snapshot length mismatch".to_owned(),
         ));
     }
-    let mut cursor_offset = SNAPSHOT_FIXED_LEN;
+    let mut cursor_offset = fixed_len;
     let mut string_stack = Vec::with_capacity(string_stack_len);
     for _ in 0..string_stack_len {
         string_stack.push(read_i32(data, cursor_offset)?);
         cursor_offset += 4;
+    }
+    let mut numeric_stack = Vec::with_capacity(numeric_stack_len);
+    for _ in 0..numeric_stack_len {
+        let kind = read_u32(data, cursor_offset)?;
+        let value = read_u32(data, cursor_offset + 4)?;
+        numeric_stack.push(match kind {
+            0 => ScenarioNumericValue::Integer(value as i32),
+            1 => ScenarioNumericValue::Address(value),
+            _ => {
+                return Err(SakuraError::InvalidRuntime(
+                    "scenario snapshot numeric value kind is invalid".to_owned(),
+                ))
+            }
+        });
+        cursor_offset += 8;
+    }
+    let mut memory = std::collections::BTreeMap::new();
+    for _ in 0..memory_len {
+        let address = read_u32(data, cursor_offset)?;
+        let value = read_u32(data, cursor_offset + 4)?;
+        let byte = u8::try_from(value).map_err(|_| {
+            SakuraError::InvalidRuntime("scenario snapshot memory byte is invalid".to_owned())
+        })?;
+        if memory.insert(address, byte).is_some() {
+            return Err(SakuraError::InvalidRuntime(
+                "scenario snapshot contains duplicate memory addresses".to_owned(),
+            ));
+        }
+        cursor_offset += 8;
+    }
+    let mut number_variables = std::collections::BTreeMap::new();
+    for _ in 0..number_variable_len {
+        let key = read_i32(data, cursor_offset)?;
+        let value = read_i32(data, cursor_offset + 4)?;
+        if number_variables.insert(key, value).is_some() {
+            return Err(SakuraError::InvalidRuntime(
+                "scenario snapshot contains duplicate number variables".to_owned(),
+            ));
+        }
+        cursor_offset += 8;
     }
     let mut choice_history = Vec::with_capacity(choice_history_len);
     for _ in 0..choice_history_len {
@@ -120,7 +263,17 @@ pub fn parse_snapshot(data: &[u8]) -> Result<SessionSnapshot> {
         cursor_offset += 4;
     }
     Ok(SessionSnapshot::from_parts_for_restore(
-        ScenarioVmCheckpoint::from_parts(cursor, max_code_address, halted, string_stack),
+        ScenarioVmCheckpoint::from_parts(
+            cursor,
+            max_code_address,
+            time_count_ms,
+            random_state,
+            halted,
+            string_stack,
+            numeric_stack,
+            memory,
+            number_variables,
+        ),
         mode,
         config,
         event_count,

@@ -8,11 +8,10 @@ const RUNTIME_QUEUE_ARG_SLOT_LEN: usize = 16;
 const RUNTIME_GRAPH_INLINE_STRING_HEADER_LEN: usize = 16;
 const RUNTIME_GRAPH_INLINE_STRING_SLOT_LEN: usize =
     16 + SYSTEM_SERVICE_TRACE_INLINE_STRING_MAX_BYTES;
-pub(crate) const RUNTIME_GRAPH_EVENT_LEN: usize =
-    52
-        + SYSTEM_SERVICE_TRACE_ARG_SLOTS * RUNTIME_QUEUE_ARG_SLOT_LEN
-        + RUNTIME_GRAPH_INLINE_STRING_HEADER_LEN
-        + SYSTEM_SERVICE_TRACE_INLINE_STRING_LIMIT * RUNTIME_GRAPH_INLINE_STRING_SLOT_LEN;
+pub(crate) const RUNTIME_GRAPH_EVENT_LEN: usize = 52
+    + SYSTEM_SERVICE_TRACE_ARG_SLOTS * RUNTIME_QUEUE_ARG_SLOT_LEN
+    + RUNTIME_GRAPH_INLINE_STRING_HEADER_LEN
+    + SYSTEM_SERVICE_TRACE_INLINE_STRING_LIMIT * RUNTIME_GRAPH_INLINE_STRING_SLOT_LEN;
 pub(crate) const RUNTIME_GRAPH_MAX_EVENTS: usize = 256;
 pub(crate) const RUNTIME_GRAPH_QUEUE_PACKET_LEN: usize =
     32 + RUNTIME_GRAPH_EVENT_LEN * RUNTIME_GRAPH_MAX_EVENTS;
@@ -125,8 +124,7 @@ fn push_unique_graph_event<'a>(
 fn is_priority_graph_service(service_id: u8) -> bool {
     matches!(
         service_id,
-        0x10
-            | 0x11
+        0x10 | 0x11
             | 0x13
             | 0x31
             | 0x32
@@ -228,8 +226,8 @@ mod tests {
     use super::*;
     use crate::system_runtime::SystemServiceTraceEvent;
 
-    fn empty_arg_slots() -> [crate::system_runtime::SystemServiceTraceArg; SYSTEM_SERVICE_TRACE_ARG_SLOTS]
-    {
+    fn empty_arg_slots(
+    ) -> [crate::system_runtime::SystemServiceTraceArg; SYSTEM_SERVICE_TRACE_ARG_SLOTS] {
         [crate::system_runtime::SystemServiceTraceArg::default(); SYSTEM_SERVICE_TRACE_ARG_SLOTS]
     }
 

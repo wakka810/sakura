@@ -3,12 +3,12 @@ pub mod audio;
 mod bytes;
 pub mod catalog;
 pub mod dsc;
-pub mod sdc;
-pub mod flagdb;
 pub mod error;
 mod ffi;
+pub mod flagdb;
 pub mod image;
 pub mod install_manifest;
+mod movie_decoder;
 pub mod render;
 pub mod runtime;
 mod runtime_graph;
@@ -21,6 +21,7 @@ mod scenario_session_api;
 mod scenario_snapshot;
 pub mod script;
 pub mod script_library;
+pub mod sdc;
 pub mod session;
 mod session_probe;
 pub mod sniff;
@@ -38,9 +39,8 @@ pub use catalog::{
     ArchiveId, ArchiveSummary, AssetCatalog, AssetLocation, AssetRecord, DuplicatePolicy,
 };
 pub use dsc::{decompress_dsc, DSC_MAGIC};
-pub use sdc::{decompress_sdc, is_sdc, SDC_MAGIC};
-pub use flagdb::{flag_name_hash, FlagDb, FlagError};
 pub use error::{Result, SakuraError};
+pub use flagdb::{flag_name_hash, FlagDb, FlagError};
 pub use image::{
     cbg_to_rgba, decode_cbg, decode_raw_bitmap, decrypt_cbg_stream, read_cbg_metadata, CbgImage,
     CbgMetadata, CbgPixelFormat, COMPRESSED_BG_MAGIC,
@@ -50,8 +50,10 @@ pub use render::RgbaSurface;
 pub use runtime::{Runtime, RuntimeConfig};
 pub use runtime_input::RuntimeInputState;
 pub use scenario::{
-    summarize_scenario_events, ScenarioChoice, ScenarioEvent, ScenarioEventSummary,
-    ScenarioMessage, ScenarioProgram, ScenarioUserFunction, ScenarioVm,
+    summarize_scenario_events, ScenarioArrayArg, ScenarioChoice, ScenarioControlCommand,
+    ScenarioEvent, ScenarioEventSummary, ScenarioGraphCommand, ScenarioLabel, ScenarioMessage,
+    ScenarioMessageControl, ScenarioProgram, ScenarioSoundCommand, ScenarioUserFunction,
+    ScenarioVm, ScenarioWait,
 };
 pub use script::{
     analyze_scenario_script, is_buriko_script_v1, ScriptSummary, ScriptVersion,
@@ -60,6 +62,7 @@ pub use script::{
 pub use script_library::{
     classify_dsc_script, LoadedScript, LoadedScriptKind, ScriptId, ScriptLibrary,
 };
+pub use sdc::{decompress_sdc, is_sdc, SDC_MAGIC};
 pub use session::{
     BacklogEntry, PlayerConfig, ScenarioSession, SessionEvent, SessionMode, SessionSnapshot,
 };
@@ -75,8 +78,8 @@ pub use system_host::{
     SystemHostValue, SystemHostWrite,
 };
 pub use system_runtime::{
-    run_system_runtime_with_host, SystemRuntime, SystemRuntimePendingAsset,
-    SystemRuntimeSummary, SystemServiceTrace, SystemServiceTraceEvent, SystemVmEventOwned,
+    run_system_runtime_with_host, SystemRuntime, SystemRuntimePendingAsset, SystemRuntimeSummary,
+    SystemServiceTrace, SystemServiceTraceEvent, SystemVmEventOwned,
 };
 pub use system_script::{analyze_system_script, SystemScriptSummary};
 pub use system_trace::{

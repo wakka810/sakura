@@ -1,4 +1,10 @@
-import { createLocalCatalog, createServerCatalog, parseArcManifest, readArcIndexPrefix } from "../web/local-catalog.js";
+import {
+  createLocalCatalog,
+  createServerCatalog,
+  parseArcManifest,
+  readArcIndexPrefix,
+  readFirstArc20EntryPayloadByExtension,
+} from "../web/local-catalog.js";
 
 const firstArchive = buildArc20([
   ["same", bytes("first")],
@@ -13,6 +19,18 @@ const secondFile = new File([secondArchive.data], "second.arc");
 const prefix = await readArcIndexPrefix(firstFile);
 if (prefix === null || prefix.byteLength !== firstArchive.prefixLength) {
   throw new Error("ARC20 prefix read failed");
+}
+
+const movieArchive = buildArc20([
+  ["readme.txt", bytes("not-video")],
+  ["clip.MPG", bytes("mpeg-payload")],
+]);
+const moviePayload = readFirstArc20EntryPayloadByExtension(movieArchive.data, ".mpg");
+if (moviePayload === null || text(moviePayload) !== "mpeg-payload") {
+  throw new Error("ARC20 extension payload lookup failed");
+}
+if (readFirstArc20EntryPayloadByExtension(movieArchive.data, "../mpg") !== null) {
+  throw new Error("ARC20 extension payload lookup accepted an unsafe suffix");
 }
 
 const parsed = parseArcManifest(firstManifest);

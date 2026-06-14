@@ -253,7 +253,10 @@ impl<'a> SystemVm<'a> {
                 .unknown_mem
                 .iter()
                 .any(|mem| mem.len() > LOCAL_MEM_SIZE)
-            || snapshot.aux_mem.iter().any(|mem| mem.len() > LOCAL_MEM_SIZE)
+            || snapshot
+                .aux_mem
+                .iter()
+                .any(|mem| mem.len() > LOCAL_MEM_SIZE)
         {
             return Err(SakuraError::InvalidRuntime(
                 "system VM snapshot is invalid".to_owned(),
@@ -1228,8 +1231,7 @@ impl<'a> SystemVm<'a> {
         match value {
             SystemValue::VariablePointer(address) => {
                 let offset = usize::try_from(wrap_local_offset(address)).ok()?;
-                (offset.checked_add(len)? <= LOCAL_MEM_SIZE)
-                    .then_some(MemoryAddress::local(offset))
+                (offset.checked_add(len)? <= LOCAL_MEM_SIZE).then_some(MemoryAddress::local(offset))
             }
             SystemValue::LocalStringPointer { address, .. } => {
                 self.decode_external_address(address, len)
@@ -1247,8 +1249,7 @@ impl<'a> SystemVm<'a> {
         match value {
             SystemValue::VariablePointer(address) => {
                 let offset = usize::try_from(wrap_local_offset(address)).ok()?;
-                (offset.checked_add(len)? <= LOCAL_MEM_SIZE)
-                    .then_some(MemoryAddress::local(offset))
+                (offset.checked_add(len)? <= LOCAL_MEM_SIZE).then_some(MemoryAddress::local(offset))
             }
             SystemValue::LocalStringPointer { address, .. } => {
                 self.decode_external_write_address(address, len)
@@ -1266,10 +1267,9 @@ impl<'a> SystemVm<'a> {
             LOCAL_ADDRESS_BASE | LOCAL_ADDRESS_ALT_BASE => {
                 self.memory_address(MemoryAddress::local(offset), len)
             }
-            CODE_ADDRESS_BASE | CODE_ADDRESS_ALT_BASE => {
-                (offset.checked_add(len)? <= self.program.data().len())
-                    .then_some(MemoryAddress::code(offset))
-            }
+            CODE_ADDRESS_BASE | CODE_ADDRESS_ALT_BASE => (offset.checked_add(len)?
+                <= self.program.data().len())
+            .then_some(MemoryAddress::code(offset)),
             0x1400_0000 | 0x1500_0000 => {
                 self.memory_address(MemoryAddress::unknown((value >> 24) - 0x14, offset), len)
             }
@@ -1281,7 +1281,9 @@ impl<'a> SystemVm<'a> {
         let value = value as u32;
         let offset = usize::try_from(value & ADDRESS_OFFSET_MASK).ok()?;
         match value & !ADDRESS_OFFSET_MASK {
-            0 | 0x0100_0000 => self.write_memory_address(MemoryAddress::global(value >> 24, offset), len),
+            0 | 0x0100_0000 => {
+                self.write_memory_address(MemoryAddress::global(value >> 24, offset), len)
+            }
             LOCAL_ADDRESS_BASE | LOCAL_ADDRESS_ALT_BASE => {
                 self.write_memory_address(MemoryAddress::local(offset), len)
             }
@@ -1309,7 +1311,9 @@ impl<'a> SystemVm<'a> {
         let upper = address >> 24;
         let offset = usize::try_from(address & ADDRESS_OFFSET_MASK).ok()?;
         match upper {
-            0x14 | 0x15 => self.write_memory_address(MemoryAddress::unknown(upper - 0x14, offset), len),
+            0x14 | 0x15 => {
+                self.write_memory_address(MemoryAddress::unknown(upper - 0x14, offset), len)
+            }
             0x20..=0x7f => {
                 self.write_memory_address(MemoryAddress::aux((upper >> 1) - 0x10, offset), len)
             }
@@ -1509,8 +1513,7 @@ impl<'a> SystemVm<'a> {
     }
 
     fn read_global_value(&self, slot: usize, offset: usize, width: u8) -> SystemValue<'a> {
-        if slot == 0 && self.script_index == 8 && (0x1d000..0x1f000).contains(&offset) {
-        }
+        if slot == 0 && self.script_index == 8 && (0x1d000..0x1f000).contains(&offset) {}
         if width == 2 {
             if let Some(value) = self
                 .global_slots
@@ -2002,7 +2005,10 @@ fn read_sparse_c_string(mem: &[u8], offset: usize) -> Option<Vec<u8>> {
         return Some(Vec::new());
     }
     let tail = &mem[offset..];
-    let len = tail.iter().position(|byte| *byte == 0).unwrap_or(tail.len());
+    let len = tail
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(tail.len());
     Some(tail[..len].to_vec())
 }
 
@@ -2165,7 +2171,10 @@ struct SprintfSpec {
 fn service_accepts_pointer_strings(family: SystemCallFamily, service_id: u8) -> bool {
     match family {
         SystemCallFamily::System => {
-            matches!(service_id, 0x30 | 0x31 | 0x32 | 0x34 | 0x35 | 0x40 | 0x88 | 0x8a | 0x8b)
+            matches!(
+                service_id,
+                0x30 | 0x31 | 0x32 | 0x34 | 0x35 | 0x40 | 0x88 | 0x8a | 0x8b
+            )
         }
         SystemCallFamily::Sound => true,
         _ => false,

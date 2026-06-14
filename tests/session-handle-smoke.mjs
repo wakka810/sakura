@@ -19,6 +19,37 @@ try {
     throw new Error("failed to create scenario session handle");
   }
   try {
+    const graph = step(handle);
+    if (
+      graph.eventKind !== 5
+      || graph.nameLength !== 1
+      || graph.textLength !== 1
+      || graph.optionCount !== 0x0280
+    ) {
+      throw new Error("unexpected graph command packet");
+    }
+    const graphPayload = decodeCurrentPayloadBytes(handle);
+    const graphView = new DataView(
+      graphPayload.buffer,
+      graphPayload.byteOffset,
+      graphPayload.byteLength,
+    );
+    if (
+      graphView.getInt32(0, true) !== 3000
+      || graphView.getUint32(4, true) !== 7
+      || new TextDecoder().decode(graphPayload.slice(8)) !== "sp0065a"
+    ) {
+      throw new Error("unexpected graph command payload");
+    }
+    const wait = step(handle);
+    if (
+      wait.eventKind !== 6
+      || wait.nameLength !== 1000
+      || wait.optionCount !== 0x0110
+    ) {
+      throw new Error("unexpected wait command packet");
+    }
+
     const first = step(handle);
     if (first.eventKind !== 1 || first.mode !== 2 || first.textLength !== 5) {
       throw new Error("unexpected first message packet");
@@ -112,6 +143,10 @@ function step(handle, allowFailure = false) {
 }
 
 function decodeCurrentPayload(handle) {
+  return new TextDecoder().decode(decodeCurrentPayloadBytes(handle));
+}
+
+function decodeCurrentPayloadBytes(handle) {
   const len = exports.sakura_scenario_session_current_payload_len(handle);
   const ptr = exports.sakura_alloc(len);
   try {
@@ -119,8 +154,7 @@ function decodeCurrentPayload(handle) {
     if (written !== len) {
       throw new Error(`unexpected payload write length ${written}`);
     }
-    const payload = new Uint8Array(exports.memory.buffer, ptr, len).slice();
-    return new TextDecoder().decode(payload);
+    return new Uint8Array(exports.memory.buffer, ptr, len).slice();
   } finally {
     exports.sakura_dealloc(ptr, len);
   }
@@ -191,16 +225,21 @@ function parseStepPacket(packet) {
 
 function buildSyntheticScenarioScript() {
   const code = [];
-  appendPushString(code, 48);
+  appendPushInt(code, 3000);
+  appendPushString(code, 104);
+  appendOpcode(code, 0x0280);
+  appendPushInt(code, 1000);
+  appendOpcode(code, 0x0110);
+  appendPushString(code, 80);
   appendOpcode(code, 0x0140);
-  appendPushString(code, 54);
-  appendPushString(code, 59);
+  appendPushString(code, 86);
+  appendPushString(code, 91);
   appendOpcode(code, 0x0160);
-  appendPushString(code, 65);
+  appendPushString(code, 97);
   appendOpcode(code, 0x0140);
   appendOpcode(code, 0x001b);
   const magic = new TextEncoder().encode("BurikoCompiledScriptVer1.00\0");
-  const strings = new TextEncoder().encode("first\0left\0right\0second\0");
+  const strings = new TextEncoder().encode("first\0left\0right\0second\0sp0065a\0");
   const script = new Uint8Array(magic.length + 12 + code.length + strings.length);
   script.set(magic, 0);
   const view = new DataView(script.buffer);
@@ -213,6 +252,11 @@ function buildSyntheticScenarioScript() {
 function appendPushString(code, address) {
   appendOpcode(code, 0x0003);
   appendI32(code, address);
+}
+
+function appendPushInt(code, value) {
+  appendOpcode(code, 0x0000);
+  appendI32(code, value);
 }
 
 function appendOpcode(code, opcode) {

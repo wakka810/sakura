@@ -6,10 +6,37 @@ import {
   syncMountedAudioState,
 } from "./install-runtime.js";
 import { formatInstallSummary } from "./install-summary.js";
-import { bindScenarioPlayerInput, paintScenarioEvent } from "./session-player.js";
+import {
+  bindScenarioPlayerInput,
+  paintScenarioOverlay,
+  paintScenarioScene,
+  readScenarioSaveSlotSummary,
+  scenarioScreenOffset,
+} from "./session-player.js";
 import { renderGraphQueue, summarizeGraphQueue } from "./graph-renderer.js";
 import { publishSafeRuntimeState } from "./runtime-state-export.js";
 import { safeInstallSummary } from "./safe-summary.js";
+import {
+  applyScenarioConfigControl,
+  closeScenarioConfigWindow,
+  createScenarioConfigState,
+  openScenarioConfigWindow,
+  paintScenarioConfigWindow,
+  readStoredScenarioConfigSettings,
+  scenarioConfigControlAt,
+  scenarioConfigHoverKey,
+  storeScenarioConfigSettings,
+} from "./scenario-config-window.js";
+import {
+  applyScenarioUserDataControl,
+  closeScenarioUserDataWindow,
+  createScenarioUserDataState,
+  openScenarioUserDataWindow,
+  paintScenarioUserDataWindow,
+  scenarioUserDataControlAt,
+  userDataHoverKey,
+  USER_DATA_SLOTS_PER_PAGE,
+} from "./scenario-userdata-window.js";
 
 const statusEl = document.querySelector("#core-status");
 const outputEl = document.querySelector("#probe-output");
@@ -19,7 +46,10 @@ const loadButton = document.querySelector("#load-session");
 const playAudioButton = document.querySelector("#play-audio");
 const installFilesInput = document.querySelector("#install-files");
 const canvas = document.querySelector("#stage");
-const context = canvas.getContext("2d", { alpha: false });
+const context = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
+const runtimeDiagnosticsEnabled =
+  new URLSearchParams(window.location.search).get("debug") === "1";
+document.documentElement.dataset.runtimeDiagnostics = String(runtimeDiagnosticsEnabled);
 const SUMMARY_RENDER_INTERVAL_MS = 250;
 const RUNTIME_DOM_PUBLISH_INTERVAL_MS = 250;
 let installProbeTimer = 0;
@@ -32,6 +62,7 @@ let summaryRenderTimer = 0;
 let lastRuntimeDomPublishAt = 0;
 let pendingRuntimeDomState = null;
 let runtimeDomPublishTimer = 0;
+let suppressNextTitleClick = false;
 const input = createInputController(canvas, {
   keyboardTarget: window,
   onChange: publishRuntimeState,
@@ -114,8 +145,10 @@ saveButton.addEventListener("click", () => {
   publishRuntimeState(true);
 });
 
-loadButton.addEventListener("click", () => {
-  const result = activeInstall?.player?.loadFromStorage();
+loadButton.addEventListener("click", async () => {
+  const result = activeInstall?.player
+    ? await activeInstall.player.loadFromStorage()
+    : null;
   if (result?.ok) {
     activeInstall.summary.localRuntimeScenarioSessionLoadBytes = result.bytes;
     paintMountedFrame(activeInstall);
@@ -134,17 +167,68 @@ installFilesInput.addEventListener("input", scheduleInstallProbe); installFilesI
 canvas.addEventListener("mousemove", (event) => {
   const mounted = activeInstall;
   if (!mounted || mounted.stage !== "title") return;
+  if (titleConfigIsOpen(mounted)) {
+    if (updateTitleConfigHover(mounted, event.clientX, event.clientY)) {
+      paintMountedFrame(mounted);
+      publishRuntimeState();
+    }
+    return;
+  }
+  if (titleUserDataIsOpen(mounted)) {
+    if (updateTitleUserDataHover(mounted, event.clientX, event.clientY)) {
+      paintMountedFrame(mounted);
+      publishRuntimeState();
+    }
+    return;
+  }
   const hit = titleMenuHit(mounted, event.clientX, event.clientY);
   if (hit !== mounted.hoverIndex) {
     mounted.hoverIndex = hit;
     paintMountedFrame(mounted);
   }
 });
+canvas.addEventListener("pointerup", (event) => {
+  const mounted = activeInstall;
+  if (!mounted || mounted.stage !== "title" || !titleConfigIsOpen(mounted)) {
+    return;
+  }
+  if (event.button === 2) {
+    closeScenarioConfigWindow(ensureTitleConfigState(mounted));
+  } else {
+    applyTitleConfigClick(mounted, event.clientX, event.clientY);
+    suppressNextTitleClick = true;
+  }
+  paintMountedFrame(mounted);
+  publishRuntimeState(true);
+  event.preventDefault();
+  event.stopPropagation();
+}, true);
+canvas.addEventListener("pointerup", (event) => {
+  const mounted = activeInstall;
+  if (!mounted || mounted.stage !== "title" || !titleUserDataIsOpen(mounted)) {
+    return;
+  }
+  if (event.button === 2) {
+    closeScenarioUserDataWindow(ensureTitleUserDataState(mounted));
+  } else {
+    applyTitleUserDataClick(mounted, event.clientX, event.clientY);
+    suppressNextTitleClick = true;
+  }
+  paintMountedFrame(mounted);
+  publishRuntimeState(true);
+  event.preventDefault();
+  event.stopPropagation();
+}, true);
 globalThis.sakuraAdvanceBoot = () => {
   const mounted = activeInstall;
   if (!mounted) return false;
   if (mounted.stage === "boot") { if (bootPhaseIsHold(mounted)) { advanceBootPhase(mounted); publishRuntimeState(true); } return true; }
-  if (mounted.stage === "title") { mounted.startScenario?.(); paintMountedFrame(mounted); publishRuntimeState(true); return true; }
+  if (mounted.stage === "title") {
+    if (titleConfigIsOpen(mounted) || titleUserDataIsOpen(mounted)) {
+      return true;
+    }
+    return activateTitleMenu(mounted, 0);
+  }
   return false;
 };
 canvas.addEventListener("click", (event) => {
@@ -158,13 +242,61 @@ canvas.addEventListener("click", (event) => {
     return;
   }
   if (mounted.stage === "title") {
+    if (suppressNextTitleClick) {
+      suppressNextTitleClick = false;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (titleConfigIsOpen(mounted)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (titleUserDataIsOpen(mounted)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     const hit = titleMenuHit(mounted, event.clientX, event.clientY);
-    if (hit === 0) {
-      mounted.startScenario?.();
-      paintMountedFrame(mounted);
-      publishRuntimeState(true);
+    if (activateTitleMenu(mounted, hit)) {
+      event.preventDefault();
+      event.stopPropagation();
     }
   }
+}, true);
+canvas.addEventListener("contextmenu", (event) => {
+  const mounted = activeInstall;
+  if (
+    !mounted
+    || mounted.stage !== "title"
+    || (!titleConfigIsOpen(mounted) && !titleUserDataIsOpen(mounted))
+  ) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+}, true);
+window.addEventListener("keydown", (event) => {
+  const mounted = activeInstall;
+  if (
+    !mounted
+    || mounted.stage !== "title"
+    || (event.key !== "Escape" && event.key !== "Backspace")
+  ) {
+    return;
+  }
+  if (titleConfigIsOpen(mounted)) {
+    closeScenarioConfigWindow(ensureTitleConfigState(mounted));
+  } else if (titleUserDataIsOpen(mounted)) {
+    closeScenarioUserDataWindow(ensureTitleUserDataState(mounted));
+  } else {
+    return;
+  }
+  paintMountedFrame(mounted);
+  publishRuntimeState(true);
+  event.preventDefault();
+  event.stopPropagation();
 }, true);
 bindScenarioPlayerInput(canvas, () => activeInstall, () => {
   paintMountedFrame(activeInstall);
@@ -724,6 +856,149 @@ function titleLayout(image) {
   return { x, y, w, h };
 }
 
+function activateTitleMenu(mounted, index) {
+  if (!mounted || mounted.stage !== "title" || !Number.isInteger(index) || index < 0) {
+    return false;
+  }
+  mounted.hoverIndex = index;
+  if (index === 0) {
+    mounted.titleLastAction = "start";
+    mounted.startScenario?.();
+  } else if (index === 1) {
+    mounted.titleLastAction = "load";
+    openTitleUserDataWindow(mounted);
+  } else if (index === 2) {
+    mounted.titleLastAction = "config";
+    openTitleConfigWindow(mounted);
+  } else {
+    mounted.titleLastAction = "exit_pending";
+  }
+  paintMountedFrame(mounted);
+  publishRuntimeState(true);
+  return true;
+}
+
+function ensureTitleConfigState(mounted) {
+  if (!mounted.titleConfigState) {
+    const state = createScenarioConfigState();
+    const settings = readStoredScenarioConfigSettings();
+    if (settings !== null) {
+      state.settings = settings;
+    }
+    mounted.titleConfigState = state;
+  }
+  return mounted.titleConfigState;
+}
+
+function titleConfigIsOpen(mounted) {
+  return mounted?.titleConfigState?.open === true;
+}
+
+function openTitleConfigWindow(mounted) {
+  const state = ensureTitleConfigState(mounted);
+  const settings = readStoredScenarioConfigSettings();
+  if (settings !== null) {
+    state.settings = settings;
+  }
+  openScenarioConfigWindow(state);
+}
+
+function updateTitleConfigHover(mounted, clientX, clientY) {
+  const state = ensureTitleConfigState(mounted);
+  const point = canvasPointFromClient(clientX, clientY);
+  const control = scenarioConfigControlAt(point.x, point.y, state, mounted.configWindow);
+  const next = scenarioConfigHoverKey(control);
+  if (state.hover === next) {
+    return false;
+  }
+  state.hover = next;
+  return true;
+}
+
+function applyTitleConfigClick(mounted, clientX, clientY) {
+  const state = ensureTitleConfigState(mounted);
+  const point = canvasPointFromClient(clientX, clientY);
+  const control = scenarioConfigControlAt(point.x, point.y, state, mounted.configWindow);
+  const result = applyScenarioConfigControl(state, control);
+  if (result.handled && result.reason !== "title_pending") {
+    storeScenarioConfigSettings(state.settings);
+  }
+  return result;
+}
+
+function canvasPointFromClient(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (clientX - rect.left) * (canvas.width / rect.width),
+    y: (clientY - rect.top) * (canvas.height / rect.height),
+  };
+}
+
+function ensureTitleUserDataState(mounted) {
+  if (!mounted.titleUserDataState) {
+    mounted.titleUserDataState = createScenarioUserDataState();
+  }
+  return mounted.titleUserDataState;
+}
+
+function titleUserDataIsOpen(mounted) {
+  return mounted?.titleUserDataState?.open === true;
+}
+
+function openTitleUserDataWindow(mounted) {
+  const state = ensureTitleUserDataState(mounted);
+  openScenarioUserDataWindow(state, "load");
+}
+
+function updateTitleUserDataHover(mounted, clientX, clientY) {
+  const state = ensureTitleUserDataState(mounted);
+  const point = canvasPointFromClient(clientX, clientY);
+  const control = scenarioUserDataControlAt(point.x, point.y, state, mounted.userDataWindow);
+  const next = userDataHoverKey(control);
+  if (state.hover === next) {
+    return false;
+  }
+  state.hover = next;
+  return true;
+}
+
+function applyTitleUserDataClick(mounted, clientX, clientY) {
+  const state = ensureTitleUserDataState(mounted);
+  const point = canvasPointFromClient(clientX, clientY);
+  const control = scenarioUserDataControlAt(point.x, point.y, state, mounted.userDataWindow);
+  const result = applyScenarioUserDataControl(state, control, {
+    save: () => ({ handled: true, ok: false, reason: "title_save_unsupported" }),
+    load: (slot) => {
+      const summary = readScenarioSaveSlotSummary(slot);
+      if (!summary.exists) {
+        return { handled: true, ok: false, reason: "missing_snapshot" };
+      }
+      closeScenarioUserDataWindow(state);
+      mounted.titleUserDataLastResult = "loading";
+      mounted.titleUserDataLastOk = 1;
+      void mounted.loadScenarioFromStorage?.(slot).then((load) => {
+        mounted.titleUserDataLastResult = load?.reason ?? "load_unavailable";
+        mounted.titleUserDataLastOk = Number(load?.ok === true);
+        paintMountedFrame(mounted);
+        publishRuntimeState(true);
+      });
+      return { handled: true, ok: true, reason: "loading" };
+    },
+  });
+  mounted.titleUserDataLastResult = result.reason ?? "";
+  mounted.titleUserDataLastOk = Number(result.ok ?? result.handled ?? false);
+  return result;
+}
+
+function titleUserDataSlotRecords(mounted) {
+  const state = ensureTitleUserDataState(mounted);
+  const start = state.page * USER_DATA_SLOTS_PER_PAGE;
+  return Array.from(
+    { length: USER_DATA_SLOTS_PER_PAGE },
+    (_, index) => readScenarioSaveSlotSummary(start + index),
+  );
+}
+
 const TITLE_NOAUTO = typeof location !== "undefined" && (location.search || "").includes("noauto");
 let stageFadeAlpha = 1;
 let stageAnimRunning = false;
@@ -852,6 +1127,19 @@ function paintTitleScreen(mounted) {
     }
     context.restore();
   }
+  const now = performance.now() / 1000;
+  const dt = petalLastT > 0 ? Math.min(0.05, now - petalLastT) : 0;
+  petalLastT = now;
+  updateAndDrawPetals(context, x, y, w, h, dt);
+  context.restore();
+  paintScenarioUserDataWindow(
+    context,
+    canvas,
+    mounted.userDataWindow,
+    mounted.titleUserDataState,
+    titleUserDataIsOpen(mounted) ? titleUserDataSlotRecords(mounted) : [],
+  );
+  paintScenarioConfigWindow(context, canvas, mounted.configWindow, mounted.titleConfigState);
   stageNonBlackSampleCount = 1;
 }
 
@@ -948,11 +1236,42 @@ function paintMountedFrame(mounted) {
     paintTitleScreen(mounted);
     return;
   }
+  if (mounted.stage === "scenario" && mounted.player) {
+    const offset = scenarioScreenOffset(mounted.player);
+    context.fillStyle = "#000";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.save();
+    context.translate(offset.x, offset.y);
+    const painted = paintScenarioScene(context, canvas, mounted.player, { clear: false });
+    paintScenarioOverlay(
+      context,
+      canvas,
+      mounted.player,
+      mounted.messageWindow,
+    );
+    context.restore();
+    if (!painted) {
+      return;
+    }
+    stageNonBlackSampleCount = 1;
+    return;
+  }
+  if (mounted.stage === "scenario") {
+    context.fillStyle = "#000";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    stageNonBlackSampleCount = 0;
+    return;
+  }
   const image = mounted.bootImage;
   if (image === null) {
     paintBootFrame(core);
     renderMountedGraphQueue(mounted);
-    paintScenarioEvent(context, canvas, mounted.player?.event ?? null);
+    paintScenarioOverlay(
+      context,
+      canvas,
+      mounted.player,
+      mounted.messageWindow,
+    );
     stageNonBlackSampleCount = 1;
     return;
   }
@@ -968,7 +1287,12 @@ function paintMountedFrame(mounted) {
   const y = Math.floor((canvas.height - height) / 2);
   context.drawImage(frameCanvas, x, y, width, height);
   renderMountedGraphQueue(mounted);
-  paintScenarioEvent(context, canvas, mounted.player?.event ?? null);
+  paintScenarioOverlay(
+    context,
+    canvas,
+    mounted.player,
+    mounted.messageWindow,
+  );
   stageNonBlackSampleCount = 1;
 }
 

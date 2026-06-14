@@ -49,8 +49,9 @@ button:disabled {
 }
 
 canvas {
-  width: min(100vw, calc((100vh - 32px) * 16 / 9));
+  width: min(100vw, calc(100vh * 16 / 9));
   max-width: 100%;
+  max-height: 100vh;
   aspect-ratio: 16 / 9;
   height: auto;
   image-rendering: auto;
@@ -88,6 +89,14 @@ pre {
   background: #0e1014;
   color: #dfe5ef;
   white-space: pre-wrap;
+}
+
+html[data-runtime-mounted="true"]:not([data-runtime-diagnostics="true"]) .runtime-shell {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+html[data-runtime-mounted="true"]:not([data-runtime-diagnostics="true"]) .panel {
+  display: none;
 }
 
 @media (max-width: 820px) {

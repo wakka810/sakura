@@ -1,7 +1,10 @@
 use std::collections::VecDeque;
 
 use crate::error::{Result, SakuraError};
-use crate::scenario::{ScenarioProgram, ScenarioUserFunction, ScenarioVm, ScenarioVmCheckpoint};
+use crate::scenario::{
+    ScenarioGraphCommand, ScenarioMessageControl, ScenarioProgram, ScenarioSoundCommand,
+    ScenarioUserFunction, ScenarioVm, ScenarioVmCheckpoint, ScenarioWait,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerConfig {
@@ -127,16 +130,36 @@ impl SessionSnapshot {
 pub enum SessionEvent<'a> {
     Message {
         event_index: u64,
+        opcode: u32,
+        int_args: Vec<i32>,
         name: Option<&'a [u8]>,
         text: &'a [u8],
     },
     Choice {
         event_index: u64,
+        opcode: u32,
+        int_args: Vec<i32>,
         options: Vec<&'a [u8]>,
     },
     UserFunction {
         event_index: u64,
         function: ScenarioUserFunction<'a>,
+    },
+    Graph {
+        event_index: u64,
+        command: ScenarioGraphCommand<'a>,
+    },
+    Sound {
+        event_index: u64,
+        command: ScenarioSoundCommand<'a>,
+    },
+    Wait {
+        event_index: u64,
+        wait: ScenarioWait,
+    },
+    MessageControl {
+        event_index: u64,
+        control: ScenarioMessageControl,
     },
     Halted,
 }
@@ -229,6 +252,8 @@ impl<'a> ScenarioSession<'a> {
                 self.mode = SessionMode::WaitingForMessage;
                 Ok(SessionEvent::Message {
                     event_index,
+                    opcode: message.opcode,
+                    int_args: message.int_args,
                     name: message.name,
                     text: message.text,
                 })
@@ -240,6 +265,8 @@ impl<'a> ScenarioSession<'a> {
                 };
                 Ok(SessionEvent::Choice {
                     event_index,
+                    opcode: choice.opcode,
+                    int_args: choice.int_args,
                     options: choice.options,
                 })
             }
@@ -248,6 +275,31 @@ impl<'a> ScenarioSession<'a> {
                 Ok(SessionEvent::UserFunction {
                     event_index,
                     function,
+                })
+            }
+            crate::ScenarioEvent::Graph(command) => {
+                let event_index = self.next_event_index()?;
+                Ok(SessionEvent::Graph {
+                    event_index,
+                    command,
+                })
+            }
+            crate::ScenarioEvent::Sound(command) => {
+                let event_index = self.next_event_index()?;
+                Ok(SessionEvent::Sound {
+                    event_index,
+                    command,
+                })
+            }
+            crate::ScenarioEvent::Wait(wait) => {
+                let event_index = self.next_event_index()?;
+                Ok(SessionEvent::Wait { event_index, wait })
+            }
+            crate::ScenarioEvent::MessageControl(control) => {
+                let event_index = self.next_event_index()?;
+                Ok(SessionEvent::MessageControl {
+                    event_index,
+                    control,
                 })
             }
             crate::ScenarioEvent::Halted => {
@@ -344,6 +396,7 @@ mod tests {
                 event_index,
                 name,
                 text,
+                ..
             } => {
                 assert_eq!(event_index, 1);
                 assert_eq!(name, None);
@@ -360,6 +413,7 @@ mod tests {
             SessionEvent::Choice {
                 event_index,
                 options,
+                ..
             } => {
                 assert_eq!(event_index, 2);
                 assert_eq!(options, vec![b"left".as_slice(), b"right".as_slice()]);

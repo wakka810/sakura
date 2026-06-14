@@ -67,6 +67,48 @@ export function readArc20EntryPayload(payload, entryName) {
   return null;
 }
 
+export function readFirstArc20EntryPayloadByExtension(payload, extension) {
+  if (
+    !(payload instanceof Uint8Array)
+    || payload.byteLength < ARC20_HEADER_LEN
+    || !matchesArc20Magic(payload)
+    || typeof extension !== "string"
+    || !/^\.[a-z0-9]+$/i.test(extension)
+  ) {
+    return null;
+  }
+  const count = readU32LE(payload, 12);
+  const prefixLength = ARC20_HEADER_LEN + count * ARC20_ENTRY_LEN;
+  if (!Number.isSafeInteger(prefixLength) || prefixLength > payload.byteLength) {
+    return null;
+  }
+  const suffix = extension.toLowerCase();
+  for (let index = 0; index < count; index += 1) {
+    const entryOffset = ARC20_HEADER_LEN + index * ARC20_ENTRY_LEN;
+    const name = arc20EntryNameLower(
+      payload.subarray(entryOffset, entryOffset + ARC20_NAME_LEN),
+    );
+    if (!name.endsWith(suffix)) {
+      continue;
+    }
+    const offset = readU32LE(payload, entryOffset + ARC20_NAME_LEN);
+    const size = readU32LE(payload, entryOffset + ARC20_NAME_LEN + 4);
+    const start = prefixLength + offset;
+    const end = start + size;
+    if (
+      !Number.isSafeInteger(start)
+      || !Number.isSafeInteger(end)
+      || start < prefixLength
+      || end < start
+      || end > payload.byteLength
+    ) {
+      return null;
+    }
+    return payload.slice(start, end);
+  }
+  return null;
+}
+
 export function createLocalCatalog() {
   return new LocalAssetCatalog();
 }

@@ -2,8 +2,8 @@ use crate::error::{Result, SakuraError};
 use crate::runtime::Runtime;
 use crate::script_library::{ScriptId, ScriptLibrary};
 use crate::system_host::{
-    SystemAssetRequest, SystemHost, SystemHostEffect, SystemHostEventKind,
-    SystemHostServiceState, SystemHostSnapshot,
+    SystemAssetRequest, SystemHost, SystemHostEffect, SystemHostEventKind, SystemHostServiceState,
+    SystemHostSnapshot,
 };
 use crate::system_vm::{
     SystemValue, SystemValueSnapshot, SystemVm, SystemVmEvent, SystemVmSnapshot,
@@ -901,7 +901,10 @@ fn service_inline_strings(
             if token == 0 || token > AUX_TOKEN_MAX_OFFSET {
                 continue;
             }
-            if strings.iter().any(|existing| existing.arg_index == arg_index) {
+            if strings
+                .iter()
+                .any(|existing| existing.arg_index == arg_index)
+            {
                 continue;
             }
             let Some(bytes) = vm.aux_token_c_string(0, token as usize) else {
@@ -923,7 +926,9 @@ fn push_inline_string(
     arg_index: usize,
     bytes: &[u8],
 ) {
-    let byte_len = bytes.len().min(SYSTEM_SERVICE_TRACE_INLINE_STRING_MAX_BYTES);
+    let byte_len = bytes
+        .len()
+        .min(SYSTEM_SERVICE_TRACE_INLINE_STRING_MAX_BYTES);
     strings.push(SystemServiceTraceInlineString {
         arg_index,
         byte_len,

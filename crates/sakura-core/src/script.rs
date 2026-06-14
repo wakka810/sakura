@@ -157,8 +157,10 @@ impl<'a> V1State<'a> {
                 0x0001 => self.read_code_address()?,
                 0x0003 => self.read_push_string_address()?,
                 0x001c => self.handle_user_function_call()?,
-                0x0140 | 0x0143 => self.handle_message()?,
+                0x0140 => self.handle_message()?,
+                0x0143 => self.handle_message_process_command(),
                 0x0160 => self.handle_choice_screen(),
+                0x0180 | 0x0185 | 0x0190 | 0x01a9 => self.output_internal_strings(),
                 _ => self.read_template_operands(v1_operand_template(opcode))?,
             }
 
@@ -268,6 +270,11 @@ impl<'a> V1State<'a> {
             self.message_string_operands += 1;
         }
         Ok(())
+    }
+
+    fn handle_message_process_command(&mut self) {
+        self.internal_string_operands += self.string_stack.len();
+        self.string_stack.clear();
     }
 
     fn handle_choice_screen(&mut self) {
@@ -452,6 +459,40 @@ mod tests {
         assert_eq!(summary.choice_string_operands, 2);
         assert_eq!(summary.message_string_operands, 0);
         assert_eq!(summary.max_string_stack_depth, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn treats_message_process_command_strings_as_internal() -> Result<()> {
+        let mut script = synthetic_v1_header();
+        append_push_string(&mut script, 28);
+        append_opcode(&mut script, 0x0143);
+        append_push_string(&mut script, 35);
+        append_opcode(&mut script, 0x0140);
+        append_opcode(&mut script, 0x001b);
+        script.extend_from_slice(b"hidden\0visible\0");
+
+        let summary = analyze_scenario_script(&script)?;
+
+        assert_eq!(summary.message_string_operands, 1);
+        assert_eq!(summary.character_name_string_operands, 0);
+        assert_eq!(summary.internal_string_operands, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn treats_voice_sound_command_strings_as_internal() -> Result<()> {
+        let mut script = synthetic_v1_header();
+        append_push_string(&mut script, 16);
+        append_opcode(&mut script, 0x01a9);
+        append_opcode(&mut script, 0x001b);
+        script.extend_from_slice(b"aid_000001\0");
+
+        let summary = analyze_scenario_script(&script)?;
+
+        assert_eq!(summary.message_string_operands, 0);
+        assert_eq!(summary.character_name_string_operands, 0);
+        assert_eq!(summary.internal_string_operands, 1);
         Ok(())
     }
 

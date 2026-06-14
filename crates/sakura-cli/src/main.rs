@@ -1,14 +1,17 @@
 use sakura_core::{
     analyze_scenario_script, analyze_system_script, cbg_to_rgba, classify_dsc_script, decode_cbg,
-    decompress_dsc, decrypt_cbg_stream, is_buriko_script_v1, read_bgi_audio_metadata,
-    read_cbg_metadata, sniff_payload, ArcArchive, AssetCatalog, InstallManifest, LoadedScriptKind,
-    PayloadKind, Runtime, RuntimeConfig, SakuraError, SystemHost, SystemInstructionKind,
-    SystemProgram,
+    decode_raw_bitmap, decompress_dsc, decrypt_cbg_stream, is_buriko_script_v1,
+    read_bgi_audio_metadata, read_cbg_metadata, sniff_payload, ArcArchive, AssetCatalog,
+    InstallManifest, LoadedScriptKind, PayloadKind, Runtime, RuntimeConfig, SakuraError,
+    ScenarioArrayArg, ScenarioEvent, ScenarioProgram, ScenarioVm, SystemHost,
+    SystemInstructionKind, SystemProgram,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -101,6 +104,44 @@ fn main() -> Result<()> {
             })?;
             validate_catalog(&game_dir)?;
         }
+        "image-info" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli image-info <game-dir> <asset-name> [...]".to_owned(),
+                )
+            })?;
+            let names = args
+                .map(|arg| {
+                    arg.into_string().map_err(|_| {
+                        SakuraError::UnsupportedFormat("asset names must be valid UTF-8".to_owned())
+                    })
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            if names.is_empty() {
+                return Err(SakuraError::UnsupportedFormat(
+                    "image-info requires at least one asset name".to_owned(),
+                )
+                .into());
+            }
+            image_info(&game_dir, &names)?;
+        }
+        "image-extract" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli image-extract <game-dir> <asset-name> <output.pam>"
+                        .to_owned(),
+                )
+            })?;
+            let name = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .ok_or_else(|| SakuraError::UnsupportedFormat("missing asset name".to_owned()))?;
+            let output = args
+                .next()
+                .map(PathBuf::from)
+                .ok_or_else(|| SakuraError::UnsupportedFormat("missing output path".to_owned()))?;
+            image_extract(&game_dir, &name, &output)?;
+        }
         "script-validate" => {
             let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
                 SakuraError::UnsupportedFormat(
@@ -108,6 +149,119 @@ fn main() -> Result<()> {
                 )
             })?;
             validate_scripts(&game_dir)?;
+        }
+        "scenario-opcode-audit" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli scenario-opcode-audit <game-dir> [name-prefix]".to_owned(),
+                )
+            })?;
+            let prefix = args.next().and_then(|arg| arg.into_string().ok());
+            audit_scenario_opcodes(&game_dir, prefix.as_deref())?;
+        }
+        "scenario-command-audit" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli scenario-command-audit <game-dir> <scenario-name> <opcode>"
+                        .to_owned(),
+                )
+            })?;
+            let scenario_name = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .ok_or_else(|| {
+                    SakuraError::UnsupportedFormat("missing scenario name".to_owned())
+                })?;
+            let opcode = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| parse_u32_arg(&arg))
+                .ok_or_else(|| SakuraError::UnsupportedFormat("invalid opcode".to_owned()))?;
+            audit_scenario_command(&game_dir, &scenario_name, opcode)?;
+        }
+        "scenario-control-audit" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli scenario-control-audit <game-dir> <scenario-name>"
+                        .to_owned(),
+                )
+            })?;
+            let scenario_name = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .ok_or_else(|| {
+                    SakuraError::UnsupportedFormat("missing scenario name".to_owned())
+                })?;
+            audit_scenario_controls(&game_dir, &scenario_name)?;
+        }
+        "scenario-byte-window" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli scenario-byte-window <game-dir> <scenario-name> <offset> [word-count]"
+                        .to_owned(),
+                )
+            })?;
+            let scenario_name = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .ok_or_else(|| {
+                    SakuraError::UnsupportedFormat("missing scenario name".to_owned())
+                })?;
+            let offset = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| parse_u32_arg(&arg))
+                .ok_or_else(|| SakuraError::UnsupportedFormat("invalid offset".to_owned()))?
+                as usize;
+            let word_count = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| arg.parse::<usize>().ok())
+                .unwrap_or(24)
+                .clamp(1, 256);
+            scenario_byte_window(&game_dir, &scenario_name, offset, word_count)?;
+        }
+        "scenario-event-window" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli scenario-event-window <game-dir> <scenario-name> <start-event> [count]"
+                        .to_owned(),
+                )
+            })?;
+            let scenario_name = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .ok_or_else(|| {
+                    SakuraError::UnsupportedFormat("missing scenario name".to_owned())
+                })?;
+            let start_event = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| arg.parse::<usize>().ok())
+                .ok_or_else(|| SakuraError::UnsupportedFormat("invalid start event".to_owned()))?;
+            let count = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| arg.parse::<usize>().ok())
+                .unwrap_or(32)
+                .clamp(1, 256);
+            scenario_event_window(&game_dir, &scenario_name, start_event, count)?;
+        }
+        "scenario-label-audit" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli scenario-label-audit <game-dir> <scenario-name> [name-filter]"
+                        .to_owned(),
+                )
+            })?;
+            let scenario_name = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .ok_or_else(|| {
+                    SakuraError::UnsupportedFormat("missing scenario name".to_owned())
+                })?;
+            let name_filter = args.next().and_then(|arg| arg.into_string().ok());
+            audit_scenario_labels(&game_dir, &scenario_name, name_filter.as_deref())?;
         }
         "system-script-rank" => {
             let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
@@ -145,6 +299,30 @@ fn main() -> Result<()> {
                 .and_then(|arg| arg.parse::<usize>().ok())
                 .unwrap_or(32);
             system_window(&game_dir, script_index, offset, count)?;
+        }
+        "system-value-scan" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli system-value-scan <game-dir> <script-index> <value> [limit]"
+                        .to_owned(),
+                )
+            })?;
+            let script_index = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| arg.parse::<usize>().ok())
+                .ok_or_else(|| SakuraError::UnsupportedFormat("missing script index".to_owned()))?;
+            let value = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| parse_hex_or_decimal(&arg).ok())
+                .ok_or_else(|| SakuraError::UnsupportedFormat("missing value".to_owned()))?;
+            let limit = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| arg.parse::<usize>().ok())
+                .unwrap_or(64);
+            system_value_scan(&game_dir, script_index, value, limit)?;
         }
         "system-string-ref-scan" => {
             let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
@@ -307,10 +485,25 @@ fn print_help() {
     println!(
         "                           validate canonical ARC catalog lookup without asset names"
     );
+    println!("  image-info <game-dir> <asset-name> [...]");
+    println!("                           report decoded image dimensions for named local assets");
+    println!("  image-extract <game-dir> <asset-name> <output.pam>");
+    println!("                           decode one named local image without overwriting files");
     println!("  script-validate <game-dir>");
     println!(
         "                           validate v1 Ethornell script structure without text output"
     );
+    println!("  scenario-opcode-audit <game-dir> [name-prefix]");
+    println!("                           list scenario command opcode counts without text output");
+    println!("  scenario-command-audit <game-dir> <scenario-name> <opcode>");
+    println!("                           list argument shapes for one scenario command");
+    println!("  scenario-control-audit <game-dir> <scenario-name>");
+    println!("                           list non-rendering scenario control commands");
+    println!("  scenario-byte-window <game-dir> <scenario-name> <offset> [word-count]");
+    println!("  scenario-event-window <game-dir> <scenario-name> <start-event> [count]");
+    println!("                           show a bounded raw u32 window around a scenario offset");
+    println!("  scenario-label-audit <game-dir> <scenario-name> [name-filter]");
+    println!("                           list compiled scenario labels and code offsets");
     println!("  system-script-rank <game-dir> [limit]");
     println!(
         "                           rank system scripts by safe service counters without names"
@@ -318,6 +511,10 @@ fn print_help() {
     println!("  system-window <game-dir> <script-index> <offset-hex> [count]");
     println!(
         "                           show safe opcode window ending at an offset without strings"
+    );
+    println!("  system-value-scan <game-dir> <script-index> <value> [limit]");
+    println!(
+        "                           list safe immediate/code-reference matches in one system script"
     );
     println!("  system-string-ref-scan <game-dir> <ascii-target> [limit]");
     println!(
@@ -836,6 +1033,96 @@ fn system_window(
     Err(SakuraError::InvalidScript("target script index not found".to_owned()).into())
 }
 
+fn system_value_scan(
+    game_dir: &Path,
+    target_script_index: usize,
+    target_value: usize,
+    limit: usize,
+) -> Result<()> {
+    let archive_paths = collect_archive_files(game_dir)?;
+    let mut script_index = 0usize;
+
+    for path in &archive_paths {
+        let data = fs::read(path)?;
+        let archive = ArcArchive::parse(&data)?;
+        for entry in archive.entries() {
+            let payload = archive.entry_data(entry)?;
+            if sniff_payload(payload) != PayloadKind::Dsc {
+                continue;
+            }
+            let decompressed = decompress_dsc(payload)?;
+            if classify_dsc_script(entry.name.as_bytes(), &decompressed)
+                != Some(LoadedScriptKind::System)
+            {
+                continue;
+            }
+            let current = script_index;
+            script_index += 1;
+            if current != target_script_index {
+                continue;
+            }
+            let program = SystemProgram::parse(&decompressed)?;
+            println!("system_value_scan_version=1");
+            println!("script_index={target_script_index}");
+            println!("target_value=0x{target_value:x}");
+            println!("code_offset=0x{:x}", program.code_offset());
+            println!("code_end=0x{:x}", program.code_end());
+            let mut cursor = program.code_offset();
+            let mut match_count = 0usize;
+            while cursor < program.code_end() {
+                if !matches!(program.has_complete_min_instruction(cursor), Ok(true)) {
+                    break;
+                }
+                let instruction = match program.decode(cursor) {
+                    Ok(instruction) => instruction,
+                    Err(error) => {
+                        println!("decode_error={}", error.to_string().replace(',', ";"));
+                        break;
+                    }
+                };
+                if system_instruction_matches_value(&instruction.kind, target_value) {
+                    match_count += 1;
+                    if match_count <= limit {
+                        println!(
+                            "match={} offset=0x{:x} opcode=0x{:02x} kind={} string={}",
+                            match_count - 1,
+                            instruction.offset,
+                            instruction.opcode,
+                            safe_instruction_label(&instruction.kind),
+                            instruction_string_excerpt(&instruction.kind)
+                        );
+                    }
+                }
+                if instruction.next_offset <= cursor {
+                    break;
+                }
+                cursor = instruction.next_offset;
+            }
+            println!("match_count={match_count}");
+            return Ok(());
+        }
+    }
+
+    Err(SakuraError::InvalidScript("target script index not found".to_owned()).into())
+}
+
+fn system_instruction_matches_value(kind: &SystemInstructionKind<'_>, target: usize) -> bool {
+    match kind {
+        SystemInstructionKind::PushU8(value) => usize::from(*value) == target,
+        SystemInstructionKind::PushU16(value) => usize::from(*value) == target,
+        SystemInstructionKind::PushU32(value) => usize::try_from(*value) == Ok(target),
+        SystemInstructionKind::PushU64(value) => usize::try_from(*value) == Ok(target),
+        SystemInstructionKind::GetVariablePointer(offset) => usize::from(*offset) == target,
+        SystemInstructionKind::GetCodeOffset {
+            target: Some(offset),
+            ..
+        } => *offset == target,
+        SystemInstructionKind::ShortOperand(value) => usize::from(*value) == target,
+        SystemInstructionKind::ServiceCall { service_id, .. } => usize::from(*service_id) == target,
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SystemStringRefRow {
     script_index: usize,
@@ -1024,12 +1311,24 @@ fn runtime_step_probe(
             .and_then(|id| scripts.name_by_id(id))
             .map(|name| format_string_excerpt(name, 64))
             .unwrap_or_else(|| "none".to_owned());
-        let local32 = system_runtime.current_frame_local_integer(32, 2).unwrap_or(0);
-        let local36 = system_runtime.current_frame_local_integer(36, 2).unwrap_or(0);
-        let local40 = system_runtime.current_frame_local_integer(40, 2).unwrap_or(0);
-        let local44 = system_runtime.current_frame_local_integer(44, 2).unwrap_or(0);
-        let local48 = system_runtime.current_frame_local_integer(48, 2).unwrap_or(0);
-        let local52 = system_runtime.current_frame_local_integer(52, 2).unwrap_or(0);
+        let local32 = system_runtime
+            .current_frame_local_integer(32, 2)
+            .unwrap_or(0);
+        let local36 = system_runtime
+            .current_frame_local_integer(36, 2)
+            .unwrap_or(0);
+        let local40 = system_runtime
+            .current_frame_local_integer(40, 2)
+            .unwrap_or(0);
+        let local44 = system_runtime
+            .current_frame_local_integer(44, 2)
+            .unwrap_or(0);
+        let local48 = system_runtime
+            .current_frame_local_integer(48, 2)
+            .unwrap_or(0);
+        let local52 = system_runtime
+            .current_frame_local_integer(52, 2)
+            .unwrap_or(0);
         let mem_ptr = frame.mem_ptr;
         let frame_local = |delta: u32| {
             mem_ptr
@@ -1387,6 +1686,109 @@ fn validate_catalog(game_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn image_info(game_dir: &Path, names: &[String]) -> Result<()> {
+    let requested = names
+        .iter()
+        .map(|name| name.as_bytes().to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let mut found = BTreeMap::<Vec<u8>, (PathBuf, Vec<u8>, usize, usize, PayloadKind)>::new();
+
+    for path in collect_archive_files(game_dir)? {
+        let data = fs::read(&path)?;
+        let archive = ArcArchive::parse(&data)?;
+        for entry in archive.entries() {
+            let key = entry.name.as_bytes().to_ascii_lowercase();
+            if !requested.contains(&key) {
+                continue;
+            }
+            let payload = archive.entry_data(entry)?;
+            let kind = sniff_payload(payload);
+            let (width, height) = decode_image_dimensions(payload)?;
+            found.insert(
+                key,
+                (
+                    path.clone(),
+                    entry.name.as_bytes().to_vec(),
+                    width,
+                    height,
+                    kind,
+                ),
+            );
+        }
+    }
+
+    println!("image_info_version=1");
+    for name in names {
+        let key = name.as_bytes().to_ascii_lowercase();
+        if let Some((archive, actual_name, width, height, kind)) = found.get(&key) {
+            println!(
+                "name={} actual={} archive={} kind={kind:?} width={width} height={height}",
+                name,
+                String::from_utf8_lossy(actual_name),
+                archive.display(),
+            );
+        } else {
+            println!("name={name} missing=1");
+        }
+    }
+    Ok(())
+}
+
+fn decode_image_dimensions(payload: &[u8]) -> Result<(usize, usize)> {
+    let image = decode_local_image(payload)?;
+    Ok((usize::from(image.width), usize::from(image.height)))
+}
+
+fn image_extract(game_dir: &Path, name: &str, output: &Path) -> Result<()> {
+    let key = name.as_bytes().to_ascii_lowercase();
+    let mut selected = None;
+    for path in collect_archive_files(game_dir)? {
+        let data = fs::read(&path)?;
+        let archive = ArcArchive::parse(&data)?;
+        for entry in archive.entries() {
+            if entry.name.as_bytes().eq_ignore_ascii_case(&key) {
+                selected = Some((path.clone(), archive.entry_data(entry)?.to_vec()));
+            }
+        }
+    }
+    let (archive, payload) = selected
+        .ok_or_else(|| SakuraError::UnsupportedFormat(format!("image asset not found: {name}")))?;
+    let image = decode_local_image(&payload)?;
+    let rgba = cbg_to_rgba(&image)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)?;
+    write!(
+        file,
+        "P7\nWIDTH {}\nHEIGHT {}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n",
+        image.width, image.height
+    )?;
+    file.write_all(&rgba)?;
+    println!("image_extract_version=1");
+    println!("name={name}");
+    println!("archive={}", archive.display());
+    println!("width={}", image.width);
+    println!("height={}", image.height);
+    println!("rgba_bytes={}", rgba.len());
+    println!("output={}", output.display());
+    Ok(())
+}
+
+fn decode_local_image(payload: &[u8]) -> Result<sakura_core::CbgImage> {
+    if let Ok(image) = decode_cbg(payload) {
+        return Ok(image);
+    }
+    if let Ok(image) = decode_raw_bitmap(payload) {
+        return Ok(image);
+    }
+    let decompressed = decompress_dsc(payload)?;
+    if let Ok(image) = decode_cbg(&decompressed) {
+        return Ok(image);
+    }
+    Ok(decode_raw_bitmap(&decompressed)?)
+}
+
 fn validate_scripts(game_dir: &Path) -> Result<()> {
     let archive_paths = collect_archive_files(game_dir)?;
     let mut dsc_count = 0usize;
@@ -1519,6 +1921,408 @@ fn validate_scripts(game_dir: &Path) -> Result<()> {
     println!("system_invalid_jump_block_count={system_invalid_jump_blocks}");
     println!("system_invalid_string_target_block_count={system_invalid_string_target_blocks}");
     Ok(())
+}
+
+fn audit_scenario_opcodes(game_dir: &Path, prefix: Option<&str>) -> Result<()> {
+    let archive_paths = collect_archive_files(game_dir)?;
+    let mut canonical = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+    let normalized_prefix = prefix.map(|value| value.as_bytes().to_ascii_lowercase());
+
+    for path in &archive_paths {
+        let data = fs::read(path)?;
+        let archive = ArcArchive::parse(&data)?;
+        for entry in archive.entries() {
+            let name = entry.name.as_bytes();
+            if normalized_prefix
+                .as_deref()
+                .is_some_and(|want| !name.to_ascii_lowercase().starts_with(want))
+            {
+                continue;
+            }
+            let payload = archive.entry_data(entry)?;
+            if sniff_payload(payload) != PayloadKind::Dsc {
+                continue;
+            }
+            let decompressed = decompress_dsc(payload)?;
+            if is_buriko_script_v1(&decompressed) {
+                canonical.insert(name.to_ascii_lowercase(), decompressed);
+            }
+        }
+    }
+
+    let mut aggregate = BTreeMap::<u32, usize>::new();
+    let mut error_count = 0usize;
+    let mut function_library_count = 0usize;
+    println!("scenario_opcode_audit_version=1");
+    println!("scenario_count={}", canonical.len());
+    for (name, data) in canonical {
+        let program = match ScenarioProgram::parse(&data) {
+            Ok(program) => program,
+            Err(error) => {
+                error_count += 1;
+                println!("scenario={} error={error}", String::from_utf8_lossy(&name));
+                continue;
+            }
+        };
+        if name.eq_ignore_ascii_case(b"yuzu_2g") {
+            function_library_count += 1;
+            println!(
+                "scenario={} kind=function-library labels={}",
+                String::from_utf8_lossy(&name),
+                program.labels()?.len()
+            );
+            continue;
+        }
+        let histogram = match ScenarioVm::new(program).opcode_histogram() {
+            Ok(histogram) => histogram,
+            Err(error) => {
+                error_count += 1;
+                println!("scenario={} error={error}", String::from_utf8_lossy(&name));
+                continue;
+            }
+        };
+        let commands = histogram
+            .iter()
+            .filter(|(opcode, _)| (0x0100..=0x03ff).contains(*opcode))
+            .map(|(opcode, count)| {
+                *aggregate.entry(*opcode).or_default() += count;
+                format!("0x{opcode:04x}:{count}")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "scenario={} commands={commands}",
+            String::from_utf8_lossy(&name)
+        );
+    }
+    println!("scenario_function_library_count={function_library_count}");
+    println!("scenario_error_count={error_count}");
+    let aggregate = aggregate
+        .into_iter()
+        .map(|(opcode, count)| format!("0x{opcode:04x}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    println!("aggregate_commands={aggregate}");
+    Ok(())
+}
+
+fn audit_scenario_command(game_dir: &Path, scenario_name: &str, opcode: u32) -> Result<()> {
+    if !(0x0100..=0x03ff).contains(&opcode) {
+        return Err(SakuraError::UnsupportedFormat(
+            "scenario command opcode must be in 0x0100..=0x03ff".to_owned(),
+        )
+        .into());
+    }
+    let script = load_scenario_script(game_dir, scenario_name)?;
+    let program = ScenarioProgram::parse(&script)?;
+    let mut vm = ScenarioVm::new(program);
+    let mut event_index = 0usize;
+    let mut match_count = 0usize;
+    println!("scenario_command_audit_version=2");
+    println!("scenario={scenario_name}");
+    println!("opcode=0x{opcode:04x}");
+    loop {
+        let event = vm.next_event()?;
+        event_index += 1;
+        match &event {
+            ScenarioEvent::Graph(command) if command.opcode == opcode => {
+                print_scenario_command_match(
+                    match_count,
+                    event_index,
+                    command.offset,
+                    &command.int_args,
+                    &command.string_args,
+                    &command.array_args,
+                );
+                match_count += 1;
+            }
+            ScenarioEvent::Sound(command) if command.opcode == opcode => {
+                print_scenario_command_match(
+                    match_count,
+                    event_index,
+                    command.offset,
+                    &command.int_args,
+                    &command.string_args,
+                    &[],
+                );
+                match_count += 1;
+            }
+            ScenarioEvent::Halted => break,
+            _ => {}
+        }
+    }
+    println!("match_count={match_count}");
+    Ok(())
+}
+
+fn audit_scenario_controls(game_dir: &Path, scenario_name: &str) -> Result<()> {
+    let script = load_scenario_script(game_dir, scenario_name)?;
+    let program = ScenarioProgram::parse(&script)?;
+    let commands = ScenarioVm::new(program).control_command_trace()?;
+    println!("scenario_control_audit_version=1");
+    println!("scenario={scenario_name}");
+    println!("command_count={}", commands.len());
+    for (index, command) in commands.iter().enumerate() {
+        println!(
+            "command={index} opcode=0x{:04x} offset=0x{:x} ints=[{}] strings=[{}]",
+            command.opcode,
+            command.offset,
+            format_i32_args(&command.int_args),
+            format_string_args(&command.string_args),
+        );
+    }
+    Ok(())
+}
+
+fn scenario_byte_window(
+    game_dir: &Path,
+    scenario_name: &str,
+    offset: usize,
+    word_count: usize,
+) -> Result<()> {
+    let script = load_scenario_script(game_dir, scenario_name)?;
+    if offset >= script.len() {
+        return Err(SakuraError::UnsupportedFormat(format!(
+            "scenario offset 0x{offset:x} is outside {} bytes",
+            script.len()
+        ))
+        .into());
+    }
+    let half = word_count / 2;
+    let start = offset.saturating_sub(half * 4) & !3;
+    let end = start.saturating_add(word_count * 4).min(script.len() & !3);
+    println!("scenario_byte_window_version=1");
+    println!("scenario={scenario_name}");
+    println!("target=0x{offset:x}");
+    println!("start=0x{start:x}");
+    println!("end=0x{end:x}");
+    for cursor in (start..end).step_by(4) {
+        let value = u32::from_le_bytes([
+            script[cursor],
+            script[cursor + 1],
+            script[cursor + 2],
+            script[cursor + 3],
+        ]);
+        let marker = if cursor == offset { "*" } else { " " };
+        println!("{marker}0x{cursor:08x}: 0x{value:08x}");
+    }
+    Ok(())
+}
+
+fn scenario_event_window(
+    game_dir: &Path,
+    scenario_name: &str,
+    start_event: usize,
+    count: usize,
+) -> Result<()> {
+    let script = load_scenario_script(game_dir, scenario_name)?;
+    let program = ScenarioProgram::parse(&script)?;
+    let mut vm = ScenarioVm::new(program);
+    let end_event = start_event.saturating_add(count);
+    let mut event_index = 0usize;
+    println!("scenario_event_window_version=1");
+    println!("scenario={scenario_name}");
+    println!("start_event={start_event}");
+    println!("count={count}");
+    loop {
+        let event = vm.next_event()?;
+        event_index += 1;
+        if event_index >= start_event && event_index < end_event {
+            match &event {
+                ScenarioEvent::Message(message) => println!(
+                    "event={event_index} kind=message opcode=0x{:04x} offset=0x{:x} ints=[{}] name={} text={}",
+                    message.opcode,
+                    message.offset,
+                    format_i32_args(&message.int_args),
+                    message
+                        .name
+                        .map(|value| format_string_excerpt(value, 32))
+                        .unwrap_or_else(|| "\"\"".to_owned()),
+                    format_string_excerpt(message.text, 72),
+                ),
+                ScenarioEvent::Choice(choice) => println!(
+                    "event={event_index} kind=choice opcode=0x{:04x} offset=0x{:x} ints=[{}] options={}",
+                    choice.opcode,
+                    choice.offset,
+                    format_i32_args(&choice.int_args),
+                    format_string_args(&choice.options),
+                ),
+                ScenarioEvent::UserFunction(function) => println!(
+                    "event={event_index} kind=user offset=0x{:x} ints=[{}] name={} strings=[{}]",
+                    function.offset,
+                    format_i32_args(&function.int_args),
+                    format_string_excerpt(function.name, 48),
+                    format_string_args(&function.string_args),
+                ),
+                ScenarioEvent::Graph(command) => println!(
+                    "event={event_index} kind=graph opcode=0x{:04x} offset=0x{:x} ints=[{}] strings=[{}] arrays={}",
+                    command.opcode,
+                    command.offset,
+                    format_i32_args(&command.int_args),
+                    format_string_args(&command.string_args),
+                    command.array_args.len(),
+                ),
+                ScenarioEvent::Sound(command) => println!(
+                    "event={event_index} kind=sound opcode=0x{:04x} offset=0x{:x} ints=[{}] strings=[{}]",
+                    command.opcode,
+                    command.offset,
+                    format_i32_args(&command.int_args),
+                    format_string_args(&command.string_args),
+                ),
+                ScenarioEvent::Wait(wait) => println!(
+                    "event={event_index} kind=wait opcode=0x{:04x} offset=0x{:x} duration_ms={}",
+                    wait.opcode, wait.offset, wait.duration_ms,
+                ),
+                ScenarioEvent::MessageControl(control) => println!(
+                    "event={event_index} kind=message-control opcode=0x{:04x} offset=0x{:x} duration_ms={}",
+                    control.opcode, control.offset, control.duration_ms,
+                ),
+                ScenarioEvent::Halted => println!("event={event_index} kind=halted"),
+            }
+        }
+        if matches!(event, ScenarioEvent::Halted) || event_index + 1 >= end_event {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn audit_scenario_labels(
+    game_dir: &Path,
+    scenario_name: &str,
+    name_filter: Option<&str>,
+) -> Result<()> {
+    let script = load_scenario_script(game_dir, scenario_name)?;
+    let program = ScenarioProgram::parse(&script)?;
+    let normalized_filter = name_filter.map(|value| value.to_ascii_lowercase());
+    let labels = program.labels()?;
+    println!("scenario_label_audit_version=1");
+    println!("scenario={scenario_name}");
+    println!("label_count={}", labels.len());
+    for label in labels {
+        let printable = String::from_utf8_lossy(label.name);
+        if normalized_filter
+            .as_deref()
+            .is_some_and(|filter| !printable.to_ascii_lowercase().contains(filter))
+        {
+            continue;
+        }
+        println!(
+            "label={} offset=0x{:x} file_offset=0x{:x}",
+            printable,
+            label.offset,
+            program.entry_offset() + label.offset
+        );
+    }
+    Ok(())
+}
+
+fn load_scenario_script(game_dir: &Path, scenario_name: &str) -> Result<Vec<u8>> {
+    let wanted = scenario_name.as_bytes().to_ascii_lowercase();
+    let mut script = None;
+    for path in collect_archive_files(game_dir)? {
+        let data = fs::read(path)?;
+        let archive = ArcArchive::parse(&data)?;
+        for entry in archive.entries() {
+            if entry.name.as_bytes().to_ascii_lowercase() != wanted {
+                continue;
+            }
+            let payload = archive.entry_data(entry)?;
+            if sniff_payload(payload) != PayloadKind::Dsc {
+                continue;
+            }
+            let decompressed = decompress_dsc(payload)?;
+            if is_buriko_script_v1(&decompressed) {
+                script = Some(decompressed);
+            }
+        }
+    }
+    script.ok_or_else(|| {
+        SakuraError::UnsupportedFormat(format!("scenario script not found: {scenario_name}")).into()
+    })
+}
+
+fn format_i32_args(values: &[i32]) -> String {
+    values
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_string_args(values: &[&[u8]]) -> String {
+    values
+        .iter()
+        .map(|value| format_string_excerpt(value, 64))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn print_scenario_command_match(
+    match_index: usize,
+    event_index: usize,
+    offset: usize,
+    int_args: &[i32],
+    string_args: &[&[u8]],
+    array_args: &[ScenarioArrayArg],
+) {
+    let ints = format_i32_args(int_args);
+    let strings = format_string_args(string_args);
+    println!(
+        "match={match_index} event={event_index} offset=0x{offset:x} ints=[{ints}] strings=[{strings}] arrays={}",
+        array_args.len()
+    );
+    for (array_index, array) in array_args.iter().enumerate() {
+        println!(
+            " array={array_index} arg_index={} address=0x{:08x} bytes={}",
+            array.index,
+            array.address,
+            array.bytes.len()
+        );
+        for (motion_index, motion) in array.bytes.chunks_exact(0x120).enumerate() {
+            let coordinate_count = read_i32_slice(motion, 0).unwrap_or(0).clamp(0, 16) as usize;
+            let field04 = read_i32_slice(motion, 0x04).unwrap_or(0);
+            let field08 = read_i32_slice(motion, 0x08).unwrap_or(0);
+            let field0c = read_i32_slice(motion, 0x0c).unwrap_or(0);
+            let opacity = read_i32_slice(motion, 0x10).unwrap_or(0);
+            let movement_mode = read_i32_slice(motion, 0x14).unwrap_or(0);
+            let rotation_mode = read_i32_slice(motion, 0x18).unwrap_or(0);
+            let duration_ms = read_i32_slice(motion, 0x1c).unwrap_or(0);
+            let coordinates = (0..coordinate_count)
+                .map(|coordinate_index| {
+                    let base = 0x20 + coordinate_index * 0x10;
+                    format!(
+                        "{{x={},y={},z={},hold_ms={}}}",
+                        read_i32_slice(motion, base).unwrap_or(0),
+                        read_i32_slice(motion, base + 4).unwrap_or(0),
+                        read_i32_slice(motion, base + 8).unwrap_or(0),
+                        read_i32_slice(motion, base + 12).unwrap_or(0),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            println!(
+                "  motion={motion_index} coordinates={coordinate_count} field04={field04} field08={field08} field0c={field0c} transparency={opacity} movement_mode={movement_mode} rotation_mode={rotation_mode} duration_ms={duration_ms} points=[{coordinates}]"
+            );
+        }
+    }
+}
+
+fn read_i32_slice(data: &[u8], offset: usize) -> Option<i32> {
+    let bytes = data.get(offset..offset + 4)?;
+    Some(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn parse_u32_arg(value: &str) -> Option<u32> {
+    let trimmed = value.trim();
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        trimmed.parse::<u32>().ok()
+    }
 }
 
 fn validate_cbg_streams(game_dir: &Path) -> Result<()> {

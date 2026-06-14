@@ -9,6 +9,9 @@ repository.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[build-dependencies]
+cc = "1.2.46"
+
 [lints.clippy]
 panic = "deny"
 unwrap_used = "deny"

@@ -624,7 +624,11 @@ pub unsafe extern "C" fn sakura_runtime_session_graph_queue_write(
 }
 
 #[no_mangle]
-pub extern "C" fn sakura_runtime_session_memory_len(handle: u32, address: u32, len: usize) -> usize {
+pub extern "C" fn sakura_runtime_session_memory_len(
+    handle: u32,
+    address: u32,
+    len: usize,
+) -> usize {
     runtime_session_memory(handle, address, len).map_or(0, |bytes| bytes.len())
 }
 
@@ -900,9 +904,11 @@ fn write_runtime_session_step_packet(
                 total_service_count: 0,
                 recorded_services: Vec::new(),
             },
-            session.pending_asset.clone().zip(session.pending_event.clone()).map(
-                |(request, event)| SystemRuntimePendingAsset { request, event },
-            ),
+            session
+                .pending_asset
+                .clone()
+                .zip(session.pending_event.clone())
+                .map(|(request, event)| SystemRuntimePendingAsset { request, event }),
         )
     } else {
         system_runtime.run_with_service_trace_until_asset(
@@ -925,7 +931,9 @@ fn write_runtime_session_step_packet(
         runtime_sound_queue_packet(queue_script_index, queue_offset, &trace);
     session_mut.last_graph_queue_packet =
         runtime_graph_queue_packet(queue_script_index, queue_offset, &trace);
-    session_mut.pending_asset = pending_asset.as_ref().map(|pending| pending.request.clone());
+    session_mut.pending_asset = pending_asset
+        .as_ref()
+        .map(|pending| pending.request.clone());
     session_mut.pending_event = pending_asset.as_ref().map(|pending| pending.event.clone());
 
     out[..RUNTIME_SESSION_STEP_PACKET_LEN].fill(0);
@@ -1021,15 +1029,17 @@ fn write_runtime_session_step_packet(
     write_u32(
         out,
         228,
-        session_mut.pending_asset.as_ref().map_or(0, |request| request.size),
+        session_mut
+            .pending_asset
+            .as_ref()
+            .map_or(0, |request| request.size),
     );
     write_u32(
         out,
         232,
-        session_mut
-            .pending_asset
-            .as_ref()
-            .map_or(0, |request| request.name.len().min(u32::MAX as usize) as u32),
+        session_mut.pending_asset.as_ref().map_or(0, |request| {
+            request.name.len().min(u32::MAX as usize) as u32
+        }),
     );
     write_u32(out, 236, u32::from(session_mut.pending_asset.is_some()));
     Ok(())
@@ -1092,7 +1102,14 @@ fn runtime_service_trace_packet(
     trace: &SystemServiceTrace,
 ) -> Vec<u8> {
     let mut packet = vec![0; RUNTIME_SERVICE_TRACE_PACKET_LEN];
-    write_service_trace_summary(&mut packet, script_index, offset, RUNTIME_QUEUE_TRACE_RECORD_LIMIT, summary, trace);
+    write_service_trace_summary(
+        &mut packet,
+        script_index,
+        offset,
+        RUNTIME_QUEUE_TRACE_RECORD_LIMIT,
+        summary,
+        trace,
+    );
     packet
 }
 
@@ -2118,9 +2135,7 @@ mod tests {
             let mut script = vec![0u8; 0x10];
             script.push(0x05);
             script.extend_from_slice(&11i16.to_le_bytes());
-            script.extend_from_slice(&[
-                0x00, 0x00, 0x04, 0x00, 0x20, 0x11, 0x80, 0x30,
-            ]);
+            script.extend_from_slice(&[0x00, 0x00, 0x04, 0x00, 0x20, 0x11, 0x80, 0x30]);
             script.extend_from_slice(b"data01xxx.arc\0");
             script
         });
@@ -2203,7 +2218,10 @@ mod tests {
             ("caller._bp", caller_payload.len() as u32),
         ]);
         mount_archive_manifest(handle, Some(b"scripts.arc"), &manifest, archive_data.len())?;
-        assert_eq!(mount_dsc_script(handle, b"caller._bp", &caller_payload)?.index(), 0);
+        assert_eq!(
+            mount_dsc_script(handle, b"caller._bp", &caller_payload)?.index(),
+            0
+        );
 
         let session = sakura_runtime_session_create(handle, 0, usize::MAX);
         assert_ne!(session, 0);
@@ -2283,7 +2301,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"logwnd._bp")
@@ -2351,7 +2375,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"logwnd._bp")
@@ -2437,7 +2467,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrdrv._bp")
@@ -2824,7 +2860,6 @@ mod tests {
         Ok(())
     }
 
-
     #[test]
     #[ignore = "requires SAKURA_INSTALL_DIR pointing at the user-owned local install"]
     fn traces_real_scrdrv_session_chunk_progression() -> Result<()> {
@@ -2841,7 +2876,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrdrv._bp")
@@ -3094,7 +3135,10 @@ mod tests {
             }
 
             if summary.completed && summary.event_count == 0 {
-                println!("zz_trace completed step={} total_events={}", step, total_events);
+                println!(
+                    "zz_trace completed step={} total_events={}",
+                    step, total_events
+                );
                 break;
             }
         }
@@ -3102,9 +3146,15 @@ mod tests {
         // Final report.
         let ordered_names: Vec<String> = ordered.iter().map(|idx| name_of(*idx)).collect();
         let distinct_names: Vec<String> = first_seen.iter().map(|idx| name_of(*idx)).collect();
-        println!("zz_trace REPORT steps={} total_events={}", step, total_events);
+        println!(
+            "zz_trace REPORT steps={} total_events={}",
+            step, total_events
+        );
         println!("zz_trace REPORT transitions_in_order={:?}", ordered_names);
-        println!("zz_trace REPORT distinct_scripts_first_seen={:?}", distinct_names);
+        println!(
+            "zz_trace REPORT distinct_scripts_first_seen={:?}",
+            distinct_names
+        );
         println!(
             "zz_trace REPORT distinct_indices_first_seen={:?}",
             first_seen,
@@ -3155,7 +3205,11 @@ mod tests {
 
         // Scan the decompressed program for interesting ASCII names.
         let bytes = script.decompressed();
-        for needle in [b"title".as_slice(), b"scrmain".as_slice(), b"StringsDB".as_slice()] {
+        for needle in [
+            b"title".as_slice(),
+            b"scrmain".as_slice(),
+            b"StringsDB".as_slice(),
+        ] {
             let mut from = 0usize;
             while let Some(pos) = bytes[from..]
                 .windows(needle.len())
@@ -3305,8 +3359,10 @@ mod tests {
                         let full_len = read_u32(&graph_packet, cursor + 8)?;
                         let hash = read_u32(&graph_packet, cursor + 12)?;
                         let bytes = &graph_packet[cursor + 16..cursor + 16 + byte_len.min(64)];
-                        let text_end =
-                            bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+                        let text_end = bytes
+                            .iter()
+                            .position(|byte| *byte == 0)
+                            .unwrap_or(bytes.len());
                         let text = String::from_utf8_lossy(&bytes[..text_end]);
                         println!(
                             "runtime_handles_scrdrv_session_graph_inline_slot step={} max_events={} event={} inline={} arg={} byte_len={} full_len={} hash=0x{:08x} text={}",
@@ -3377,8 +3433,7 @@ mod tests {
         for step in 0..160usize {
             let before = system_runtime.snapshot();
             let before_frame = system_runtime.current_frame_state().unwrap_or_default();
-            let (summary, trace) =
-                system_runtime.run_with_service_trace(1, 100_000, 8)?;
+            let (summary, trace) = system_runtime.run_with_service_trace(1, 100_000, 8)?;
             let after = system_runtime.snapshot();
             let after_frame = system_runtime.current_frame_state().unwrap_or_default();
             println!(
@@ -3475,7 +3530,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrdrv._bp")
@@ -3596,7 +3657,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrdrv._bp")
@@ -3720,7 +3787,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrdrv._bp")
@@ -3815,7 +3888,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrdrv._bp")
@@ -3896,7 +3975,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrdrv._bp")
@@ -3992,7 +4077,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrdrv._bp")
@@ -4110,7 +4201,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrdrv._bp")
@@ -4271,7 +4368,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrdrv._bp")
@@ -4356,7 +4459,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrdrv._bp")
@@ -4439,7 +4548,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrdrv._bp")
@@ -4556,7 +4671,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrdrv._bp")
@@ -4623,7 +4744,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrdrv._bp")
@@ -4755,7 +4882,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrdrv._bp")
@@ -4896,7 +5029,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let entry_index = runtime
             .script_index_by_name(b"scrmain._bp")
@@ -4984,7 +5123,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let scripts = runtime.scripts();
         let entry_index = runtime
@@ -5091,7 +5236,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let scripts = runtime.scripts();
         let entry_index = runtime
@@ -5196,7 +5347,13 @@ mod tests {
             let data = fs::read(&path).map_err(|error| {
                 SakuraError::InvalidRuntime(format!("failed to read archive for test: {error}"))
             })?;
-            runtime.mount_archive_data_named(data, path.file_name().and_then(OsStr::to_str).map(|name| name.as_bytes().to_vec()).as_deref())?;
+            runtime.mount_archive_data_named(
+                data,
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.as_bytes().to_vec())
+                    .as_deref(),
+            )?;
         }
         let scripts = runtime.scripts();
         let entry_index = runtime
@@ -5322,15 +5479,19 @@ mod tests {
             .id_from_index(entry_index)
             .ok_or_else(|| SakuraError::InvalidRuntime("scrdrv entry is invalid".to_owned()))?;
         let mut host = SystemHost::with_runtime(&runtime);
-        let mut vm = scripts
-            .system_vm(entry)?
-            .ok_or_else(|| SakuraError::InvalidRuntime("scrdrv._bp is not a system script".to_owned()))?;
+        let mut vm = scripts.system_vm(entry)?.ok_or_else(|| {
+            SakuraError::InvalidRuntime("scrdrv._bp is not a system script".to_owned())
+        })?;
 
         println!("runtime_handles_scrdrv_sys33_void_override_probe_version=1");
         for step in 0..28usize {
             let event = vm.next_event()?;
             let before_stack = format_vm_stack(vm.stack());
-            let frame = format!("{}:0x{:x}", entry.index(), vm.last_instruction_offset().unwrap_or(0));
+            let frame = format!(
+                "{}:0x{:x}",
+                entry.index(),
+                vm.last_instruction_offset().unwrap_or(0)
+            );
             let event_desc = match &event {
                 crate::system_vm::SystemVmEvent::ServiceCall {
                     family,
@@ -5344,12 +5505,18 @@ mod tests {
                     format_vm_stack(args)
                 ),
                 crate::system_vm::SystemVmEvent::LoadedProgramCall { handle, args, .. } => {
-                    format!("loaded:{}:argc{}:{}", handle, args.len(), format_vm_stack(args))
+                    format!(
+                        "loaded:{}:argc{}:{}",
+                        handle,
+                        args.len(),
+                        format_vm_stack(args)
+                    )
                 }
-                crate::system_vm::SystemVmEvent::UserScriptCall {
-                    service_id,
-                    args,
-                } => format!("user:{service_id:02x}:argc{}:{}", args.len(), format_vm_stack(args)),
+                crate::system_vm::SystemVmEvent::UserScriptCall { service_id, args } => format!(
+                    "user:{service_id:02x}:argc{}:{}",
+                    args.len(),
+                    format_vm_stack(args)
+                ),
                 crate::system_vm::SystemVmEvent::UserScriptLoad => "user-load".to_owned(),
                 crate::system_vm::SystemVmEvent::UserScriptFree { args } => {
                     format!("user-free:argc{}:{}", args.len(), format_vm_stack(args))
@@ -5696,9 +5863,11 @@ mod tests {
         }
         println!("zz_trace_asset_names_total_distinct={}", names.len());
         for name in &names {
-            let hit = ["title", "sg", "saku", "logo", "makura", "bg", "feather", "feder", "op"]
-                .iter()
-                .any(|needle| name.to_ascii_lowercase().contains(needle));
+            let hit = [
+                "title", "sg", "saku", "logo", "makura", "bg", "feather", "feder", "op",
+            ]
+            .iter()
+            .any(|needle| name.to_ascii_lowercase().contains(needle));
             println!("zz_asset name={name:?} interesting={hit}");
         }
         Ok(())
@@ -5786,9 +5955,11 @@ mod tests {
         script_names.sort();
         println!("zz_synth_db scripts_seen={script_names:?}");
         for name in &names {
-            let hit = ["title", "sg", "saku", "logo", "makura", "feder", "_op", "00_op"]
-                .iter()
-                .any(|needle| name.to_ascii_lowercase().contains(needle));
+            let hit = [
+                "title", "sg", "saku", "logo", "makura", "feder", "_op", "00_op",
+            ]
+            .iter()
+            .any(|needle| name.to_ascii_lowercase().contains(needle));
             if hit {
                 println!("zz_synth_db interesting_asset={name:?}");
             }

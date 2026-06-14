@@ -66,6 +66,10 @@ fn session_event_code(event: &SessionEvent<'_>) -> u32 {
         SessionEvent::Choice { .. } => 2,
         SessionEvent::UserFunction { .. } => 3,
         SessionEvent::Halted => 4,
+        SessionEvent::Graph { .. } => 5,
+        SessionEvent::Wait { .. } => 6,
+        SessionEvent::Sound { .. } => 7,
+        SessionEvent::MessageControl { .. } => 8,
     }
 }
 

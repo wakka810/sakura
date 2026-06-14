@@ -242,6 +242,26 @@ async function sendStatic(pathname, response) {
   createReadStream(target).pipe(response);
 }
 
+async function sendFile(target, response) {
+  let fileStat;
+  try {
+    fileStat = await stat(target);
+  } catch {
+    sendJson(response, 404, { error: "not_found" });
+    return;
+  }
+  if (!fileStat.isFile()) {
+    sendJson(response, 404, { error: "not_found" });
+    return;
+  }
+  response.writeHead(200, {
+    "Content-Type": contentType(target),
+    "Content-Length": String(fileStat.size),
+    "Cache-Control": "no-store",
+  });
+  createReadStream(target).pipe(response);
+}
+
 function isRuntimeCode(path) {
   return path.endsWith(".js") || path.endsWith(".mjs") || path.endsWith(".wasm");
 }
