@@ -6,6 +6,7 @@ pub mod dsc;
 pub mod error;
 mod ffi;
 pub mod flagdb;
+pub mod gdb;
 pub mod image;
 pub mod install_manifest;
 mod movie_decoder;
@@ -41,6 +42,10 @@ pub use catalog::{
 pub use dsc::{decompress_dsc, DSC_MAGIC};
 pub use error::{Result, SakuraError};
 pub use flagdb::{flag_name_hash, FlagDb, FlagError};
+pub use gdb::{
+    decode_gdb, gdb_viewed_image_names, gdb_viewed_image_names_nul_len,
+    gdb_write_viewed_image_names, is_gdb, GDB_MAGIC,
+};
 pub use image::{
     cbg_to_rgba, decode_cbg, decode_raw_bitmap, decrypt_cbg_stream, read_cbg_metadata, CbgImage,
     CbgMetadata, CbgPixelFormat, COMPRESSED_BG_MAGIC,

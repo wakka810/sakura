@@ -934,6 +934,7 @@ impl<'a> SystemHost<'a> {
         SystemHostResult::Effect(effect)
     }
 
+    #[allow(dead_code)]
     fn archive_binding_result(&mut self, args: &[SystemValue<'_>]) -> SystemHostResult {
         let binding_index = args
             .iter()
@@ -1043,9 +1044,13 @@ impl Default for Graph1fState {
     }
 }
 
+#[allow(dead_code)]
 const SCRMAIN_EVENT_READY_FLAG_ADDR: u32 = 603624;
+#[allow(dead_code)]
 const SCRMAIN_EVENT_PENDING_OFFSET_ADDR: u32 = 603628;
+#[allow(dead_code)]
 const SCRMAIN_EVENT_PENDING_SEQ_ADDR: u32 = 603632;
+#[allow(dead_code)]
 const SCRMAIN_EVENT_RECORD_LEN: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1070,6 +1075,7 @@ impl ScrmainInitState {
         }
     }
 
+    #[allow(dead_code)]
     fn service_8b(&mut self, args: &[SystemValue<'_>]) -> SystemHostResult {
         self.system_8b_seen = true;
         let Some(buffer) = nth_integer_arg(args, 5) else {
@@ -1103,6 +1109,7 @@ impl ScrmainInitState {
         }
     }
 
+    #[allow(dead_code)]
     fn service_8a(&mut self, args: &[SystemValue<'_>]) -> SystemHostResult {
         let Some(buffer) = nth_integer_arg(args, 1) else {
             return SystemHostResult::Integer(0);
@@ -1123,6 +1130,7 @@ impl ScrmainInitState {
         }
     }
 
+    #[allow(dead_code)]
     fn service_5f(&mut self, _args: &[SystemValue<'_>]) -> SystemHostResult {
         if self.pending_seq == 0 && self.pending_offset == 0 {
             return SystemHostResult::Integer(0);
@@ -1165,6 +1173,7 @@ fn nth_integer_arg(args: &[SystemValue<'_>], index: usize) -> Option<u64> {
     args.get(index).and_then(system_value_integer)
 }
 
+#[allow(dead_code)]
 fn nth_local_address_arg(args: &[SystemValue<'_>], index: usize) -> Option<u32> {
     args.get(index).and_then(system_value_local_address)
 }

@@ -41,12 +41,14 @@ if (parsed.dataStart !== firstArchive.prefixLength || parsed.entries.length !== 
 const catalog = createLocalCatalog();
 catalog.mountArchive(firstFile, firstManifest);
 catalog.mountArchive(secondFile, secondManifest, { mountData: true });
+catalog.mountSidecar(new File([bytes("BURIKO GDB 3.00\0local")], "BGI.gdb"));
 
 const summary = catalog.summary();
 if (
   summary.arcMountedEntries !== 3 ||
   summary.arcCanonicalEntries !== 2 ||
-  summary.arcDuplicateEntries !== 1
+  summary.arcDuplicateEntries !== 1 ||
+  summary.sidecarCount !== 1
 ) {
   throw new Error(`unexpected catalog summary ${JSON.stringify(summary)}`);
 }
@@ -68,6 +70,11 @@ if (mountedDataArchives.length !== 1 || mountedDataArchives[0].size !== secondFi
 const archivePayload = await catalog.readArchivePayloadByNameBytes(bytes("second.arc"));
 if (archivePayload === null || archivePayload.byteLength !== secondArchive.data.byteLength) {
   throw new Error("archive basename payload lookup failed");
+}
+
+const localSidecarPayload = await catalog.readSidecarByNameBytes(bytes("bgi.gdb"));
+if (localSidecarPayload === null || text(localSidecarPayload.slice(0, 15)) !== "BURIKO GDB 3.00") {
+  throw new Error("local sidecar lookup failed");
 }
 
 const wildcardArchive = buildArc20([["bg", bytes("wild")]]); 
@@ -144,6 +151,13 @@ const serverPayload = buildArc20([
 ]);
 const serverCatalog = createServerCatalog({
   version: 1,
+  sidecars: [
+    {
+      sidecarIndex: 0,
+      nameHex: bytesToHex(bytes("BGI.gdb")),
+      size: bytes("server-gdb").byteLength,
+    },
+  ],
   archives: [
     {
       nameHex: "7365727665722e617263",
@@ -164,9 +178,17 @@ const serverCatalog = createServerCatalog({
 }, "/api/install/payload");
 let directEntryFetches = 0;
 let archiveFallbackFetches = 0;
+let sidecarFetches = 0;
 globalThis.window = { location: { href: "http://127.0.0.1:9013/" } };
 globalThis.fetch = async (input) => {
   const url = new URL(String(input), "http://127.0.0.1:9013/");
+  if (url.pathname === "/api/install/sidecar") {
+    sidecarFetches += 1;
+    return new Response(bytes("server-gdb"), {
+      status: 200,
+      headers: { "Content-Type": "application/octet-stream" },
+    });
+  }
   const entry = url.searchParams.get("entry");
   if (entry !== null) {
     directEntryFetches += 1;
@@ -179,17 +201,22 @@ globalThis.fetch = async (input) => {
   });
 };
 const fallbackPayload = await serverCatalog.readPayloadByNameBytes(bytes("script2"));
+const serverSidecarPayload = await serverCatalog.readSidecarByNameBytes(bytes("BGI.gdb"));
 globalThis.fetch = originalFetch;
 delete globalThis.window;
 if (
   text(fallbackPayload) !== "payload-two"
   || directEntryFetches !== 3
   || archiveFallbackFetches !== 1
+  || text(serverSidecarPayload) !== "server-gdb"
+  || sidecarFetches !== 1
 ) {
   throw new Error(`server catalog archive fallback failed ${JSON.stringify({
     directEntryFetches,
     archiveFallbackFetches,
+    sidecarFetches,
     payload: fallbackPayload ? text(fallbackPayload) : null,
+    sidecarPayload: serverSidecarPayload ? text(serverSidecarPayload) : null,
   })}`);
 }
 

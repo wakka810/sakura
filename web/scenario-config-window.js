@@ -6,14 +6,20 @@ const BUTTONS = Object.freeze([
   { kind: "title", key: "title", x: 570, y: BUTTON_Y },
   { kind: "back", key: "back", x: 744, y: BUTTON_Y },
 ]);
+// Slider track geometry derived from the SGCnfgWnd990000 base image: the
+// dotted grooves the marker rides sit at y=167/231/295/359, and the draggable
+// span lies between the おそい/はやい (left) and 無音/大きい (right) labels. The
+// marker (SGCnfgWnd000000) is drawn with track.y as its top, so track.y is the
+// groove row minus half the 22px marker height (=11). x0/x1 stay inside the
+// label gaps so a min/max value never lands the marker on the label text.
 const SLIDER_TRACKS = Object.freeze({
-  textSpeed: { x0: 318, x1: 590, y: 145 },
-  autoSpeed: { x0: 318, x1: 590, y: 209 },
-  windowOpacity: { x0: 318, x1: 590, y: 273 },
-  masterVolume: { x0: 918, x1: 1178, y: 145 },
-  bgmVolume: { x0: 918, x1: 1178, y: 209 },
-  sfxVolume: { x0: 918, x1: 1178, y: 273 },
-  voiceVolume: { x0: 918, x1: 1178, y: 337 },
+  textSpeed: { x0: 372, x1: 562, y: 156 },
+  autoSpeed: { x0: 372, x1: 562, y: 220 },
+  windowOpacity: { x0: 372, x1: 562, y: 284 },
+  masterVolume: { x0: 958, x1: 1150, y: 156 },
+  bgmVolume: { x0: 958, x1: 1150, y: 220 },
+  sfxVolume: { x0: 958, x1: 1150, y: 284 },
+  voiceVolume: { x0: 958, x1: 1150, y: 348 },
 });
 const CHOICE_ROWS = Object.freeze([
   {

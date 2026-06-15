@@ -5,7 +5,9 @@ use std::ptr;
 use std::slice;
 use std::sync::{Mutex, OnceLock};
 
-const MAX_MOVIE_BYTES: usize = 32 * 1024 * 1024;
+// The retail opening movie `op.mpg` is 166,502,404 bytes. Keep a bounded cap
+// above that asset while rejecting accidental archive-sized inputs.
+const MAX_MOVIE_BYTES: usize = 192 * 1024 * 1024;
 const MAX_MOVIE_DIMENSION: usize = 4096;
 const ALLOCATION_HEADER_LEN: usize = 16;
 const ALLOCATION_ALIGN: usize = 16;

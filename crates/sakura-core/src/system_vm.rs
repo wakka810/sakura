@@ -32,7 +32,7 @@ pub enum SystemValue<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SystemValueSnapshot {
+pub enum SystemValueSnapshot {
     Integer(u64),
     String(Vec<u8>),
     LocalStringPointer { address: u32, bytes: Vec<u8> },
@@ -161,6 +161,7 @@ impl<'a> SystemVm<'a> {
         self.program
     }
 
+    #[allow(dead_code)]
     pub(crate) fn code_script_index(&self) -> usize {
         self.script_index
     }
@@ -1689,6 +1690,7 @@ impl<'a> SystemVm<'a> {
             .retain(|slot_offset, _| *slot_offset < offset || *slot_offset >= end);
     }
 
+    #[allow(dead_code)]
     fn clear_aux_slots_in_range(&mut self, offset: usize, len: usize) {
         let Some(end) = offset.checked_add(len) else {
             for slots in &mut self.aux_slots {

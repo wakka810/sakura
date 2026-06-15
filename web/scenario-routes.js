@@ -1,4 +1,35 @@
 export const DEFAULT_SCENARIO_ROUTE = "pi";
+export const SCENARIO_MAIN_ROUTE_IDS = Object.freeze(["an", "pi", "rn", "ze"]);
+export const SCENARIO_EXTRA_ROUTE_IDS = Object.freeze(["iv", "v", "vi"]);
+export const SCENARIO_ROUTE_IDS = Object.freeze([
+  ...SCENARIO_MAIN_ROUTE_IDS,
+  ...SCENARIO_EXTRA_ROUTE_IDS,
+]);
+
+const SCENARIO_NAME_BYTE_HEX = Object.freeze({
+  "04_what_is_mind.h_01": "30345f776861745f69735f6d696e6481485f3031",
+  "04_what_is_mind.h_02": "30345f776861745f69735f6d696e6481485f3032",
+  "06_.y_01": "30365f87595f3031",
+  "06_.y_02": "30365f87595f3032",
+  "06_.y_03": "30365f87595f3033",
+  "06_.y_04": "30365f87595f3034",
+  "06_.y_05": "30365f87595f3035",
+  "06_.y_06": "30365f87595f3036",
+  "06_.y_07": "30365f87595f3037",
+  "06_.y_08": "30365f87595f3038",
+});
+
+const ASCII_ENCODER = new TextEncoder();
+
+const ROUTE_LABELS = Object.freeze({
+  an: "Abend / ANDoE",
+  pi: "PicaPica",
+  rn: "Olympia",
+  ze: "Zypressen",
+  iv: "IV / What is mind.H",
+  v: "V / The Happy Prince",
+  vi: "VI / .Y",
+});
 
 const OPENING = [
   "00_op_01", "00_op_02", "00_op_03", "00_op_04",
@@ -7,7 +38,7 @@ const OPENING = [
   "01_fruhlingsbeginn_end",
 ];
 
-const ROUTES = {
+const ROUTE_SEGMENTS = {
   an: [
     "02_abend_01", "02_abend_02", "02_abend_rn01", "02_abend_03",
     "02_abend_04", "02_abend_an01", "02_abend_an02", "02_abend_ic_0727_cm",
@@ -58,11 +89,29 @@ const ROUTES = {
     "03_zypressen_09", "03_zypressen_10", "03_zypressen_11",
     "03_zypressen_12", "03_zypressen_13", "03_zypressen_14", "ed03",
   ],
+  iv: [
+    "04_what_is_mind.h_01", "04_what_is_mind.h_02", "ed05",
+  ],
+  v: [
+    "05_the_happy_prince_01", "05_the_happy_prince_02", "05_the_happy_prince_03",
+    "05_the_happy_prince_04", "05_the_happy_prince_05", "05_the_happy_prince_06",
+    "05_the_happy_prince_07", "05_the_happy_prince_08b",
+    "05_the_happy_prince_09b", "05_the_happy_prince_08", "ed06",
+  ],
+  vi: [
+    "06_.y_01", "06_.y_02", "06_.y_03", "06_.y_04",
+    "06_.y_05", "06_.y_06", "06_.y_07", "06_.y_08", "ed07",
+  ],
 };
 
-for (const [route, chapters] of Object.entries(ROUTES)) {
-  ROUTES[route] = Object.freeze([...OPENING, ...chapters]);
+const ROUTES = {};
+for (const route of SCENARIO_MAIN_ROUTE_IDS) {
+  ROUTES[route] = Object.freeze([...OPENING, ...ROUTE_SEGMENTS[route]]);
 }
+for (const route of SCENARIO_EXTRA_ROUTE_IDS) {
+  ROUTES[route] = Object.freeze([...ROUTE_SEGMENTS[route]]);
+}
+Object.freeze(ROUTES);
 
 export function normalizeScenarioRoute(value) {
   const route = String(value ?? "").toLowerCase();
@@ -73,8 +122,96 @@ export function scenarioSequenceForRoute(route = DEFAULT_SCENARIO_ROUTE) {
   return ROUTES[normalizeScenarioRoute(route)];
 }
 
+export function scenarioRouteChoices() {
+  return SCENARIO_ROUTE_IDS.map((routeId) => scenarioRouteSummary(routeId));
+}
+
+export function scenarioMainRouteChoices() {
+  return SCENARIO_MAIN_ROUTE_IDS.map((routeId) => scenarioRouteSummary(routeId));
+}
+
+export function scenarioRouteSummary(route = DEFAULT_SCENARIO_ROUTE) {
+  const routeId = normalizeScenarioRoute(route);
+  const sequence = scenarioSequenceForRoute(routeId);
+  return {
+    routeId,
+    label: ROUTE_LABELS[routeId],
+    firstScenario: sequence[0],
+    endingScenario: sequence.at(-1),
+    scenarioCount: sequence.length,
+  };
+}
+
+export function scenarioChapterChoices(route = DEFAULT_SCENARIO_ROUTE) {
+  const routeId = normalizeScenarioRoute(route);
+  const sequence = scenarioSequenceForRoute(routeId);
+  const picks = [
+    sequence[0],
+    sequence.find((name) => name.startsWith("01_")),
+    sequence.find((name) => name.startsWith("02_")),
+    sequence.find((name) => name.startsWith("03_")),
+    sequence.find((name) => name.startsWith("04_")),
+    sequence.find((name) => name.startsWith("05_")),
+    sequence.find((name) => name.startsWith("06_")),
+    sequence.at(-1),
+  ].filter(Boolean);
+  const seen = new Set();
+  return picks
+    .filter((name) => {
+      if (seen.has(name)) {
+        return false;
+      }
+      seen.add(name);
+      return true;
+    })
+    .map((scenarioName) => ({
+      routeId,
+      scenarioName,
+      scenarioIndex: sequence.indexOf(scenarioName),
+    }));
+}
+
+export function scenarioNameInRoute(name, route = DEFAULT_SCENARIO_ROUTE) {
+  const normalizedName = normalizeScenarioName(name);
+  return normalizedName !== ""
+    && scenarioSequenceForRoute(route).includes(normalizedName);
+}
+
+export function normalizeScenarioName(value, fallback = "") {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return isValidScenarioName(normalized) ? normalized : fallback;
+}
+
+export function isValidScenarioName(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const name = value.trim();
+  return /^[A-Za-z0-9_.]+$/.test(name)
+    && !name.includes("..")
+    && !name.startsWith(".")
+    && !name.endsWith(".");
+}
+
+export function scenarioNameBytes(value) {
+  const normalized = normalizeScenarioName(value);
+  if (normalized === "") {
+    return new Uint8Array();
+  }
+  const hex = SCENARIO_NAME_BYTE_HEX[normalized];
+  return typeof hex === "string" ? hexToBytes(hex) : ASCII_ENCODER.encode(normalized);
+}
+
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
 export function scenarioPlaybackPlan(name, route = DEFAULT_SCENARIO_ROUTE) {
-  const normalizedName = String(name ?? "").toLowerCase();
+  const normalizedName = normalizeScenarioName(name);
   const routeId = normalizeScenarioRoute(route);
   const sequence = scenarioSequenceForRoute(routeId);
   const scenarioIndex = sequence.indexOf(normalizedName);

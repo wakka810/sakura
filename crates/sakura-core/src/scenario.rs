@@ -172,6 +172,18 @@ pub struct ScenarioMessageControl {
     pub duration_ms: u32,
 }
 
+/// A `scrmsg._bp` message plumbing/style command: message-process/window
+/// plumbing (`0x0141`/`0x0142`) plus text-style state (`0x0144`-`0x014f`).
+/// Style commands set state consumed by the next `0x0140` message; plumbing
+/// commands are surfaced so they are observable instead of silently dropped.
+/// The command owns its pending integer arguments so operand stacks stay clean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioMessageStyle {
+    pub opcode: u32,
+    pub offset: usize,
+    pub int_args: Vec<i32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScenarioEvent<'a> {
     Message(ScenarioMessage<'a>),
@@ -181,6 +193,7 @@ pub enum ScenarioEvent<'a> {
     Sound(ScenarioSoundCommand<'a>),
     Wait(ScenarioWait),
     MessageControl(ScenarioMessageControl),
+    MessageStyle(ScenarioMessageStyle),
     Halted,
 }
 
@@ -193,6 +206,7 @@ pub struct ScenarioEventSummary {
     pub sound_count: usize,
     pub wait_count: usize,
     pub message_control_count: usize,
+    pub message_style_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,8 +408,11 @@ impl<'a> ScenarioVm<'a> {
                 0x0140 => return self.handle_message(offset, opcode),
                 0x0143 => self.handle_message_process_command(),
                 0x0150..=0x0153 => return self.handle_message_control(offset, opcode),
+                0x0141 | 0x0142 | 0x0144..=0x014f => {
+                    return self.handle_message_style(offset, opcode)
+                }
                 0x0160 => return self.handle_choice(offset, opcode),
-                0x0180..=0x01af => return self.handle_sound(offset, opcode),
+                0x0180..=0x01bf => return self.handle_sound(offset, opcode),
                 0x0200..=0x03ff => return self.handle_graph(offset, opcode),
                 _ => self.read_template_operands(opcode)?,
             }
@@ -447,10 +464,13 @@ impl<'a> ScenarioVm<'a> {
                 0x0150..=0x0153 => {
                     let _ = self.handle_message_control(offset, opcode)?;
                 }
+                0x0141 | 0x0142 | 0x0144..=0x014f => {
+                    let _ = self.handle_message_style(offset, opcode)?;
+                }
                 0x0160 => {
                     let _ = self.handle_choice(offset, opcode)?;
                 }
-                0x0180..=0x01af => {
+                0x0180..=0x01bf => {
                     let _ = self.handle_sound(offset, opcode)?;
                 }
                 0x0200..=0x03ff => {
@@ -507,7 +527,7 @@ impl<'a> ScenarioVm<'a> {
                 0x0160 => {
                     let _ = self.handle_choice(offset, opcode)?;
                 }
-                0x0180..=0x01af => {
+                0x0180..=0x01bf => {
                     let _ = self.handle_sound(offset, opcode)?;
                 }
                 0x0200..=0x03ff => {
@@ -517,9 +537,10 @@ impl<'a> ScenarioVm<'a> {
                     commands.push(ScenarioControlCommand {
                         opcode,
                         offset,
-                        int_args: self.drain_int_args(),
-                        string_args: self.drain_string_stack()?,
+                        int_args: self.snapshot_int_args(),
+                        string_args: self.snapshot_string_args()?,
                     });
+                    self.read_template_operands(opcode)?;
                 }
                 _ => self.read_template_operands(opcode)?,
             }
@@ -947,6 +968,16 @@ impl<'a> ScenarioVm<'a> {
         }))
     }
 
+    fn handle_message_style(&mut self, offset: usize, opcode: u32) -> Result<ScenarioEvent<'a>> {
+        let int_args = self.drain_int_args();
+        self.string_stack.clear();
+        Ok(ScenarioEvent::MessageStyle(ScenarioMessageStyle {
+            opcode,
+            offset,
+            int_args,
+        }))
+    }
+
     fn drain_string_stack(&mut self) -> Result<Vec<&'a [u8]>> {
         let mut values = Vec::with_capacity(self.string_stack.len());
         for item in self.string_stack.drain(..) {
@@ -963,6 +994,30 @@ impl<'a> ScenarioVm<'a> {
                 ScenarioNumericValue::Address(_) => None,
             })
             .collect()
+    }
+
+    /// Snapshots the current integer operands without consuming them. Used by
+    /// the control-command audit so its stack discipline matches the real VM,
+    /// which leaves a non-rendering `0x01xx` command's operands on the stack for
+    /// the next statement and clears them only at a `0x7e`/`0x7f`/`0xfe`
+    /// terminator. Draining mid-statement (as an earlier audit did) corrupted
+    /// the operands a following memory store needed and faulted spuriously.
+    fn snapshot_int_args(&self) -> Vec<i32> {
+        self.numeric_stack
+            .iter()
+            .filter_map(|value| match value {
+                ScenarioNumericValue::Integer(value) => Some(*value),
+                ScenarioNumericValue::Address(_) => None,
+            })
+            .collect()
+    }
+
+    fn snapshot_string_args(&self) -> Result<Vec<&'a [u8]>> {
+        let mut values = Vec::with_capacity(self.string_stack.len());
+        for item in &self.string_stack {
+            values.push(self.program.string_bytes(item.address)?);
+        }
+        Ok(values)
     }
 
     fn graph_array_args(&self, opcode: u32) -> Result<Vec<ScenarioArrayArg>> {
@@ -1041,6 +1096,7 @@ pub fn summarize_scenario_events(data: &[u8]) -> Result<ScenarioEventSummary> {
             ScenarioEvent::Sound(_) => summary.sound_count += 1,
             ScenarioEvent::Wait(_) => summary.wait_count += 1,
             ScenarioEvent::MessageControl(_) => summary.message_control_count += 1,
+            ScenarioEvent::MessageStyle(_) => summary.message_style_count += 1,
             ScenarioEvent::Halted => break,
         }
     }
@@ -1096,6 +1152,55 @@ mod tests {
             ScenarioEvent::Message(message) => {
                 assert_eq!(message.opcode, 0x0140);
                 assert_eq!(message.name, None);
+                assert_eq!(message.text, b"visible");
+                assert!(message.int_args.is_empty());
+            }
+            event => {
+                return Err(SakuraError::InvalidScript(format!(
+                    "unexpected event: {event:?}"
+                )))
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn emits_scrmsg_plumbing_commands_without_leaking_arguments() -> Result<()> {
+        let mut script = synthetic_v1_header();
+        append_push_int(&mut script, 5);
+        append_push_int(&mut script, 1);
+        append_opcode(&mut script, 0x0145);
+        append_opcode(&mut script, 0x0141);
+        append_push_string(&mut script, 40);
+        append_opcode(&mut script, 0x0140);
+        append_opcode(&mut script, 0x001b);
+        script.extend_from_slice(b"visible\0");
+
+        let mut vm = ScenarioVm::new(ScenarioProgram::parse(&script)?);
+        match vm.next_event()? {
+            ScenarioEvent::MessageStyle(style) => {
+                assert_eq!(style.opcode, 0x0145);
+                assert_eq!(style.int_args, vec![5, 1]);
+            }
+            event => {
+                return Err(SakuraError::InvalidScript(format!(
+                    "unexpected event: {event:?}"
+                )))
+            }
+        }
+        match vm.next_event()? {
+            ScenarioEvent::MessageStyle(style) => {
+                assert_eq!(style.opcode, 0x0141);
+                assert!(style.int_args.is_empty());
+            }
+            event => {
+                return Err(SakuraError::InvalidScript(format!(
+                    "unexpected event: {event:?}"
+                )))
+            }
+        }
+        match vm.next_event()? {
+            ScenarioEvent::Message(message) => {
                 assert_eq!(message.text, b"visible");
                 assert!(message.int_args.is_empty());
             }
@@ -1320,6 +1425,12 @@ mod tests {
 
         let commands = ScenarioVm::new(ScenarioProgram::parse(&script)?).control_command_trace()?;
 
+        // The audit snapshots operands without consuming them, matching the
+        // real VM (`next_event`/`opcode_histogram`), which routes these
+        // non-rendering `0x01xx` commands through the no-op
+        // `read_template_operands` and clears the stack only at a statement
+        // terminator. Both commands here belong to one operand build-up, so the
+        // second observes the accumulated `7`/`child`/`config` stack.
         assert_eq!(
             commands,
             vec![
@@ -1332,11 +1443,38 @@ mod tests {
                 ScenarioControlCommand {
                     opcode: 0x0122,
                     offset: 0x44,
-                    int_args: vec![],
-                    string_args: vec![b"config".as_slice()],
+                    int_args: vec![7],
+                    string_args: vec![b"child".as_slice(), b"config".as_slice()],
                 },
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn control_audit_does_not_consume_operands_a_following_store_needs() -> Result<()> {
+        // Regression for the false `memory store without value` fault on real
+        // chapter scripts (e.g. `01_fruhlingsbeginn_01` at code offset 0x64c4):
+        // a select-subsystem command (`0x0168`) sits mid-statement between an
+        // operand push and the store that consumes it. The audit must not drain
+        // the stack on the command, or the store underflows. This mirrors the
+        // shipped layout: push value, run the command, push the target address,
+        // then store the value into that address.
+        let mut script = synthetic_v1_header();
+        append_push_int(&mut script, 2); // value to store
+        append_opcode(&mut script, 0x0168); // mid-statement select op
+        append_push_address(&mut script, 0x94); // target address operand
+        // 0x000a = store(address_first): pop address, then pop the value.
+        append_opcode(&mut script, 0x000a);
+        script.extend_from_slice(&2i32.to_le_bytes()); // memory width selector (2 => 4 bytes)
+        append_opcode(&mut script, 0x001b);
+
+        // Must not error (previously faulted with "memory store without value").
+        let commands = ScenarioVm::new(ScenarioProgram::parse(&script)?).control_command_trace()?;
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].opcode, 0x0168);
+        // The command observed the in-flight value without consuming it.
+        assert_eq!(commands[0].int_args, vec![2]);
         Ok(())
     }
 

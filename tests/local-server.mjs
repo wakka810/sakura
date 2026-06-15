@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 const port = 9787 + Math.floor(Math.random() * 1000);
 const installDir = await mkdtemp(join(tmpdir(), "sakura-install-"));
 await writeFile(join(installDir, "BGI.exe"), new Uint8Array([0x4d, 0x5a]));
+await writeFile(join(installDir, "BGI.gdb"), bytes("BURIKO GDB 3.00\0fixture"));
 await writeFile(join(installDir, "synthetic.arc"), buildArc20([
   ["fixture.bin", new Uint8Array([1, 2, 3, 4, 5])],
 ]).data);
@@ -37,11 +38,17 @@ try {
     throw new Error(`catalog request failed ${catalogResponse.status}`);
   }
   const catalog = await catalogResponse.json();
-  if (catalog.version !== 1 || catalog.exeCount !== 1 || catalog.archiveCount !== 1) {
+  if (
+    catalog.version !== 1
+    || catalog.exeCount !== 1
+    || catalog.archiveCount !== 1
+    || catalog.sidecarCount !== 1
+  ) {
     throw new Error(`unexpected catalog summary ${JSON.stringify({
       version: catalog.version,
       exeCount: catalog.exeCount,
       archiveCount: catalog.archiveCount,
+      sidecarCount: catalog.sidecarCount,
     })}`);
   }
   const first = catalog.archives.find((archive) => archive.entries.length > 0);
@@ -71,6 +78,16 @@ try {
   const archivePayload = new Uint8Array(await archivePayloadResponse.arrayBuffer());
   if (new TextDecoder("ascii").decode(archivePayload.slice(0, 12)) !== "BURIKO ARC20") {
     throw new Error("archive basename payload fetch returned wrong bytes");
+  }
+  const sidecarPayloadResponse = await fetch(
+    `http://127.0.0.1:${port}/api/install/sidecar?sidecar=0&offset=0&length=15`,
+  );
+  if (!sidecarPayloadResponse.ok) {
+    throw new Error(`sidecar payload request failed ${sidecarPayloadResponse.status}`);
+  }
+  const sidecarPayload = new Uint8Array(await sidecarPayloadResponse.arrayBuffer());
+  if (new TextDecoder("ascii").decode(sidecarPayload) !== "BURIKO GDB 3.00") {
+    throw new Error("sidecar payload fetch returned wrong bytes");
   }
   const html = await (await fetch(`http://127.0.0.1:${port}/`)).text();
   if (!html.includes("Sakura BGI Browser Runtime")) {

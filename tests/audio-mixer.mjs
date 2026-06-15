@@ -285,4 +285,29 @@ if (!trackMixer.stopTrack() || trackMixer.state().trackReady !== 0) {
   throw new Error("track stop did not clear the BGM channel");
 }
 
+const voiceStopMixer = createAudioMixer();
+await voiceStopMixer.playVoice(new Uint8Array([0x4f, 0x67]), { channel: 0 });
+await voiceStopMixer.playVoice(new Uint8Array([0x4f, 0x67]), { channel: 1 });
+const voiceStopFirst = audioInstances.at(-2);
+const voiceStopSecond = audioInstances.at(-1);
+state = voiceStopMixer.state();
+if (state.voiceActiveChannels !== 2 || state.voiceReady !== 1) {
+  throw new Error(`stopVoices setup did not keep both channels active ${JSON.stringify(state)}`);
+}
+if (!voiceStopMixer.stopVoices()) {
+  throw new Error("stopVoices did not report active voice channels");
+}
+state = voiceStopMixer.state();
+if (
+  state.voiceActiveChannels !== 0
+  || state.voiceReady !== 0
+  || !voiceStopFirst.paused
+  || !voiceStopSecond.paused
+) {
+  throw new Error(`stopVoices did not clear every voice channel ${JSON.stringify(state)}`);
+}
+if (voiceStopMixer.stopVoices()) {
+  throw new Error("stopVoices reported active channels after clearing them");
+}
+
 console.log("audio_mixer_smoke=ok");

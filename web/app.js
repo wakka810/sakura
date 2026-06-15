@@ -28,6 +28,15 @@ import {
   storeScenarioConfigSettings,
 } from "./scenario-config-window.js";
 import {
+  applyScenarioDialogControl,
+  closeScenarioDialog,
+  createScenarioDialogState,
+  openScenarioDialog,
+  paintScenarioDialogWindow,
+  scenarioDialogControlAt,
+  scenarioDialogHoverKey,
+} from "./scenario-dialog-window.js";
+import {
   applyScenarioUserDataControl,
   closeScenarioUserDataWindow,
   createScenarioUserDataState,
@@ -37,6 +46,51 @@ import {
   userDataHoverKey,
   USER_DATA_SLOTS_PER_PAGE,
 } from "./scenario-userdata-window.js";
+import {
+  applyTitleSceneControl,
+  closeTitleSceneSelect,
+  createTitleSceneSelectState,
+  openTitleSceneSelect,
+  paintTitleSceneSelect,
+  titleSceneChoices,
+  titleSceneControlAt,
+  titleSceneHoverKey,
+} from "./title-scene-select.js";
+import {
+  applyTitleMusicControl,
+  closeTitleMusic,
+  createTitleMusicState,
+  openTitleMusic,
+  paintTitleMusic,
+  titleMusicControlAt,
+  titleMusicHoverKey,
+  titleMusicStepPage,
+  titleMusicTracks,
+  titleMusicVisibleChoices,
+} from "./title-music.js";
+import {
+  applyTitleGraphicControl,
+  closeTitleGraphic,
+  closeTitleGraphicViewer,
+  createTitleGraphicState,
+  openTitleGraphic,
+  paintTitleGraphic,
+  TITLE_GRAPHIC_PAGE_SIZE,
+  titleGraphicAssets,
+  titleGraphicChromeAssetNames,
+  titleGraphicControlAt,
+  titleGraphicHoverKey,
+  titleGraphicStepPage,
+  titleGraphicVisibleChoices,
+} from "./title-graphic.js";
+import { scenarioSequenceForRoute } from "./scenario-routes.js";
+import {
+  normalizeTitleMenuMode,
+  titleExtraUnlocked,
+  titleMenuControls,
+  TITLE_MENU_MODE_EXTRA,
+  TITLE_MENU_MODE_MAIN,
+} from "./title-menu.js";
 
 const statusEl = document.querySelector("#core-status");
 const outputEl = document.querySelector("#probe-output");
@@ -50,6 +104,11 @@ const context = canvas.getContext("2d", { alpha: false, willReadFrequently: true
 const runtimeDiagnosticsEnabled =
   new URLSearchParams(window.location.search).get("debug") === "1";
 document.documentElement.dataset.runtimeDiagnostics = String(runtimeDiagnosticsEnabled);
+const runtimeQuery = new URLSearchParams(window.location.search);
+const titleExtraForced = runtimeQuery.get("unlockExtra") === "1" || runtimeQuery.get("showExtra") === "1";
+const titleGraphicForceUnlock = runtimeQuery.get("unlockExtra") === "1"
+  || runtimeQuery.get("unlockGraphic") === "1";
+const assetNameEncoder = new TextEncoder();
 const SUMMARY_RENDER_INTERVAL_MS = 250;
 const RUNTIME_DOM_PUBLISH_INTERVAL_MS = 250;
 let installProbeTimer = 0;
@@ -88,6 +147,166 @@ function bindRuntimeSessionControls() {
   const step = async (maxEvents = 1, maxInstructionsPerEvent = 100000) => (
     await (activeInstall?.stepRuntimeSession?.(maxEvents, maxInstructionsPerEvent) ?? null)
   );
+  const startScenarioRoute = async (route, scenarioName = "") => {
+    const mounted = activeInstall;
+    if (!mounted || mounted.destroyed === true || !mounted.startScenarioRoute) {
+      return { ok: false, reason: "not_mounted" };
+    }
+    const player = await mounted.startScenarioRoute(route, scenarioName);
+    paintMountedFrame(mounted);
+    publishRuntimeState(true);
+    return player?.safeState
+      ? {
+        ok: true,
+        reason: "ok",
+        route: player.safeState.scenarioRoute,
+        scenarioName: player.safeState.scenarioName,
+        scenarioIndex: player.safeState.scenarioIndex,
+      }
+      : { ok: false, reason: "no_player" };
+  };
+  const openTitleSceneSelectApi = () => {
+    const mounted = activeInstall;
+    if (!mounted || mounted.destroyed === true || mounted.stage !== "title") {
+      return { ok: false, reason: "not_title" };
+    }
+    return openTitleSceneSelectHost(mounted);
+  };
+  const titleSceneChoicesApi = () => titleSceneChoices().map((choice) => ({
+    index: choice.index,
+    route: choice.routeId,
+    scenarioName: choice.scenarioName,
+    scenarioIndex: choice.scenarioIndex,
+    replayId: choice.replayId,
+    thumbnailAssetName: choice.thumbnailAssetName,
+    scriptSlot: choice.scriptSlot,
+    scriptPage: choice.scriptPage,
+    row: choice.row,
+    column: choice.column,
+  }));
+  const openTitleMusicApi = () => {
+    const mounted = activeInstall;
+    if (!mounted || mounted.destroyed === true || mounted.stage !== "title") {
+      return { ok: false, reason: "not_title" };
+    }
+    return openTitleMusicHost(mounted);
+  };
+  const openTitleGraphicApi = () => {
+    const mounted = activeInstall;
+    if (!mounted || mounted.destroyed === true || mounted.stage !== "title") {
+      return { ok: false, reason: "not_title" };
+    }
+    return openTitleGraphicHost(mounted);
+  };
+  const titleGraphicAssetsApi = () => {
+    const mounted = activeInstall;
+    if (!mounted || mounted.destroyed === true) {
+      return [];
+    }
+    const state = mounted.titleGraphicState ?? null;
+    const assets = mountedTitleGraphicAssets(mounted);
+    const choices = state?.open ? titleGraphicVisibleChoices(state, assets) : assets;
+    return choices.map((choice) => ({
+      index: choice.index,
+      page: choice.page ?? Math.floor(choice.index / TITLE_GRAPHIC_PAGE_SIZE),
+      row: choice.row ?? (choice.index % TITLE_GRAPHIC_PAGE_SIZE),
+      assetName: choice.assetName,
+      fullAssetName: choice.fullAssetName || choice.assetName,
+      label: choice.label,
+      archiveName: choice.archiveName,
+      size: choice.size,
+      unlocked: choice.unlocked !== false,
+      locked: choice.locked === true,
+      rect: choice.rect ?? null,
+    }));
+  };
+  const titleMusicTracksApi = () => {
+    const mounted = activeInstall;
+    const state = mounted?.titleMusicState ?? null;
+    const choices = state?.open ? titleMusicVisibleChoices(state) : titleMusicTracks();
+    return choices.map((choice) => ({
+      index: choice.index,
+      page: choice.page,
+      row: choice.row,
+      assetName: choice.assetName,
+      label: choice.label,
+      rect: choice.rect,
+    }));
+  };
+  const titleMenuControlsApi = () => {
+    const mounted = activeInstall;
+    if (!mounted || mounted.destroyed === true || mounted.stage !== "title") {
+      return [];
+    }
+    if (titleSceneIsOpen(mounted) || titleMusicIsOpen(mounted) || titleGraphicIsOpen(mounted)) {
+      return [];
+    }
+    return currentTitleMenuControls(mounted).map((control, index) => ({
+      index,
+      label: control.label,
+      action: control.action,
+      routeId: control.routeId,
+      x: control.x,
+      y: control.y,
+      enabled: control.enabled,
+    }));
+  };
+  const selectTitleSceneApi = async (index) => {
+    const mounted = activeInstall;
+    const sceneIndex = Number.parseInt(String(index), 10);
+    const choice = titleSceneChoices().find((item) => item.index === sceneIndex) ?? null;
+    if (!mounted || mounted.destroyed === true || mounted.stage !== "title") {
+      return { ok: false, reason: "not_title" };
+    }
+    if (!choice) {
+      return { ok: false, reason: "scene_not_found" };
+    }
+    openTitleSceneSelectHost(mounted);
+    return handleTitleSceneResult(
+      mounted,
+      applyTitleSceneControl(ensureTitleSceneState(mounted), { kind: "scene", choice }),
+    );
+  };
+  const selectTitleMusicApi = async (index) => {
+    const mounted = activeInstall;
+    const musicIndex = Number.parseInt(String(index), 10);
+    const choice = titleMusicTracks().find((item) => item.index === musicIndex) ?? null;
+    if (!mounted || mounted.destroyed === true || mounted.stage !== "title") {
+      return { ok: false, reason: "not_title" };
+    }
+    if (!choice) {
+      return { ok: false, reason: "music_not_found" };
+    }
+    openTitleMusicHost(mounted);
+    return handleTitleMusicResult(
+      mounted,
+      applyTitleMusicControl(ensureTitleMusicState(mounted), { kind: "track", choice }),
+    );
+  };
+  const selectTitleGraphicApi = async (index) => {
+    const mounted = activeInstall;
+    const graphicIndex = Number.parseInt(String(index), 10);
+    if (!mounted || mounted.destroyed === true || mounted.stage !== "title") {
+      return { ok: false, reason: "not_title" };
+    }
+    const assets = mountedTitleGraphicAssets(mounted);
+    const choice = assets.find((item) => item.index === graphicIndex) ?? null;
+    if (!choice) {
+      return { ok: false, reason: "graphic_not_found" };
+    }
+    openTitleGraphicHost(mounted);
+    const graphicState = ensureTitleGraphicState(mounted);
+    graphicState.page = Math.max(0, Math.floor(choice.index / TITLE_GRAPHIC_PAGE_SIZE));
+    prepareTitleGraphicPage(mounted);
+    return handleTitleGraphicResult(
+      mounted,
+      applyTitleGraphicControl(
+        graphicState,
+        { kind: "graphic", choice },
+        assets.length,
+      ),
+    );
+  };
   const readMemory = (address, length) => {
     if (
       !activeInstall
@@ -108,6 +327,28 @@ function bindRuntimeSessionControls() {
   globalThis.__sakuraResumeRuntimeSession = resume;
   globalThis.sakuraStepRuntimeSession = step;
   globalThis.__sakuraStepRuntimeSession = step;
+  globalThis.sakuraStartScenarioRoute = startScenarioRoute;
+  globalThis.__sakuraStartScenarioRoute = startScenarioRoute;
+  globalThis.sakuraOpenTitleSceneSelect = openTitleSceneSelectApi;
+  globalThis.__sakuraOpenTitleSceneSelect = openTitleSceneSelectApi;
+  globalThis.sakuraTitleSceneChoices = titleSceneChoicesApi;
+  globalThis.__sakuraTitleSceneChoices = titleSceneChoicesApi;
+  globalThis.sakuraSelectTitleScene = selectTitleSceneApi;
+  globalThis.__sakuraSelectTitleScene = selectTitleSceneApi;
+  globalThis.sakuraOpenTitleMusic = openTitleMusicApi;
+  globalThis.__sakuraOpenTitleMusic = openTitleMusicApi;
+  globalThis.sakuraTitleMusicTracks = titleMusicTracksApi;
+  globalThis.__sakuraTitleMusicTracks = titleMusicTracksApi;
+  globalThis.sakuraSelectTitleMusic = selectTitleMusicApi;
+  globalThis.__sakuraSelectTitleMusic = selectTitleMusicApi;
+  globalThis.sakuraOpenTitleGraphic = openTitleGraphicApi;
+  globalThis.__sakuraOpenTitleGraphic = openTitleGraphicApi;
+  globalThis.sakuraTitleGraphicAssets = titleGraphicAssetsApi;
+  globalThis.__sakuraTitleGraphicAssets = titleGraphicAssetsApi;
+  globalThis.sakuraSelectTitleGraphic = selectTitleGraphicApi;
+  globalThis.__sakuraSelectTitleGraphic = selectTitleGraphicApi;
+  globalThis.sakuraTitleMenuControls = titleMenuControlsApi;
+  globalThis.__sakuraTitleMenuControls = titleMenuControlsApi;
   globalThis.sakuraRuntimeSessionMemory = readMemory;
   globalThis.__sakuraRuntimeSessionMemory = readMemory;
   if (globalThis.window) {
@@ -117,6 +358,28 @@ function bindRuntimeSessionControls() {
     window.__sakuraResumeRuntimeSession = resume;
     window.sakuraStepRuntimeSession = step;
     window.__sakuraStepRuntimeSession = step;
+    window.sakuraStartScenarioRoute = startScenarioRoute;
+    window.__sakuraStartScenarioRoute = startScenarioRoute;
+    window.sakuraOpenTitleSceneSelect = openTitleSceneSelectApi;
+    window.__sakuraOpenTitleSceneSelect = openTitleSceneSelectApi;
+    window.sakuraTitleSceneChoices = titleSceneChoicesApi;
+    window.__sakuraTitleSceneChoices = titleSceneChoicesApi;
+    window.sakuraSelectTitleScene = selectTitleSceneApi;
+    window.__sakuraSelectTitleScene = selectTitleSceneApi;
+    window.sakuraOpenTitleMusic = openTitleMusicApi;
+    window.__sakuraOpenTitleMusic = openTitleMusicApi;
+    window.sakuraTitleMusicTracks = titleMusicTracksApi;
+    window.__sakuraTitleMusicTracks = titleMusicTracksApi;
+    window.sakuraSelectTitleMusic = selectTitleMusicApi;
+    window.__sakuraSelectTitleMusic = selectTitleMusicApi;
+    window.sakuraOpenTitleGraphic = openTitleGraphicApi;
+    window.__sakuraOpenTitleGraphic = openTitleGraphicApi;
+    window.sakuraTitleGraphicAssets = titleGraphicAssetsApi;
+    window.__sakuraTitleGraphicAssets = titleGraphicAssetsApi;
+    window.sakuraSelectTitleGraphic = selectTitleGraphicApi;
+    window.__sakuraSelectTitleGraphic = selectTitleGraphicApi;
+    window.sakuraTitleMenuControls = titleMenuControlsApi;
+    window.__sakuraTitleMenuControls = titleMenuControlsApi;
     window.sakuraRuntimeSessionMemory = readMemory;
     window.__sakuraRuntimeSessionMemory = readMemory;
   }
@@ -164,6 +427,44 @@ playAudioButton.addEventListener("click", () => {
 });
 
 installFilesInput.addEventListener("input", scheduleInstallProbe); installFilesInput.addEventListener("change", scheduleInstallProbe);
+canvas.addEventListener("pointermove", (event) => {
+  const mounted = activeInstall;
+  if (!dialogIsOpen(mounted)) {
+    return;
+  }
+  if (updateDialogHover(mounted, event.clientX, event.clientY)) {
+    paintMountedFrame(mounted);
+    publishRuntimeState();
+  }
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}, true);
+canvas.addEventListener("mousemove", (event) => {
+  const mounted = activeInstall;
+  if (!dialogIsOpen(mounted)) {
+    return;
+  }
+  if (updateDialogHover(mounted, event.clientX, event.clientY)) {
+    paintMountedFrame(mounted);
+    publishRuntimeState();
+  }
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}, true);
+canvas.addEventListener("pointerup", (event) => {
+  const mounted = activeInstall;
+  if (!dialogIsOpen(mounted)) {
+    return;
+  }
+  if (event.button === 2) {
+    applyDialogControl(mounted, { kind: "button", action: "no" });
+  } else {
+    applyDialogClick(mounted, event.clientX, event.clientY);
+  }
+  suppressNextTitleClick = true;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}, true);
 canvas.addEventListener("mousemove", (event) => {
   const mounted = activeInstall;
   if (!mounted || mounted.stage !== "title") return;
@@ -176,6 +477,27 @@ canvas.addEventListener("mousemove", (event) => {
   }
   if (titleUserDataIsOpen(mounted)) {
     if (updateTitleUserDataHover(mounted, event.clientX, event.clientY)) {
+      paintMountedFrame(mounted);
+      publishRuntimeState();
+    }
+    return;
+  }
+  if (titleGraphicIsOpen(mounted)) {
+    if (updateTitleGraphicHover(mounted, event.clientX, event.clientY)) {
+      paintMountedFrame(mounted);
+      publishRuntimeState();
+    }
+    return;
+  }
+  if (titleSceneIsOpen(mounted)) {
+    if (updateTitleSceneHover(mounted, event.clientX, event.clientY)) {
+      paintMountedFrame(mounted);
+      publishRuntimeState();
+    }
+    return;
+  }
+  if (titleMusicIsOpen(mounted)) {
+    if (updateTitleMusicHover(mounted, event.clientX, event.clientY)) {
       paintMountedFrame(mounted);
       publishRuntimeState();
     }
@@ -219,12 +541,100 @@ canvas.addEventListener("pointerup", (event) => {
   event.preventDefault();
   event.stopPropagation();
 }, true);
+canvas.addEventListener("pointerup", (event) => {
+  const mounted = activeInstall;
+  if (!mounted || mounted.stage !== "title" || !titleGraphicIsOpen(mounted)) {
+    return;
+  }
+  if (event.button === 2) {
+    const state = ensureTitleGraphicState(mounted);
+    if (!closeTitleGraphicViewer(state)) {
+      closeTitleGraphic(state);
+    }
+  } else {
+    void applyTitleGraphicClick(mounted, event.clientX, event.clientY);
+    suppressNextTitleClick = true;
+  }
+  paintMountedFrame(mounted);
+  publishRuntimeState(true);
+  event.preventDefault();
+  event.stopPropagation();
+}, true);
+canvas.addEventListener("pointerup", (event) => {
+  const mounted = activeInstall;
+  if (!mounted || mounted.stage !== "title" || !titleSceneIsOpen(mounted)) {
+    return;
+  }
+  if (event.button === 2) {
+    closeTitleSceneSelect(ensureTitleSceneState(mounted));
+  } else {
+    void applyTitleSceneClick(mounted, event.clientX, event.clientY);
+    suppressNextTitleClick = true;
+  }
+  paintMountedFrame(mounted);
+  publishRuntimeState(true);
+  event.preventDefault();
+  event.stopPropagation();
+}, true);
+canvas.addEventListener("pointerup", (event) => {
+  const mounted = activeInstall;
+  if (!mounted || mounted.stage !== "title" || !titleMusicIsOpen(mounted)) {
+    return;
+  }
+  if (event.button === 2) {
+    closeTitleMusic(ensureTitleMusicState(mounted));
+  } else {
+    void applyTitleMusicClick(mounted, event.clientX, event.clientY);
+    suppressNextTitleClick = true;
+  }
+  paintMountedFrame(mounted);
+  publishRuntimeState(true);
+  event.preventDefault();
+  event.stopPropagation();
+}, true);
+canvas.addEventListener("wheel", (event) => {
+  const mounted = activeInstall;
+  if (!mounted || mounted.stage !== "title" || !titleGraphicIsOpen(mounted)) {
+    return;
+  }
+  const state = ensureTitleGraphicState(mounted);
+  const assets = mountedTitleGraphicAssets(mounted);
+  if (titleGraphicStepPage(state, event.deltaY > 0 ? 1 : -1, assets.length)) {
+    prepareTitleGraphicPage(mounted);
+    paintMountedFrame(mounted);
+    publishRuntimeState(true);
+  }
+  event.preventDefault();
+  event.stopPropagation();
+}, { passive: false, capture: true });
+canvas.addEventListener("wheel", (event) => {
+  const mounted = activeInstall;
+  if (!mounted || mounted.stage !== "title" || !titleMusicIsOpen(mounted)) {
+    return;
+  }
+  const state = ensureTitleMusicState(mounted);
+  if (titleMusicStepPage(state, event.deltaY > 0 ? 1 : -1)) {
+    paintMountedFrame(mounted);
+    publishRuntimeState(true);
+  }
+  event.preventDefault();
+  event.stopPropagation();
+}, { passive: false, capture: true });
 globalThis.sakuraAdvanceBoot = () => {
   const mounted = activeInstall;
   if (!mounted) return false;
+  if (dialogIsOpen(mounted)) {
+    return true;
+  }
   if (mounted.stage === "boot") { if (bootPhaseIsHold(mounted)) { advanceBootPhase(mounted); publishRuntimeState(true); } return true; }
   if (mounted.stage === "title") {
-    if (titleConfigIsOpen(mounted) || titleUserDataIsOpen(mounted)) {
+    if (
+      titleConfigIsOpen(mounted)
+      || titleUserDataIsOpen(mounted)
+      || titleGraphicIsOpen(mounted)
+      || titleSceneIsOpen(mounted)
+      || titleMusicIsOpen(mounted)
+    ) {
       return true;
     }
     return activateTitleMenu(mounted, 0);
@@ -234,6 +644,7 @@ globalThis.sakuraAdvanceBoot = () => {
 canvas.addEventListener("click", (event) => {
   const mounted = activeInstall;
   if (!mounted) return;
+  retryTitleBgm(mounted);
   if (mounted.stage === "boot") {
     if (bootPhaseIsHold(mounted)) {
       advanceBootPhase(mounted);
@@ -258,6 +669,21 @@ canvas.addEventListener("click", (event) => {
       event.stopPropagation();
       return;
     }
+    if (titleGraphicIsOpen(mounted)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (titleSceneIsOpen(mounted)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (titleMusicIsOpen(mounted)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     const hit = titleMenuHit(mounted, event.clientX, event.clientY);
     if (activateTitleMenu(mounted, hit)) {
       event.preventDefault();
@@ -266,11 +692,24 @@ canvas.addEventListener("click", (event) => {
   }
 }, true);
 canvas.addEventListener("contextmenu", (event) => {
+  if (dialogIsOpen(activeInstall)) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    return;
+  }
+}, true);
+canvas.addEventListener("contextmenu", (event) => {
   const mounted = activeInstall;
   if (
     !mounted
     || mounted.stage !== "title"
-    || (!titleConfigIsOpen(mounted) && !titleUserDataIsOpen(mounted))
+    || (
+      !titleConfigIsOpen(mounted)
+      && !titleUserDataIsOpen(mounted)
+      && !titleGraphicIsOpen(mounted)
+      && !titleSceneIsOpen(mounted)
+      && !titleMusicIsOpen(mounted)
+    )
   ) {
     return;
   }
@@ -280,16 +719,69 @@ canvas.addEventListener("contextmenu", (event) => {
 window.addEventListener("keydown", (event) => {
   const mounted = activeInstall;
   if (
+    !dialogIsOpen(mounted)
+    || (event.key !== "Escape" && event.key !== "Backspace" && event.key !== "Enter")
+  ) {
+    return;
+  }
+  applyDialogControl(mounted, {
+    kind: "button",
+    action: event.key === "Enter" ? "yes" : "no",
+  });
+  suppressNextTitleClick = true;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}, true);
+window.addEventListener("keydown", (event) => {
+  const mounted = activeInstall;
+  const titleMusicKeys = new Set(["ArrowLeft", "ArrowRight", "PageUp", "PageDown"]);
+  const titleGraphicKeys = new Set(["ArrowLeft", "ArrowRight", "PageUp", "PageDown"]);
+  const closeKey = event.key === "Escape" || event.key === "Backspace";
+  const musicPageKey = titleMusicKeys.has(event.key) && titleMusicIsOpen(mounted);
+  const graphicPageKey = titleGraphicKeys.has(event.key) && titleGraphicIsOpen(mounted);
+  if (
     !mounted
     || mounted.stage !== "title"
-    || (event.key !== "Escape" && event.key !== "Backspace")
+    || (!closeKey && !musicPageKey && !graphicPageKey)
   ) {
     return;
   }
   if (titleConfigIsOpen(mounted)) {
+    if (!closeKey) {
+      return;
+    }
     closeScenarioConfigWindow(ensureTitleConfigState(mounted));
   } else if (titleUserDataIsOpen(mounted)) {
+    if (!closeKey) {
+      return;
+    }
     closeScenarioUserDataWindow(ensureTitleUserDataState(mounted));
+  } else if (titleGraphicIsOpen(mounted)) {
+    const state = ensureTitleGraphicState(mounted);
+    if (state.viewerOpen) {
+      if (!closeKey) {
+        return;
+      }
+      closeTitleGraphicViewer(state);
+    } else if (graphicPageKey) {
+      const assets = mountedTitleGraphicAssets(mounted);
+      titleGraphicStepPage(state, event.key === "ArrowRight" || event.key === "PageDown" ? 1 : -1, assets.length);
+      prepareTitleGraphicPage(mounted);
+    } else {
+      closeTitleGraphic(state);
+    }
+  } else if (titleSceneIsOpen(mounted)) {
+    if (!closeKey) {
+      return;
+    }
+    closeTitleSceneSelect(ensureTitleSceneState(mounted));
+  } else if (titleMusicIsOpen(mounted)) {
+    const state = ensureTitleMusicState(mounted);
+    if (musicPageKey) {
+      titleMusicStepPage(state, event.key === "ArrowRight" || event.key === "PageDown" ? 1 : -1);
+    } else {
+      closeTitleMusic(state);
+    }
   } else {
     return;
   }
@@ -299,6 +791,8 @@ window.addEventListener("keydown", (event) => {
   event.stopPropagation();
 }, true);
 bindScenarioPlayerInput(canvas, () => activeInstall, () => {
+  maybeOpenScenarioTitleDialog(activeInstall);
+  maybeOpenPendingScenarioDialog(activeInstall);
   paintMountedFrame(activeInstall);
   publishRuntimeState(true);
 });
@@ -843,10 +1337,6 @@ async function bootServerInstall() {
   renderInstallSummaryText(mounted.summary, true);
 }
 
-const TITLE_MENU = ["Start", "Load", "Config", "Exit"];
-const TITLE_MENU_X = [0.224, 0.405, 0.588, 0.768];
-const TITLE_MENU_Y = 0.812;
-
 function titleLayout(image) {
   const scale = Math.min(canvas.width / image.width, canvas.height / image.height);
   const w = Math.round(image.width * scale);
@@ -860,22 +1350,268 @@ function activateTitleMenu(mounted, index) {
   if (!mounted || mounted.stage !== "title" || !Number.isInteger(index) || index < 0) {
     return false;
   }
+  const control = currentTitleMenuControls(mounted)[index] ?? null;
+  if (!control) {
+    return false;
+  }
   mounted.hoverIndex = index;
-  if (index === 0) {
+  if (!control.enabled) {
+    mounted.titleLastAction = `${control.action}_disabled`;
+    paintMountedFrame(mounted);
+    publishRuntimeState(true);
+    return true;
+  }
+  if (control.action === "start") {
     mounted.titleLastAction = "start";
+    stopTitleBgm(mounted);
     mounted.startScenario?.();
-  } else if (index === 1) {
+  } else if (control.action === "load") {
     mounted.titleLastAction = "load";
     openTitleUserDataWindow(mounted);
-  } else if (index === 2) {
+  } else if (control.action === "config") {
     mounted.titleLastAction = "config";
     openTitleConfigWindow(mounted);
+  } else if (control.action === "extra") {
+    mounted.titleMenuMode = TITLE_MENU_MODE_EXTRA;
+    mounted.hoverIndex = -1;
+    mounted.titleLastAction = "extra_open";
+  } else if (control.action === "back") {
+    mounted.titleMenuMode = TITLE_MENU_MODE_MAIN;
+    mounted.hoverIndex = -1;
+    mounted.titleLastAction = "extra_back";
+  } else if (control.action === "graphic") {
+    openTitleGraphicHost(mounted);
+  } else if (control.action === "scene") {
+    openTitleSceneSelectHost(mounted);
+  } else if (control.action === "music") {
+    openTitleMusicHost(mounted);
+  } else if (control.action === "route") {
+    mounted.titleLastAction = `route_${control.routeId}`;
+    stopTitleBgm(mounted);
+    const scenarioName = scenarioSequenceForRoute(control.routeId)[0] ?? "";
+    void mounted.startScenarioRoute?.(control.routeId, scenarioName).then(() => {
+      paintMountedFrame(mounted);
+      publishRuntimeState(true);
+    });
+  } else if (control.action === "exit") {
+    mounted.titleLastAction = "exit_confirm";
+    openMountedDialog(mounted, "exit", "titleExit");
   } else {
-    mounted.titleLastAction = "exit_pending";
+    mounted.titleLastAction = `${control.action}_pending`;
   }
   paintMountedFrame(mounted);
   publishRuntimeState(true);
   return true;
+}
+
+function ensureDialogState(mounted) {
+  if (!mounted.dialogState) {
+    mounted.dialogState = createScenarioDialogState();
+  }
+  return mounted.dialogState;
+}
+
+function dialogIsOpen(mounted) {
+  return mounted?.dialogState?.open === true;
+}
+
+function openMountedDialog(mounted, kind, source) {
+  if (!mounted) {
+    return false;
+  }
+  const opened = openScenarioDialog(ensureDialogState(mounted), kind, source);
+  if (opened && mounted.stage === "title") {
+    mounted.hoverIndex = -1;
+  }
+  return opened;
+}
+
+function updateDialogHover(mounted, clientX, clientY) {
+  const state = ensureDialogState(mounted);
+  const point = canvasPointFromClient(clientX, clientY);
+  const control = scenarioDialogControlAt(point.x, point.y, state, mounted.dialogWindow);
+  const next = scenarioDialogHoverKey(control);
+  if (state.hover === next) {
+    return false;
+  }
+  state.hover = next;
+  return true;
+}
+
+function applyDialogClick(mounted, clientX, clientY) {
+  const state = ensureDialogState(mounted);
+  const point = canvasPointFromClient(clientX, clientY);
+  return applyDialogControl(
+    mounted,
+    scenarioDialogControlAt(point.x, point.y, state, mounted.dialogWindow),
+  );
+}
+
+function applyDialogControl(mounted, control) {
+  const state = ensureDialogState(mounted);
+  const kind = state.kind;
+  const source = state.source;
+  const result = applyScenarioDialogControl(state, control);
+  if (result.handled) {
+    handleDialogResult(mounted, { ...result, kind, source });
+    paintMountedFrame(mounted);
+    publishRuntimeState(true);
+  }
+  return result;
+}
+
+function maybeOpenScenarioTitleDialog(mounted) {
+  const player = mounted?.player ?? null;
+  if (
+    !player
+    || player.configState?.lastAction !== "title_pending"
+    || dialogIsOpen(mounted)
+  ) {
+    return false;
+  }
+  player.configState.lastAction = "title_confirm";
+  player.syncConfigState?.();
+  return openMountedDialog(mounted, "title", "scenarioConfigTitle");
+}
+
+function maybeOpenPendingScenarioDialog(mounted) {
+  const pending = mounted?.player?.pendingDialogAction ?? null;
+  if (!pending || pending.opened === true || dialogIsOpen(mounted)) {
+    return false;
+  }
+  pending.opened = true;
+  return openMountedDialog(mounted, pending.kind, pending.source);
+}
+
+function handleDialogResult(mounted, result) {
+  if (!mounted || !result?.handled) {
+    return;
+  }
+  if (result.reason !== "yes") {
+    cancelDialogAction(mounted, result);
+    return;
+  }
+  if (result.source === "titleUserDataLoad") {
+    confirmTitleUserDataLoad(mounted);
+    return;
+  }
+  if (isScenarioUserDataDialogSource(result.source)) {
+    mounted.player?.confirmPendingDialogAction?.(() => {
+      paintMountedFrame(mounted);
+      publishRuntimeState(true);
+    });
+    return;
+  }
+  if (result.kind === "exit") {
+    closeScenarioConfigWindow(ensureTitleConfigState(mounted));
+    closeScenarioUserDataWindow(ensureTitleUserDataState(mounted));
+    mounted.audioMixer?.destroy?.();
+    updateAudioState(mounted);
+    mounted.stage = "exited";
+    mounted.titleLastAction = "exit_confirmed";
+    return;
+  }
+  if (result.kind === "title") {
+    mounted.titleLastAction = "title_confirmed";
+    if (result.source === "titleConfigTitle") {
+      closeScenarioConfigWindow(ensureTitleConfigState(mounted));
+      return;
+    }
+    returnMountedToTitle(mounted);
+  }
+}
+
+function cancelDialogAction(mounted, result) {
+  if (result.source === "scenarioQuickSaveNotice") {
+    if (mounted.player) {
+      mounted.player.pendingDialogAction = null;
+    }
+    return;
+  }
+  if (result.source === "titleUserDataLoad") {
+    mounted.pendingDialogAction = null;
+    mounted.titleUserDataLastResult = "load_cancelled";
+    mounted.titleUserDataLastOk = 0;
+    return;
+  }
+  if (isScenarioUserDataDialogSource(result.source)) {
+    mounted.player?.cancelPendingDialogAction?.("cancelled");
+    return;
+  }
+  if (result.kind === "exit") {
+    mounted.titleLastAction = "exit_cancelled";
+    return;
+  }
+  mounted.titleLastAction = "title_cancelled";
+  if (result.source === "scenarioConfigTitle" && mounted.player?.configState) {
+    mounted.player.configState.lastAction = "title_cancelled";
+    mounted.player.syncConfigState?.();
+  }
+  if (result.source === "titleConfigTitle" && mounted.titleConfigState) {
+    mounted.titleConfigState.lastAction = "title_cancelled";
+  }
+}
+
+function isScenarioUserDataDialogSource(source) {
+  return (
+    source === "scenarioUserDataSave"
+    || source === "scenarioUserDataLoad"
+    || source === "scenarioQuickLoad"
+  );
+}
+
+function requestTitleUserDataLoad(mounted, slot) {
+  mounted.pendingDialogAction = {
+    action: "titleUserDataLoad",
+    slot,
+    kind: "load",
+    source: "titleUserDataLoad",
+  };
+  mounted.titleUserDataLastResult = "load_confirm";
+  mounted.titleUserDataLastOk = 1;
+  openMountedDialog(mounted, "load", "titleUserDataLoad");
+}
+
+function confirmTitleUserDataLoad(mounted) {
+  const pending = mounted.pendingDialogAction;
+  mounted.pendingDialogAction = null;
+  const slot = pending?.action === "titleUserDataLoad" ? pending.slot : 0;
+  closeScenarioUserDataWindow(ensureTitleUserDataState(mounted));
+  stopTitleBgm(mounted);
+  mounted.titleUserDataLastResult = "loading";
+  mounted.titleUserDataLastOk = 1;
+  void mounted.loadScenarioFromStorage?.(slot).then((load) => {
+    mounted.titleUserDataLastResult = load?.reason ?? "load_unavailable";
+    mounted.titleUserDataLastOk = Number(load?.ok === true);
+    paintMountedFrame(mounted);
+    publishRuntimeState(true);
+  });
+}
+
+function returnMountedToTitle(mounted) {
+  mounted.audioMixer?.destroy?.();
+  mounted.titleBgmPlaying = null;
+  updateAudioState(mounted);
+  if (mounted.player?.destroy) {
+    mounted.player.destroy();
+  }
+  mounted.player = null;
+  mounted.stage = mounted.titleImage ? "title" : "scenario";
+  mounted.hoverIndex = -1;
+  mounted.titleMenuMode = TITLE_MENU_MODE_MAIN;
+  closeScenarioConfigWindow(ensureTitleConfigState(mounted));
+  closeScenarioUserDataWindow(ensureTitleUserDataState(mounted));
+  closeTitleGraphic(ensureTitleGraphicState(mounted));
+  closeTitleSceneSelect(ensureTitleSceneState(mounted));
+  closeTitleMusic(ensureTitleMusicState(mounted));
+  mounted.summary.localRuntimeScenarioSessionReady = 0;
+  mounted.summary.localRuntimeScenarioSessionEventKind = 0;
+  mounted.summary.localRuntimeScenarioSessionMode = 0;
+  mounted.summary.localRuntimeScenarioSessionPayloadBytes = 0;
+  mounted.safeState.player = { active: false };
+  if (mounted.stage === "title") {
+    stageEnter(mounted);
+  }
 }
 
 function ensureTitleConfigState(mounted) {
@@ -922,6 +1658,10 @@ function applyTitleConfigClick(mounted, clientX, clientY) {
   const result = applyScenarioConfigControl(state, control);
   if (result.handled && result.reason !== "title_pending") {
     storeScenarioConfigSettings(state.settings);
+  } else if (result.reason === "title_pending") {
+    storeScenarioConfigSettings(state.settings);
+    state.lastAction = "title_confirm";
+    openMountedDialog(mounted, "title", "titleConfigTitle");
   }
   return result;
 }
@@ -973,16 +1713,8 @@ function applyTitleUserDataClick(mounted, clientX, clientY) {
       if (!summary.exists) {
         return { handled: true, ok: false, reason: "missing_snapshot" };
       }
-      closeScenarioUserDataWindow(state);
-      mounted.titleUserDataLastResult = "loading";
-      mounted.titleUserDataLastOk = 1;
-      void mounted.loadScenarioFromStorage?.(slot).then((load) => {
-        mounted.titleUserDataLastResult = load?.reason ?? "load_unavailable";
-        mounted.titleUserDataLastOk = Number(load?.ok === true);
-        paintMountedFrame(mounted);
-        publishRuntimeState(true);
-      });
-      return { handled: true, ok: true, reason: "loading" };
+      requestTitleUserDataLoad(mounted, slot);
+      return { handled: true, ok: true, reason: "load_confirm" };
     },
   });
   mounted.titleUserDataLastResult = result.reason ?? "";
@@ -999,60 +1731,541 @@ function titleUserDataSlotRecords(mounted) {
   );
 }
 
-const TITLE_NOAUTO = typeof location !== "undefined" && (location.search || "").includes("noauto");
-let stageFadeAlpha = 1;
-let stageAnimRunning = false;
-let petals = null;
-let petalLastT = 0;
+function ensureTitleGraphicState(mounted) {
+  if (!mounted.titleGraphicState) {
+    mounted.titleGraphicState = createTitleGraphicState();
+  }
+  return mounted.titleGraphicState;
+}
 
-function initPetals() {
-  petals = [];
-  for (let i = 0; i < 34; i += 1) {
-    petals.push({
-      x: Math.random(), y: Math.random(),
-      size: 6 + Math.random() * 9,
-      vy: 0.018 + Math.random() * 0.022,
-      swayAmp: 0.01 + Math.random() * 0.02,
-      swayPhase: Math.random() * Math.PI * 2,
-      swaySpeed: 0.6 + Math.random() * 0.8,
-      rot: Math.random() * Math.PI * 2,
-      vrot: (Math.random() - 0.5) * 1.2,
-      alpha: 0.55 + Math.random() * 0.4,
+function titleGraphicIsOpen(mounted) {
+  return mounted?.titleGraphicState?.open === true;
+}
+
+function mountedTitleGraphicAssets(mounted) {
+  if (!mounted) {
+    return [];
+  }
+  const viewedImages = mounted.gdbViewedImages instanceof Set ? mounted.gdbViewedImages : new Set();
+  const forceUnlock = titleGraphicForceUnlock;
+  if (
+    mounted.titleGraphicAssetsCache?.catalog === mounted.catalog
+    && mounted.titleGraphicAssetsCache?.viewedImages === viewedImages
+    && mounted.titleGraphicAssetsCache?.forceUnlock === forceUnlock
+  ) {
+    return mounted.titleGraphicAssetsCache.assets;
+  }
+  const assets = titleGraphicAssets(mounted.catalog, { viewedImages, forceUnlock });
+  mounted.titleGraphicAssetsCache = {
+    catalog: mounted.catalog,
+    viewedImages,
+    forceUnlock,
+    assets,
+  };
+  return assets;
+}
+
+function openTitleGraphicHost(mounted) {
+  if (!mounted || mounted.stage !== "title") {
+    return { ok: false, reason: "not_title" };
+  }
+  if (dialogIsOpen(mounted)) {
+    return { ok: false, reason: "dialog_open" };
+  }
+  closeScenarioConfigWindow(ensureTitleConfigState(mounted));
+  closeScenarioUserDataWindow(ensureTitleUserDataState(mounted));
+  closeTitleSceneSelect(ensureTitleSceneState(mounted));
+  closeTitleMusic(ensureTitleMusicState(mounted));
+  const state = ensureTitleGraphicState(mounted);
+  const assets = mountedTitleGraphicAssets(mounted);
+  if (state.selectedIndex < 0 && assets.length > 0) {
+    const firstUnlocked = assets.find((asset) => asset.unlocked !== false) ?? assets[0];
+    state.selectedIndex = firstUnlocked.index;
+    state.selectedAssetName = firstUnlocked.assetName;
+  }
+  openTitleGraphic(state);
+  mounted.hoverIndex = -1;
+  mounted.titleLastAction = "graphic_open";
+  prepareTitleGraphicChrome(mounted);
+  prepareTitleGraphicPage(mounted);
+  paintMountedFrame(mounted);
+  publishRuntimeState(true);
+  return {
+    ok: true,
+    reason: "ok",
+    assetCount: assets.length,
+  };
+}
+
+function updateTitleGraphicHover(mounted, clientX, clientY) {
+  const state = ensureTitleGraphicState(mounted);
+  const point = canvasPointFromClient(clientX, clientY);
+  const assets = mountedTitleGraphicAssets(mounted);
+  const control = titleGraphicControlAt(point.x, point.y, state, assets, mounted.titleButtonSprites);
+  const next = titleGraphicHoverKey(control);
+  if (state.hoverIndex === next) {
+    return false;
+  }
+  state.hoverIndex = next;
+  return true;
+}
+
+async function applyTitleGraphicClick(mounted, clientX, clientY) {
+  const state = ensureTitleGraphicState(mounted);
+  const point = canvasPointFromClient(clientX, clientY);
+  const assets = mountedTitleGraphicAssets(mounted);
+  const control = titleGraphicControlAt(point.x, point.y, state, assets, mounted.titleButtonSprites);
+  return await handleTitleGraphicResult(
+    mounted,
+    applyTitleGraphicControl(state, control, assets.length),
+  );
+}
+
+async function handleTitleGraphicResult(mounted, result) {
+  if (!mounted || !result?.handled) {
+    return { ok: false, reason: "not_handled" };
+  }
+  const state = ensureTitleGraphicState(mounted);
+  if (result.action === "back") {
+    mounted.titleLastAction = "graphic_back";
+    paintMountedFrame(mounted);
+    publishRuntimeState(true);
+    return { ok: true, reason: "back", action: "back" };
+  }
+  if (result.action === "page") {
+    mounted.titleLastAction = "graphic_page";
+    prepareTitleGraphicPage(mounted);
+    paintMountedFrame(mounted);
+    publishRuntimeState(true);
+    return { ok: true, reason: "page", action: "page", page: result.page };
+  }
+  if (result.action === "viewer_back") {
+    mounted.titleLastAction = "graphic_viewer_back";
+    paintMountedFrame(mounted);
+    publishRuntimeState(true);
+    return { ok: true, reason: "viewer_back", action: "viewer_back" };
+  }
+  if (result.action === "locked") {
+    mounted.titleLastAction = "graphic_locked";
+    paintMountedFrame(mounted);
+    publishRuntimeState(true);
+    return {
+      ok: false,
+      reason: "locked",
+      action: "locked",
+      index: result.index,
+      assetName: result.assetName,
+    };
+  }
+  if (result.action !== "select") {
+    return { ok: false, reason: "unknown_action" };
+  }
+  mounted.titleLastAction = "graphic_select";
+  const fullAssetName = result.fullAssetName || result.assetName;
+  const image = await loadTitleGraphicImage(mounted, fullAssetName);
+  state.lastLoadOk = Number(image !== null);
+  state.lastLoadReason = image ? "ok" : "asset_missing";
+  state.viewerLoadOk = state.lastLoadOk;
+  state.viewerLoadReason = state.lastLoadReason;
+  paintMountedFrame(mounted);
+  publishRuntimeState(true);
+  return {
+    ok: image !== null,
+    reason: state.lastLoadReason,
+    action: "select",
+    index: result.index,
+    assetName: result.assetName,
+    fullAssetName,
+    assetReady: Number(image !== null),
+  };
+}
+
+function prepareTitleGraphicPage(mounted) {
+  if (!mounted || !titleGraphicIsOpen(mounted)) {
+    return;
+  }
+  const state = ensureTitleGraphicState(mounted);
+  const assets = mountedTitleGraphicAssets(mounted);
+  const choices = titleGraphicVisibleChoices(state, assets);
+  const selected = assets.find((asset) => asset.index === state.selectedIndex) ?? null;
+  const preloadAssets = selected ? [selected, ...choices] : choices;
+  const assetNames = new Set(
+    preloadAssets
+      .filter((choice) => choice?.locked !== true)
+      .map((choice) => choice.assetName),
+  );
+  if (state.viewerOpen && state.viewerAssetName) {
+    assetNames.add(state.viewerAssetName);
+  }
+  for (const assetName of assetNames) {
+    void loadTitleGraphicImage(mounted, assetName).then(() => {
+      if (isCurrentInstall(mounted) && titleGraphicIsOpen(mounted)) {
+        paintMountedFrame(mounted);
+        publishRuntimeState();
+      }
     });
   }
 }
 
-function drawPetal(ctx, px, py, size, rot, alpha) {
-  ctx.save();
-  ctx.translate(px, py);
-  ctx.rotate(rot);
-  ctx.globalAlpha = alpha;
-  const grad = ctx.createLinearGradient(0, -size, 0, size);
-  grad.addColorStop(0, "rgba(255,255,255,0.95)");
-  grad.addColorStop(1, "rgba(255,210,232,0.9)");
-  ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.moveTo(0, -size);
-  ctx.quadraticCurveTo(size * 0.7, -size * 0.2, size * 0.25, size);
-  ctx.quadraticCurveTo(0, size * 0.7, -size * 0.25, size);
-  ctx.quadraticCurveTo(-size * 0.7, -size * 0.2, 0, -size);
-  ctx.fill();
-  ctx.restore();
+function prepareTitleGraphicChrome(mounted) {
+  if (!mounted || !titleGraphicIsOpen(mounted)) {
+    return;
+  }
+  for (const assetName of titleGraphicChromeAssetNames()) {
+    void loadTitleGraphicChromeImage(mounted, assetName).then(() => {
+      if (isCurrentInstall(mounted) && titleGraphicIsOpen(mounted)) {
+        paintMountedFrame(mounted);
+        publishRuntimeState();
+      }
+    });
+  }
 }
 
-function updateAndDrawPetals(ctx, x, y, w, h, dt) {
-  if (!petals) initPetals();
-  for (const p of petals) {
-    p.y += p.vy * dt;
-    p.swayPhase += p.swaySpeed * dt;
-    p.rot += p.vrot * dt;
-    if (p.y > 1.08) { p.y = -0.08; p.x = Math.random(); }
-    const sx = x + (p.x + Math.sin(p.swayPhase) * p.swayAmp) * w;
-    const sy = y + p.y * h;
-    drawPetal(ctx, sx, sy, p.size, p.rot, p.alpha * stageFadeAlpha);
+async function loadTitleGraphicChromeImage(mounted, assetName) {
+  if (!/^[A-Za-z0-9_]+$/.test(String(assetName ?? ""))) {
+    return null;
   }
-  ctx.globalAlpha = 1;
+  if (!mounted.titleGraphicChromeCache) {
+    mounted.titleGraphicChromeCache = new Map();
+  }
+  const cached = mounted.titleGraphicChromeCache.get(assetName);
+  if (cached?.status === "ready" || cached?.status === "missing" || cached?.status === "error") {
+    return cached.image ?? null;
+  }
+  if (cached?.promise) {
+    return cached.promise;
+  }
+  const promise = (async () => {
+    try {
+      const payload = await mounted.catalog?.readPayloadByNameBytes?.(assetNameEncoder.encode(assetName));
+      const image = payload ? mounted.core?.imageRgba?.(payload) ?? null : null;
+      mounted.titleGraphicChromeCache.set(assetName, {
+        status: image ? "ready" : "missing",
+        image,
+      });
+      return image;
+    } catch {
+      mounted.titleGraphicChromeCache.set(assetName, { status: "error", image: null });
+      return null;
+    }
+  })();
+  mounted.titleGraphicChromeCache.set(assetName, { status: "loading", image: null, promise });
+  return promise;
 }
+
+async function loadTitleGraphicImage(mounted, assetName) {
+  if (!/^[A-Za-z0-9_]+$/.test(String(assetName ?? ""))) {
+    return null;
+  }
+  if (!mounted.titleGraphicImageCache) {
+    mounted.titleGraphicImageCache = new Map();
+  }
+  const cached = mounted.titleGraphicImageCache.get(assetName);
+  if (cached?.status === "ready" || cached?.status === "missing" || cached?.status === "error") {
+    return cached.image ?? null;
+  }
+  if (cached?.promise) {
+    return cached.promise;
+  }
+  const promise = (async () => {
+    try {
+      const payload = await mounted.catalog?.readPayloadByNameBytes?.(assetNameEncoder.encode(assetName));
+      const image = payload ? mounted.core?.imageRgba?.(payload) ?? null : null;
+      mounted.titleGraphicImageCache.set(assetName, {
+        status: image ? "ready" : "missing",
+        image,
+      });
+      return image;
+    } catch {
+      mounted.titleGraphicImageCache.set(assetName, { status: "error", image: null });
+      return null;
+    }
+  })();
+  mounted.titleGraphicImageCache.set(assetName, { status: "loading", image: null, promise });
+  return promise;
+}
+
+function ensureTitleSceneState(mounted) {
+  if (!mounted.titleSceneState) {
+    mounted.titleSceneState = createTitleSceneSelectState();
+  }
+  return mounted.titleSceneState;
+}
+
+function titleSceneIsOpen(mounted) {
+  return mounted?.titleSceneState?.open === true;
+}
+
+function openTitleSceneSelectHost(mounted) {
+  if (!mounted || mounted.stage !== "title") {
+    return { ok: false, reason: "not_title" };
+  }
+  if (dialogIsOpen(mounted)) {
+    return { ok: false, reason: "dialog_open" };
+  }
+  closeScenarioConfigWindow(ensureTitleConfigState(mounted));
+  closeScenarioUserDataWindow(ensureTitleUserDataState(mounted));
+  closeTitleGraphic(ensureTitleGraphicState(mounted));
+  closeTitleMusic(ensureTitleMusicState(mounted));
+  const state = ensureTitleSceneState(mounted);
+  openTitleSceneSelect(state);
+  prepareTitleSceneThumbnails(mounted);
+  mounted.hoverIndex = -1;
+  mounted.titleLastAction = "scene_open";
+  paintMountedFrame(mounted);
+  publishRuntimeState(true);
+  return {
+    ok: true,
+    reason: "ok",
+    choiceCount: titleSceneChoices().length,
+  };
+}
+
+function prepareTitleSceneThumbnails(mounted) {
+  if (!mounted || !titleSceneIsOpen(mounted)) {
+    return;
+  }
+  for (const choice of titleSceneChoices()) {
+    void loadTitleSceneImage(mounted, choice.thumbnailAssetName).then(() => {
+      if (isCurrentInstall(mounted) && titleSceneIsOpen(mounted)) {
+        paintMountedFrame(mounted);
+        publishRuntimeState();
+      }
+    });
+  }
+}
+
+async function loadTitleSceneImage(mounted, assetName) {
+  if (!/^[A-Za-z0-9_]+$/.test(String(assetName ?? ""))) {
+    return null;
+  }
+  if (!mounted.titleSceneImageCache) {
+    mounted.titleSceneImageCache = new Map();
+  }
+  const cached = mounted.titleSceneImageCache.get(assetName);
+  if (cached?.status === "ready" || cached?.status === "missing" || cached?.status === "error") {
+    return cached.image ?? null;
+  }
+  if (cached?.promise) {
+    return cached.promise;
+  }
+  const promise = (async () => {
+    try {
+      const payload = await mounted.catalog?.readPayloadByNameBytes?.(assetNameEncoder.encode(assetName));
+      const image = payload ? mounted.core?.imageRgba?.(payload) ?? null : null;
+      mounted.titleSceneImageCache.set(assetName, {
+        status: image ? "ready" : "missing",
+        image,
+      });
+      return image;
+    } catch {
+      mounted.titleSceneImageCache.set(assetName, { status: "error", image: null });
+      return null;
+    }
+  })();
+  mounted.titleSceneImageCache.set(assetName, { status: "loading", image: null, promise });
+  return promise;
+}
+
+function updateTitleSceneHover(mounted, clientX, clientY) {
+  const state = ensureTitleSceneState(mounted);
+  const point = canvasPointFromClient(clientX, clientY);
+  const control = titleSceneControlAt(point.x, point.y, state, mounted.titleButtonSprites);
+  const next = titleSceneHoverKey(control);
+  if (state.hoverIndex === next) {
+    return false;
+  }
+  state.hoverIndex = next;
+  return true;
+}
+
+async function applyTitleSceneClick(mounted, clientX, clientY) {
+  const state = ensureTitleSceneState(mounted);
+  const point = canvasPointFromClient(clientX, clientY);
+  const control = titleSceneControlAt(point.x, point.y, state, mounted.titleButtonSprites);
+  return await handleTitleSceneResult(mounted, applyTitleSceneControl(state, control));
+}
+
+async function handleTitleSceneResult(mounted, result) {
+  if (!mounted || !result?.handled) {
+    return { ok: false, reason: "not_handled" };
+  }
+  if (result.action === "back") {
+    mounted.titleLastAction = "scene_back";
+    paintMountedFrame(mounted);
+    publishRuntimeState(true);
+    return { ok: true, reason: "back", action: "back" };
+  }
+  if (result.action !== "select") {
+    return { ok: false, reason: "unknown_action" };
+  }
+  mounted.titleLastAction = "scene_select";
+  stopTitleBgm(mounted);
+  const player = await mounted.startScenarioRoute?.(result.routeId, result.scenarioName);
+  paintMountedFrame(mounted);
+  publishRuntimeState(true);
+  return player?.safeState
+    ? {
+      ok: true,
+      reason: "ok",
+      action: "select",
+      route: player.safeState.scenarioRoute,
+      scenarioName: player.safeState.scenarioName,
+      scenarioIndex: player.safeState.scenarioIndex,
+      replayId: result.replayId,
+      thumbnailAssetName: result.thumbnailAssetName,
+    }
+    : { ok: false, reason: "no_player" };
+}
+
+function ensureTitleMusicState(mounted) {
+  if (!mounted.titleMusicState) {
+    mounted.titleMusicState = createTitleMusicState();
+  }
+  return mounted.titleMusicState;
+}
+
+function titleMusicIsOpen(mounted) {
+  return mounted?.titleMusicState?.open === true;
+}
+
+function openTitleMusicHost(mounted) {
+  if (!mounted || mounted.stage !== "title") {
+    return { ok: false, reason: "not_title" };
+  }
+  if (dialogIsOpen(mounted)) {
+    return { ok: false, reason: "dialog_open" };
+  }
+  closeScenarioConfigWindow(ensureTitleConfigState(mounted));
+  closeScenarioUserDataWindow(ensureTitleUserDataState(mounted));
+  closeTitleGraphic(ensureTitleGraphicState(mounted));
+  closeTitleSceneSelect(ensureTitleSceneState(mounted));
+  const state = ensureTitleMusicState(mounted);
+  openTitleMusic(state);
+  mounted.hoverIndex = -1;
+  mounted.titleLastAction = "music_open";
+  paintMountedFrame(mounted);
+  publishRuntimeState(true);
+  return {
+    ok: true,
+    reason: "ok",
+    trackCount: titleMusicTracks().length,
+  };
+}
+
+function updateTitleMusicHover(mounted, clientX, clientY) {
+  const state = ensureTitleMusicState(mounted);
+  const point = canvasPointFromClient(clientX, clientY);
+  const control = titleMusicControlAt(point.x, point.y, state, mounted.titleButtonSprites);
+  const next = titleMusicHoverKey(control);
+  if (state.hoverIndex === next) {
+    return false;
+  }
+  state.hoverIndex = next;
+  return true;
+}
+
+async function applyTitleMusicClick(mounted, clientX, clientY) {
+  const state = ensureTitleMusicState(mounted);
+  const point = canvasPointFromClient(clientX, clientY);
+  const control = titleMusicControlAt(point.x, point.y, state, mounted.titleButtonSprites);
+  return await handleTitleMusicResult(mounted, applyTitleMusicControl(state, control));
+}
+
+async function handleTitleMusicResult(mounted, result) {
+  if (!mounted || !result?.handled) {
+    return { ok: false, reason: "not_handled" };
+  }
+  const state = ensureTitleMusicState(mounted);
+  if (result.action === "back") {
+    mounted.titleLastAction = "music_back";
+    paintMountedFrame(mounted);
+    publishRuntimeState(true);
+    return { ok: true, reason: "back", action: "back" };
+  }
+  if (result.action !== "select") {
+    return { ok: false, reason: "unknown_action" };
+  }
+  mounted.titleLastAction = "music_select";
+  const ogg = await loadTitleMusicAudio(mounted, result.assetName);
+  const play = await mounted.audioMixer?.playTrack?.(ogg, { loop: true, volume: 1 });
+  state.lastPlayOk = Number(play?.ok === true);
+  state.lastPlayReason = play?.reason ?? (ogg ? "unavailable" : "asset_missing");
+  paintMountedFrame(mounted);
+  publishRuntimeState(true);
+  return {
+    ok: play?.ok === true,
+    reason: state.lastPlayReason,
+    action: "select",
+    index: result.index,
+    assetName: result.assetName,
+    assetReady: Number(ogg !== null),
+  };
+}
+
+async function loadTitleMusicAudio(mounted, assetName) {
+  if (!/^[A-Za-z0-9_]+$/.test(String(assetName ?? ""))) {
+    return null;
+  }
+  if (!mounted.titleMusicAudioCache) {
+    mounted.titleMusicAudioCache = new Map();
+  }
+  if (!mounted.titleMusicAudioCache.has(assetName)) {
+    const payload = await mounted.catalog?.readPayloadByNameBytes?.(assetNameEncoder.encode(assetName));
+    const ogg = payload ? mounted.core?.bgiAudioOgg?.(payload) ?? null : null;
+    mounted.titleMusicAudioCache.set(assetName, ogg);
+  }
+  return mounted.titleMusicAudioCache.get(assetName) ?? null;
+}
+
+// title._bp plays a looping title BGM: bgm040 on the clean title, bgm035 once
+// any route has been cleared (the ternary on the title-clear flag, vol 128).
+// Autoplay policy can block the first attempt when the title is reached by boot
+// auto-advance without a click; retryTitleBgm() re-attempts on the next gesture.
+function titleBgmAssetName() {
+  return titleExtraUnlocked() ? "bgm035" : "bgm040";
+}
+
+async function startTitleBgm(mounted) {
+  if (!mounted || mounted.stage !== "title") {
+    return;
+  }
+  const name = titleBgmAssetName();
+  if (mounted.titleBgmPlaying === name) {
+    return;
+  }
+  const ogg = await loadTitleMusicAudio(mounted, name);
+  if (!ogg || !mounted || mounted.stage !== "title") {
+    return;
+  }
+  const result = await mounted.audioMixer?.playTrack?.(ogg, { loop: true, volume: 1 });
+  if (result?.ok === true) {
+    mounted.titleBgmPlaying = name;
+    mounted.titleBgmPendingRetry = false;
+  } else {
+    mounted.titleBgmPendingRetry = true;
+  }
+  updateAudioState(mounted);
+}
+
+function stopTitleBgm(mounted) {
+  if (!mounted || !mounted.titleBgmPlaying) {
+    return;
+  }
+  mounted.audioMixer?.stopTrack?.();
+  mounted.titleBgmPlaying = null;
+  mounted.titleBgmPendingRetry = false;
+}
+
+function retryTitleBgm(mounted) {
+  if (mounted?.stage === "title" && mounted.titleBgmPendingRetry === true) {
+    void startTitleBgm(mounted);
+  }
+}
+
+const TITLE_NOAUTO = typeof location !== "undefined" && (location.search || "").includes("noauto");
+let stageFadeAlpha = 1;
+let stageAnimRunning = false;
 
 
 const BOOT_FADE_MS = 450;
@@ -1061,6 +2274,11 @@ const BOOT_HOLD_MS = [2600, 6000, 6000];  // logo, warning1, warning2 auto-advan
 function stageEnter(mounted) {
   mounted.stageEnteredAt = performance.now();
   startStageAnim(mounted);
+  if (mounted.stage === "title") {
+    void startTitleBgm(mounted);
+  } else {
+    stopTitleBgm(mounted);
+  }
 }
 
 function startStageAnim(mounted) {
@@ -1101,36 +2319,30 @@ function paintTitleScreen(mounted) {
   context.globalAlpha = stageFadeAlpha;
   const { x, y, w, h } = titleLayout(image);
   context.drawImage(imageScratch(image), x, y, w, h);
-  const buttons = mounted.menuButtons ?? [];
   const scale = w / image.width;
-  const cy = y + h * TITLE_MENU_Y;
-  if (buttons.length > 0) {
-    for (let i = 0; i < buttons.length; i += 1) {
-      const b = buttons[i];
-      const cx = x + w * TITLE_MENU_X[i];
-      const bw = b.stateWidth * scale;
-      const bh = b.stateHeight * scale;
-      const state = mounted.hoverIndex === i ? 1 : 0;
-      context.drawImage(
-        imageScratch(b.image),
-        state * b.stateWidth, 0, b.stateWidth, b.stateHeight,
-        Math.round(cx - bw / 2), Math.round(cy - bh / 2), bw, bh);
+  if (!titleGraphicIsOpen(mounted) && !titleSceneIsOpen(mounted) && !titleMusicIsOpen(mounted)) {
+    const controls = currentTitleMenuControls(mounted);
+    for (let i = 0; i < controls.length; i += 1) {
+      const control = controls[i];
+      const button = mounted.titleButtonSprites?.[control.sprite] ?? null;
+      if (button?.image) {
+        const state = !control.enabled ? 3 : (mounted.hoverIndex === i ? 1 : 0);
+        context.drawImage(
+          imageScratch(button.image),
+          state * button.stateWidth,
+          0,
+          button.stateWidth,
+          button.stateHeight,
+          Math.round(x + control.x * scale),
+          Math.round(y + control.y * scale),
+          button.stateWidth * scale,
+          button.stateHeight * scale,
+        );
+      } else {
+        paintFallbackTitleButton(context, control, mounted.hoverIndex === i, x, y, scale);
+      }
     }
-  } else {
-    context.save();
-    context.font = "bold 36px 'Times New Roman', serif";
-    context.textAlign = "center";
-    context.textBaseline = "middle";
-    context.fillStyle = "#ffffff";
-    for (let i = 0; i < TITLE_MENU.length; i += 1) {
-      context.fillText(TITLE_MENU[i], x + w * TITLE_MENU_X[i], cy);
-    }
-    context.restore();
   }
-  const now = performance.now() / 1000;
-  const dt = petalLastT > 0 ? Math.min(0.05, now - petalLastT) : 0;
-  petalLastT = now;
-  updateAndDrawPetals(context, x, y, w, h, dt);
   context.restore();
   paintScenarioUserDataWindow(
     context,
@@ -1140,6 +2352,24 @@ function paintTitleScreen(mounted) {
     titleUserDataIsOpen(mounted) ? titleUserDataSlotRecords(mounted) : [],
   );
   paintScenarioConfigWindow(context, canvas, mounted.configWindow, mounted.titleConfigState);
+  paintTitleGraphic(
+    context,
+    canvas,
+    mounted.titleGraphicState,
+    mountedTitleGraphicAssets(mounted),
+    mounted.titleButtonSprites,
+    mounted.titleGraphicImageCache,
+    mounted.titleGraphicChromeCache,
+  );
+  paintTitleSceneSelect(
+    context,
+    canvas,
+    mounted.titleSceneState,
+    mounted.titleButtonSprites,
+    mounted.titleSceneImageCache,
+  );
+  paintTitleMusic(context, canvas, mounted.titleMusicState, mounted.titleButtonSprites, mounted.titleMusicSprites);
+  paintScenarioDialogWindow(context, canvas, mounted.dialogWindow, mounted.dialogState);
   stageNonBlackSampleCount = 1;
 }
 
@@ -1151,17 +2381,36 @@ function titleMenuHit(mounted, clientX, clientY) {
   const py = (clientY - rect.top) * (canvas.height / rect.height);
   const { x, y, w, h } = titleLayout(image);
   const scale = w / image.width;
-  const cy = y + h * TITLE_MENU_Y;
-  const buttons = mounted.menuButtons ?? [];
-  const count = buttons.length > 0 ? buttons.length : TITLE_MENU.length;
-  for (let i = 0; i < count; i += 1) {
-    const b = buttons[i];
-    const bw = b ? b.stateWidth * scale : w * 0.14;
-    const bh = b ? b.stateHeight * scale : h * 0.1;
-    const cx = x + w * TITLE_MENU_X[i];
-    if (Math.abs(px - cx) < bw / 2 && Math.abs(py - cy) < bh / 2) return i;
+  const controls = currentTitleMenuControls(mounted);
+  for (let i = controls.length - 1; i >= 0; i -= 1) {
+    const control = controls[i];
+    const button = mounted.titleButtonSprites?.[control.sprite] ?? null;
+    const width = (button?.stateWidth ?? 114) * scale;
+    const height = (button?.stateHeight ?? 64) * scale;
+    const left = x + control.x * scale;
+    const top = y + control.y * scale;
+    if (px >= left && px < left + width && py >= top && py < top + height) {
+      return i;
+    }
   }
   return -1;
+}
+
+function currentTitleMenuControls(mounted) {
+  return titleMenuControls(
+    normalizeTitleMenuMode(mounted?.titleMenuMode),
+    titleExtraForced || titleExtraUnlocked(),
+  );
+}
+
+function paintFallbackTitleButton(ctx, control, hovered, x, y, scale) {
+  ctx.save();
+  ctx.font = "bold 36px 'Times New Roman', serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillStyle = control.enabled ? (hovered ? "#dcefff" : "#ffffff") : "rgba(255,255,255,0.42)";
+  ctx.fillText(control.label, x + control.x * scale, y + control.y * scale);
+  ctx.restore();
 }
 
 function paintBootScreen(mounted) {
@@ -1228,6 +2477,12 @@ function advanceBootPhase(mounted) {
 }
 
 function paintMountedFrame(mounted) {
+  if (mounted.stage === "exited") {
+    context.fillStyle = "#000";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    stageNonBlackSampleCount = 0;
+    return;
+  }
   if (mounted.stage === "boot" && mounted.bootScreens?.length) {
     paintBootScreen(mounted);
     return;
@@ -1250,6 +2505,7 @@ function paintMountedFrame(mounted) {
       mounted.messageWindow,
     );
     context.restore();
+    paintScenarioDialogWindow(context, canvas, mounted.dialogWindow, mounted.dialogState);
     if (!painted) {
       return;
     }
@@ -1385,6 +2641,9 @@ function paintBootFrame(core) {
   void core;
   context.fillStyle = "#111318";
   context.fillRect(0, 0, canvas.width, canvas.height);
+  if (!runtimeDiagnosticsEnabled) {
+    return;
+  }
   context.save();
   context.globalAlpha = 0.38;
   context.fillStyle = "#4874b4";

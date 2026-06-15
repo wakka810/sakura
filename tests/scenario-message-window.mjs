@@ -54,6 +54,7 @@ assert.deepEqual(resolvedScenarioMessageVisual(state, 4000), {
 const { parseScenarioText, stripScenarioTags } = await import(
   "../web/scenario-text.js"
 );
+const { drawScenarioRichText } = await import("../web/scenario-text.js");
 
 assert.deepEqual(parseScenarioText("AB<r yomi>kanji</r>CD"), [
   { type: "text", text: "AB" },
@@ -61,12 +62,83 @@ assert.deepEqual(parseScenarioText("AB<r yomi>kanji</r>CD"), [
   { type: "text", text: "CD" },
 ]);
 assert.equal(stripScenarioTags("AB<r yomi>kanji</r>CD"), "ABkanjiCD");
-// Style tags are unwrapped, content preserved.
+// BGI's inline bold/italic tags are styled in the rich renderer; unsupported
+// style tags such as <l> are still unwrapped with content preserved.
 assert.equal(stripScenarioTags("<i>em</i> and <l>x</l> y"), "em and x y");
+assert.deepEqual(parseScenarioText("A<b>B<i>C</i></b>D"), [
+  { type: "text", text: "A" },
+  { type: "text", text: "B", bold: true },
+  { type: "text", text: "C", bold: true, italic: true },
+  { type: "text", text: "D" },
+]);
+assert.deepEqual(parseScenarioText("A<c>red</c>B"), [
+  { type: "text", text: "A" },
+  { type: "text", text: "red", wordColor: true },
+  { type: "text", text: "B" },
+]);
+assert.equal(stripScenarioTags("A<c>red</c>B"), "AredB");
 // cr / t become line breaks.
 assert.equal(stripScenarioTags("a<cr>b"), "a\nb");
 // Malformed ruby keeps surrounding text without throwing.
 assert.equal(stripScenarioTags("pre<r dangling"), "pre<r dangling");
+
+{
+  const calls = [];
+  const context = {
+    font: "20px serif",
+    fillStyle: "#111",
+    measureText: (text) => ({ width: Array.from(text).length * 10 }),
+    fillText(text, x, y) {
+      calls.push({ text, x, y, fillStyle: this.fillStyle });
+    },
+  };
+  drawScenarioRichText(
+    context,
+    "A<c>BC</c>D",
+    0,
+    0,
+    100,
+    24,
+    1,
+    Infinity,
+    { wordColor: "rgb(10, 20, 30)" },
+  );
+  assert.deepEqual(calls.map((call) => [call.text, call.fillStyle]), [
+    ["A", "#111"],
+    ["B", "rgb(10, 20, 30)"],
+    ["C", "rgb(10, 20, 30)"],
+    ["D", "#111"],
+  ]);
+  assert.equal(context.fillStyle, "#111");
+}
+
+{
+  const calls = [];
+  const context = {
+    font: "20px serif",
+    fillStyle: "#111",
+    measureText: (text) => ({ width: Array.from(text).length * 10 }),
+    fillText(text, x, y) {
+      calls.push({ text, x, y, font: this.font });
+    },
+  };
+  drawScenarioRichText(
+    context,
+    "A<b>B<i>C</i></b>D",
+    0,
+    0,
+    100,
+    24,
+    1,
+  );
+  assert.deepEqual(calls.map((call) => [call.text, call.font]), [
+    ["A", "20px serif"],
+    ["B", "bold 20px serif"],
+    ["C", "italic bold 20px serif"],
+    ["D", "20px serif"],
+  ]);
+  assert.equal(context.font, "20px serif");
+}
 
 // Typing reveal: chars appear over time at msPerChar; click completes; 0 = instant.
 const reveal = createScenarioMessageVisualState();

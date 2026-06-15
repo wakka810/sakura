@@ -113,9 +113,13 @@ export function createLocalCatalog() {
   return new LocalAssetCatalog();
 }
 
-export function createServerCatalog(catalogPayload, endpoint = "./api/install/payload") {
+export function createServerCatalog(
+  catalogPayload,
+  endpoint = "./api/install/payload",
+  sidecarEndpoint = "./api/install/sidecar",
+) {
   const catalog = createLocalCatalog();
-  catalog.mountServerCatalog(catalogPayload, endpoint);
+  catalog.mountServerCatalog(catalogPayload, endpoint, sidecarEndpoint);
   return catalog;
 }
 
@@ -183,6 +187,8 @@ class LocalAssetCatalog {
   #records = [];
   #byName = new Map();
   #archivesByName = new Map();
+  #sidecars = [];
+  #sidecarsByName = new Map();
   #mountedEntries = 0;
   #duplicateEntries = 0;
 
@@ -219,7 +225,19 @@ class LocalAssetCatalog {
     return { entryCount: parsed.entries.length };
   }
 
-  mountServerCatalog(payload, endpoint) {
+  mountSidecar(file) {
+    const sidecarIndex = this.#sidecars.length;
+    const sidecarName = bytes(file.name);
+    this.#sidecars.push({
+      file,
+      name: sidecarName,
+      size: file.size,
+    });
+    this.#sidecarsByName.set(bytesToHex(sidecarName), sidecarIndex);
+    return { sidecarIndex };
+  }
+
+  mountServerCatalog(payload, endpoint, sidecarEndpoint) {
     if (payload?.version !== 1 || !Array.isArray(payload.archives)) {
       throw new Error("invalid local server catalog");
     }
@@ -257,6 +275,19 @@ class LocalAssetCatalog {
         this.#byName.set(key, record);
         this.#mountedEntries += 1;
         mounted += 1;
+      }
+    }
+    for (const sidecar of payload.sidecars ?? []) {
+      const sidecarIndex = this.#sidecars.length;
+      const sidecarName = typeof sidecar.nameHex === "string" ? hexToBytes(sidecar.nameHex) : null;
+      this.#sidecars.push({
+        endpoint: sidecarEndpoint,
+        serverSidecarIndex: sidecar.sidecarIndex ?? sidecarIndex,
+        name: sidecarName,
+        size: sidecar.size,
+      });
+      if (sidecarName instanceof Uint8Array) {
+        this.#sidecarsByName.set(bytesToHex(sidecarName), sidecarIndex);
       }
     }
     return { entryCount: mounted };
@@ -384,11 +415,39 @@ class LocalAssetCatalog {
       .filter((archive) => archive.mountData === true && archive.file instanceof Blob);
   }
 
+  sidecars() {
+    return this.#sidecars.values();
+  }
+
+  async readSidecarByNameBytes(name) {
+    const sidecarIndex = this.#findSidecarIndexByNameBytes(name);
+    const sidecar = this.#sidecars[sidecarIndex ?? -1];
+    if (!sidecar) {
+      return null;
+    }
+    if (sidecar.endpoint) {
+      const url = new URL(sidecar.endpoint, globalThis.window?.location?.href ?? "http://127.0.0.1/");
+      url.searchParams.set("sidecar", String(sidecar.serverSidecarIndex));
+      url.searchParams.set("offset", "0");
+      url.searchParams.set("length", String(sidecar.size));
+      const { response } = await fetchServerPayload(url);
+      if (response === null || !response.ok) {
+        return null;
+      }
+      return new Uint8Array(await response.arrayBuffer());
+    }
+    if (!(sidecar.file instanceof Blob)) {
+      return null;
+    }
+    return new Uint8Array(await sidecar.file.arrayBuffer());
+  }
+
   summary() {
     return {
       arcMountedEntries: this.#mountedEntries,
       arcCanonicalEntries: this.#byName.size,
       arcDuplicateEntries: this.#duplicateEntries,
+      sidecarCount: this.#sidecars.length,
     };
   }
 
@@ -407,6 +466,21 @@ class LocalAssetCatalog {
         continue;
       }
       if (archiveQueryMatches(query, asciiLower(archiveName))) {
+        return index;
+      }
+    }
+    return null;
+  }
+
+  #findSidecarIndexByNameBytes(name) {
+    const exact = this.#sidecarsByName.get(bytesToHex(name));
+    if (Number.isInteger(exact) && exact >= 0) {
+      return exact;
+    }
+    const query = asciiLower(name);
+    for (let index = this.#sidecars.length - 1; index >= 0; index -= 1) {
+      const sidecarName = this.#sidecars[index]?.name;
+      if (sidecarName instanceof Uint8Array && asciiLower(sidecarName) === query) {
         return index;
       }
     }

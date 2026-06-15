@@ -40,7 +40,7 @@ const state = createScenarioConfigState();
 openScenarioConfigWindow(state);
 assert.equal(state.open, true);
 
-const slider = scenarioConfigControlAt(590, 150, state, skin);
+const slider = scenarioConfigControlAt(562, 156, state, skin);
 assert.equal(slider?.kind, "slider");
 assert.equal(slider.key, "textSpeed");
 assert.equal(scenarioConfigHoverKey(slider), "textSpeed");

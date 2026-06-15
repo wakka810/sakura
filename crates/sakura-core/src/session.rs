@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 
 use crate::error::{Result, SakuraError};
 use crate::scenario::{
-    ScenarioGraphCommand, ScenarioMessageControl, ScenarioProgram, ScenarioSoundCommand,
-    ScenarioUserFunction, ScenarioVm, ScenarioVmCheckpoint, ScenarioWait,
+    ScenarioGraphCommand, ScenarioMessageControl, ScenarioMessageStyle, ScenarioProgram,
+    ScenarioSoundCommand, ScenarioUserFunction, ScenarioVm, ScenarioVmCheckpoint, ScenarioWait,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +161,10 @@ pub enum SessionEvent<'a> {
         event_index: u64,
         control: ScenarioMessageControl,
     },
+    MessageStyle {
+        event_index: u64,
+        style: ScenarioMessageStyle,
+    },
     Halted,
 }
 
@@ -301,6 +305,10 @@ impl<'a> ScenarioSession<'a> {
                     event_index,
                     control,
                 })
+            }
+            crate::ScenarioEvent::MessageStyle(style) => {
+                let event_index = self.next_event_index()?;
+                Ok(SessionEvent::MessageStyle { event_index, style })
             }
             crate::ScenarioEvent::Halted => {
                 self.mode = SessionMode::Halted;

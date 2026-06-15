@@ -57,6 +57,10 @@ async function route(request, response) {
     await sendPayload(url, response);
     return;
   }
+  if (url.pathname === "/api/install/sidecar") {
+    await sendSidecar(url, response);
+    return;
+  }
   await sendStatic(url.pathname, response);
 }
 
@@ -71,13 +75,22 @@ async function installCatalog() {
 
 async function buildInstallCatalog() {
   const files = await collectInstallFiles(installDir);
+  const rootStringsDbPath = resolve(installDir, "BGI.gdb");
   const archives = [];
+  const sidecars = [];
   let exeCount = 0;
   let totalEntries = 0;
 
   for (const path of files) {
     if (path.endsWith(`${sep}BGI.exe`)) {
       exeCount += 1;
+      continue;
+    }
+    if (basenameLower(path) === "bgi.gdb") {
+      if (resolve(path) !== rootStringsDbPath) {
+        continue;
+      }
+      sidecars.push(await readSidecarCatalog(path, sidecars.length));
       continue;
     }
     if (extname(path).toLowerCase() !== ".arc") {
@@ -95,6 +108,7 @@ async function buildInstallCatalog() {
     version: 1,
     exeCount,
     archiveCount: archives.length,
+    sidecarCount: sidecars.length,
     entryCount: totalEntries,
     archives: archives.map((archive) => ({
       nameHex: Buffer.from(archive.name, "utf8").toString("hex"),
@@ -103,8 +117,23 @@ async function buildInstallCatalog() {
       manifestHex: archive.manifestHex,
       entries: archive.entries,
     })),
+    sidecars: sidecars.map((sidecar) => ({
+      sidecarIndex: sidecar.sidecarIndex,
+      nameHex: Buffer.from(sidecar.name, "utf8").toString("hex"),
+      size: sidecar.size,
+    })),
   };
-  return { publicCatalog, archives };
+  return { publicCatalog, archives, sidecars };
+}
+
+async function readSidecarCatalog(path, sidecarIndex) {
+  const sidecarStat = await stat(path);
+  return {
+    sidecarIndex,
+    name: path.split(sep).at(-1) ?? "",
+    path,
+    size: sidecarStat.size,
+  };
 }
 
 async function readArchiveCatalog(path, archiveIndex) {
@@ -214,6 +243,32 @@ async function sendPayload(url, response) {
     return;
   }
   createReadStream(archive.path, { start, end: endInclusive }).pipe(response);
+}
+
+async function sendSidecar(url, response) {
+  const sidecarIndex = parseBoundedInt(url.searchParams.get("sidecar"), "sidecar");
+  const offset = parseBoundedInt(url.searchParams.get("offset") ?? "0", "offset");
+  const length = parseBoundedInt(url.searchParams.get("length") ?? "", "length");
+  await installCatalog();
+  const sidecar = state.install?.sidecars[sidecarIndex];
+  if (!sidecar) {
+    sendJson(response, 404, { error: "asset_not_found" });
+    return;
+  }
+  if (offset > sidecar.size || length > maxPayloadBytes || offset + length > sidecar.size) {
+    sendJson(response, 416, { error: "invalid_asset_range" });
+    return;
+  }
+  response.writeHead(200, {
+    "Content-Type": "application/octet-stream",
+    "Content-Length": String(length),
+    "Cache-Control": "no-store",
+  });
+  if (length === 0) {
+    response.end();
+    return;
+  }
+  createReadStream(sidecar.path, { start: offset, end: offset + length - 1 }).pipe(response);
 }
 
 async function sendStatic(pathname, response) {

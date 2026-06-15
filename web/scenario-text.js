@@ -5,8 +5,9 @@
 //   ruby, r, /r, cr, c, /c, l, /l, t  (plus b/i style tags).
 // The shipped scenario text uses ruby as `<r READING>BASE</r>`, e.g.
 // `<r うすくれない>薄紅</r>` renders the small kana READING above BASE.
-// Other tags (`<i>`, `<l>`, `<b>`, `<c …>`) wrap content we keep but do not
-// style yet. `<t>` and `<cr>` are spacing/forced-break controls.
+// `<b>` / `<i>` toggle bold/italic spans, while `<c>` / `</c>` marks text that
+// uses the active 0x014f word color. `<l>` is preserved as unstyled text.
+// `<t>` and `<cr>` are spacing/forced-break controls.
 
 const RUBY_SCALE = 0.5;
 const RUBY_GAP = 2;
@@ -18,9 +19,17 @@ const RUBY_GAP = 2;
 export function parseScenarioText(raw) {
   const segments = [];
   let plain = "";
+  let wordColorDepth = 0;
+  let boldDepth = 0;
+  let italicDepth = 0;
+  const styleFlags = () => ({
+    ...(wordColorDepth > 0 ? { wordColor: true } : {}),
+    ...(boldDepth > 0 ? { bold: true } : {}),
+    ...(italicDepth > 0 ? { italic: true } : {}),
+  });
   const flushPlain = () => {
     if (plain.length > 0) {
-      segments.push({ type: "text", text: plain });
+      segments.push({ type: "text", text: plain, ...styleFlags() });
       plain = "";
     }
   };
@@ -52,8 +61,44 @@ export function parseScenarioText(raw) {
       }
       const base = raw.slice(close + 1, end);
       flushPlain();
-      segments.push({ type: "ruby", base, reading });
+      segments.push({ type: "ruby", base, reading, ...styleFlags() });
       i = end + 4;
+      continue;
+    }
+    if (name === "c") {
+      flushPlain();
+      wordColorDepth += 1;
+      i = close + 1;
+      continue;
+    }
+    if (name === "/c") {
+      flushPlain();
+      wordColorDepth = Math.max(0, wordColorDepth - 1);
+      i = close + 1;
+      continue;
+    }
+    if (name === "b") {
+      flushPlain();
+      boldDepth += 1;
+      i = close + 1;
+      continue;
+    }
+    if (name === "/b") {
+      flushPlain();
+      boldDepth = Math.max(0, boldDepth - 1);
+      i = close + 1;
+      continue;
+    }
+    if (name === "i") {
+      flushPlain();
+      italicDepth += 1;
+      i = close + 1;
+      continue;
+    }
+    if (name === "/i") {
+      flushPlain();
+      italicDepth = Math.max(0, italicDepth - 1);
+      i = close + 1;
       continue;
     }
     if (name === "cr" || name === "t") {
@@ -62,7 +107,7 @@ export function parseScenarioText(raw) {
       i = close + 1;
       continue;
     }
-    // Any other tag (ruby alias, c/l/b/i and their closers): drop the marker,
+    // Any other tag (ruby alias, l and its closer): drop the marker,
     // keep surrounding text. Closing tags like `/c` have name starting with "/".
     i = close + 1;
   }
@@ -72,12 +117,14 @@ export function parseScenarioText(raw) {
 
 // Measure the advance width of one segment at the context's current font.
 function segmentWidth(context, seg) {
-  if (seg.type === "ruby") {
-    const baseW = context.measureText(seg.base).width;
-    const readW = rubyReadingWidth(context, seg.reading);
-    return Math.max(baseW, readW);
-  }
-  return context.measureText(seg.text).width;
+  return withSegmentFont(context, seg, () => {
+    if (seg.type === "ruby") {
+      const baseW = context.measureText(seg.base).width;
+      const readW = rubyReadingWidth(context, seg.reading);
+      return Math.max(baseW, readW);
+    }
+    return context.measureText(seg.text).width;
+  });
 }
 
 function rubyReadingWidth(context, reading) {
@@ -94,6 +141,27 @@ function scaledFont(font, scale) {
     `${Math.max(1, Math.round(Number(px) * scale))}px`);
 }
 
+function styledFont(font, unit) {
+  let next = font;
+  if (unit?.bold && !/(^|\s)bold(\s|$)/i.test(next)) {
+    next = `bold ${next}`;
+  }
+  if (unit?.italic && !/(^|\s)italic(\s|$)/i.test(next)) {
+    next = `italic ${next}`;
+  }
+  return next;
+}
+
+function withSegmentFont(context, unit, callback) {
+  const previousFont = context.font;
+  context.font = styledFont(previousFont, unit);
+  try {
+    return callback();
+  } finally {
+    context.font = previousFont;
+  }
+}
+
 // Expand a raw string into atomic layout units: single chars for plain text,
 // whole ruby units (which must not be split across lines).
 function layoutUnits(raw) {
@@ -103,7 +171,13 @@ function layoutUnits(raw) {
       units.push(seg);
     } else {
       for (const chunk of seg.text) {
-        units.push({ type: "char", text: chunk });
+        units.push({
+          type: "char",
+          text: chunk,
+          ...(seg.wordColor ? { wordColor: true } : {}),
+          ...(seg.bold ? { bold: true } : {}),
+          ...(seg.italic ? { italic: true } : {}),
+        });
       }
     }
   }
@@ -142,9 +216,13 @@ export function drawScenarioRichText(
   lineHeight,
   maxLines,
   maxChars = Infinity,
+  options = {},
 ) {
   const units = layoutUnits(raw);
   const baseFont = context.font;
+  const wordColor = typeof options.wordColor === "string" && options.wordColor.length > 0
+    ? options.wordColor
+    : null;
 
   // Wrap into lines first (using full unit widths) so the reveal does not reflow.
   const wrapped = [];
@@ -179,6 +257,13 @@ export function drawScenarioRichText(
     let penX = x;
     for (const u of wrapped[li]) {
       const cost = unitCharCount(u);
+      const previousFillStyle = context.fillStyle;
+      const previousFont = context.font;
+      context.font = styledFont(baseFont, u);
+      const unitWordColor = u.wordColor && wordColor ? wordColor : null;
+      if (unitWordColor !== null) {
+        context.fillStyle = unitWordColor;
+      }
       if (u.type === "ruby") {
         const baseW = context.measureText(u.base).width;
         const readW = rubyReadingWidth(context, u.reading);
@@ -189,14 +274,15 @@ export function drawScenarioRichText(
           const visBase = baseChars.slice(0, visN).join("");
           context.fillText(visBase, penX + (cell - baseW) / 2, lineY);
           if (u.reading && visN >= baseChars.length) {
-            context.font = scaledFont(baseFont, RUBY_SCALE);
-            const rsize = rubyFontPx(baseFont);
+            const unitFont = context.font;
+            context.font = scaledFont(unitFont, RUBY_SCALE);
+            const rsize = rubyFontPx(unitFont);
             context.fillText(
               u.reading,
               penX + (cell - readW) / 2,
               lineY - rsize - RUBY_GAP,
             );
-            context.font = baseFont;
+            context.font = unitFont;
           }
         }
         penX += cell;
@@ -204,9 +290,14 @@ export function drawScenarioRichText(
         context.fillText(u.text, penX, lineY);
         penX += context.measureText(u.text).width;
       }
+      if (unitWordColor !== null) {
+        context.fillStyle = previousFillStyle;
+      }
+      context.font = previousFont;
       revealed += cost;
       if (revealed >= maxChars && Number.isFinite(maxChars)) {
         context.font = baseFont;
+        context.fillStyle = previousFillStyle;
         // Continue laying out remaining lines? No — once budget is spent, stop.
         return;
       }

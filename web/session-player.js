@@ -28,11 +28,13 @@ import {
   fadeScenarioSceneObject,
   hasActiveScenarioSceneObjectVisuals,
   moveScenarioSceneObject,
+  removeScenarioSceneObject,
   restoreScenarioSceneObjectMotion,
   restoreScenarioSceneObjectTransition,
   setScenarioSceneObject,
   startScenarioSceneObjectDirectionalMotion,
   stopScenarioSceneObjectMotion,
+  stopScenarioSceneObjectTransitions,
   snapshotScenarioSceneObjects,
 } from "./scenario-scene-objects.js";
 import {
@@ -87,13 +89,17 @@ import {
   hasActiveScenarioMovies,
   scenarioMovieElapsedMs,
   setScenarioMovieObject,
+  waitForScenarioMovieObjectEnd,
 } from "./scenario-movies.js";
 import { readFirstArc20EntryPayloadByExtension } from "./local-catalog.js";
 import {
+  isValidScenarioName,
   normalizeScenarioRoute,
+  scenarioNameBytes,
   scenarioPlaybackPlan,
   scenarioSequenceForRoute,
 } from "./scenario-routes.js";
+import { recordTitleRouteClear } from "./title-menu.js";
 import {
   applyScenarioBacklogControl,
   closeScenarioBacklog,
@@ -153,6 +159,27 @@ const EVENT_GRAPH = 5;
 const EVENT_WAIT = 6;
 const EVENT_SOUND = 7;
 const EVENT_MESSAGE_CONTROL = 8;
+const EVENT_MESSAGE_STYLE = 9;
+
+// scrmsg._bp message plumbing/style opcodes carried by EVENT_MESSAGE_STYLE.
+// Style commands update state applied to the next 0x0140 message; plumbing
+// commands are surfaced for observability and intentionally leave style intact.
+// See docs/scenario-engine.md.
+const MESSAGE_PLUMBING_WAIT = 0x0141;
+const MESSAGE_PLUMBING_WINDOW = 0x0142;
+const MESSAGE_PLUMBING_PROCESS_MODE = 0x0144; // (mode)
+const MESSAGE_PLUMBING_WINDOW_MODE = 0x0146; // (mode, submode)
+const MESSAGE_PLUMBING_RESERVED = 0x0148;
+const MESSAGE_STYLE_FONT = 0x014c; // (font_number, font_size, font_weight)
+const MESSAGE_STYLE_FONT_EXT = 0x014d; // (font_number, height, width, weight)
+const MESSAGE_STYLE_POSITION = 0x0147; // (x, y, flag)
+const MESSAGE_STYLE_SPEED_POS = 0x0145; // text speed + output X/Y origin
+const MESSAGE_STYLE_MONOLOGUE_COLOR = 0x014e; // (r, g, b)
+const MESSAGE_STYLE_WORD_COLOR = 0x014f; // (r, g, b)
+const DEFAULT_MESSAGE_FONT_PX = 29;
+const DEFAULT_MESSAGE_TEXT_X = 75;
+const DEFAULT_MESSAGE_TEXT_Y = 34;
+const DEFAULT_MESSAGE_TEXT_RIGHT_MARGIN = 60;
 const MESSAGE_WINDOW_SHOW = 0x0150;
 const MESSAGE_WINDOW_SHOW_TIMED = 0x0152;
 const MESSAGE_CONTROL_AUTO = 0;
@@ -190,6 +217,7 @@ const SOUND_LOOPING_SE_PLAY = 0x0190;
 const SOUND_LOOPING_SE_STOP = 0x0194;
 const SOUND_LOOPING_SE_FADE_OUT = 0x0195;
 const SOUND_LOOPING_SE_CHANGE_VOLUME = 0x0196;
+const SOUND_SE_PLAY_EX = 0x01a0;
 const SOUND_SE_PLAY = 0x01a1;
 const SOUND_SE_STOP = 0x01a2;
 const SOUND_SE_FADE_OUT = 0x01a3;
@@ -198,6 +226,8 @@ const SOUND_VOICE_PLAY_EX = 0x01a8;
 const SOUND_VOICE_PLAY = 0x01a9;
 const SOUND_VOICE_STOP = 0x01aa;
 const SOUND_VOICE_WAIT = 0x01ac;
+const SOUND_OPENING_MOVIE_PLAY = 0x01bf;
+const OPENING_MOVIE_OBJECT_ID = 0;
 const GRAPH_SHAKE_START = 0x0232;
 const GRAPH_SHAKE_UPDATE = 0x0233;
 const GRAPH_SPRITE_SHAKE_START = 0x0236;
@@ -223,6 +253,8 @@ const GRAPH_ANIMATE_SCENE_OBJECT = 0x0302;
 const GRAPH_FADE_SCENE_OBJECT = 0x0306;
 const GRAPH_MOVE_SCENE_OBJECT = 0x0308;
 const GRAPH_CONTROL_SPRITE = 0x030e;
+const GRAPH_REMOVE_SCENE_OBJECT_IMMEDIATE = 0x031e;
+const GRAPH_STOP_SCENE_OBJECT_TRANSITIONS = 0x031f;
 const GRAPH_APERTURE_START = 0x0340;
 const GRAPH_APERTURE_CLEAR = 0x0348;
 const GRAPH_APERTURE_CONFIGURE = 0x0350;
@@ -447,8 +479,9 @@ export function bindScenarioPlayerInput(canvas, getMounted, onUpdate) {
       onUpdate();
       return;
     }
-    // A manual click cancels Auto/Skip (standard VN behavior) and acts normally.
+    // A manual click cancels Auto/Skip without also advancing the message.
     if (player.autoMode || player.skipMode) {
+      stopVoicesForManualAdvance(player);
       player.cancelAutoSkip();
       player.safeState.inputResult = 4;
       onUpdate();
@@ -460,15 +493,18 @@ export function bindScenarioPlayerInput(canvas, getMounted, onUpdate) {
       && isScenarioMessageRevealing(player.messageVisual)
     ) {
       // First click while typing only completes the reveal; it does not advance.
+      stopVoicesForManualAdvance(player);
       completeScenarioMessageReveal(player.messageVisual);
       inputResult = 5;
     } else if (isAutomaticEvent(player.event)) {
+      stopVoicesForManualAdvance(player);
       inputResult = player.skipAutomatic() ? 3 : 0;
     } else if (
       player.event.kind === EVENT_MESSAGE
       && player.advanceMessage() === 1
       && player.step()
     ) {
+      stopVoicesForManualAdvance(player);
       inputResult = 1;
     } else if (
       player.event.kind === EVENT_CHOICE &&
@@ -476,6 +512,7 @@ export function bindScenarioPlayerInput(canvas, getMounted, onUpdate) {
       player.selectChoice(choiceIndexFromEvent(event, canvas, player.event.options.length)) === 1 &&
       player.step()
     ) {
+      stopVoicesForManualAdvance(player);
       inputResult = 2;
     }
     player.safeState.inputResult = inputResult;
@@ -564,8 +601,39 @@ export function bindScenarioPlayerInput(canvas, getMounted, onUpdate) {
   canvas.addEventListener("contextmenu", (event) => {
     event.preventDefault();
   });
+  keyboard.addEventListener("keydown", (event) => {
+    const player = getMounted()?.player;
+    if (
+      event.key !== "Control"
+      || event.repeat
+      || !player
+      || player.configState.open
+      || player.userDataState.open
+      || player.backlogState.open
+    ) {
+      return;
+    }
+    player.autoAdvanceUpdate = onUpdate;
+    player.setSkipMode(true);
+    player.safeState.inputResult = 4;
+    onUpdate();
+    event.preventDefault();
+  });
   keyboard.addEventListener("keyup", (event) => {
     const player = getMounted()?.player;
+    if (event.key === "Control") {
+      if (player?.skipMode) {
+        player.autoAdvanceUpdate = onUpdate;
+        player.setSkipMode(false);
+        player.safeState.inputResult = 4;
+        onUpdate();
+      }
+      event.preventDefault();
+      return;
+    }
+    if (!player) {
+      return;
+    }
     if (player?.configState.open) {
       if (event.key === "Escape" || event.key === "Backspace") {
         player.closeConfigWindow();
@@ -591,13 +659,6 @@ export function bindScenarioPlayerInput(canvas, getMounted, onUpdate) {
       else if (event.key === "End") player.setBacklogPosition(player.backlog.length);
       else player.closeBacklog();
       player.safeState.inputResult = 4;
-      onUpdate();
-      return;
-    }
-    if (event.key === "Control") {
-      // Ctrl toggles Skip mode (held-to-skip feel via the rAF driver).
-      player.autoAdvanceUpdate = onUpdate;
-      player.toggleSkipMode();
       onUpdate();
       return;
     }
@@ -837,10 +898,21 @@ function paintMessageWindow(
 ) {
   const panelX = Math.round((canvas.width - skin.panel.width) / 2);
   const panelY = canvas.height - skin.panel.height;
-  context.save();
-  context.globalAlpha = Math.max(0.25, Math.min(Number(messageWindowOpacity) || 0.6, 1));
-  drawRgbaImage(context, skin.panel, panelX, panelY);
-  context.restore();
+  const style = event.style ?? null;
+  const fontPx = style?.fontSize ?? DEFAULT_MESSAGE_FONT_PX;
+  const fontWeight = style?.fontWeight === 1 ? "bold " : "";
+  const bodyFont = `${fontWeight}${fontPx}px 'Noto Serif CJK JP', 'Yu Mincho', 'MS Mincho', serif`;
+  // Line pitch tracks font size so larger emphasis lines do not overlap; the
+  // shipped default (29px) keeps the original 38px pitch.
+  const linePitch = Math.round(fontPx * (38 / DEFAULT_MESSAGE_FONT_PX));
+  const textLayout = resolveScenarioMessageTextLayout(canvas, skin, style, linePitch);
+
+  if (textLayout.drawPanel) {
+    context.save();
+    context.globalAlpha = Math.max(0.25, Math.min(Number(messageWindowOpacity) || 0.6, 1));
+    drawRgbaImage(context, skin.panel, panelX, panelY);
+    context.restore();
+  }
 
   const controlScale = 1.04;
   const controlsWidth = skin.controls.reduce(
@@ -849,42 +921,45 @@ function paintMessageWindow(
   );
   let controlX = panelX + skin.panel.width - controlsWidth - 30;
   const controlY = panelY - 23;
-  skin.controls.forEach((control, index) => {
-    const controlWidth = control.stateWidth * controlScale;
-    context.drawImage(
-      rgbaCanvas(control.image),
-      index === hoverControl ? control.stateWidth : 0,
-      0,
-      control.stateWidth,
-      control.stateHeight,
-      controlX,
-      controlY,
-      controlWidth,
-      control.stateHeight,
-    );
-    controlX += controlWidth;
-  });
+  if (textLayout.drawPanel) {
+    skin.controls.forEach((control, index) => {
+      const controlWidth = control.stateWidth * controlScale;
+      context.drawImage(
+        rgbaCanvas(control.image),
+        index === hoverControl ? control.stateWidth : 0,
+        0,
+        control.stateWidth,
+        control.stateHeight,
+        controlX,
+        controlY,
+        controlWidth,
+        control.stateHeight,
+      );
+      controlX += controlWidth;
+    });
+  }
 
   context.save();
-  context.fillStyle = "#0a0a08";
-  context.font = "29px 'Noto Serif CJK JP', 'Yu Mincho', 'MS Mincho', serif";
+  context.fillStyle = style?.monologueColor ?? "#0a0a08";
+  context.font = bodyFont;
   context.textBaseline = "top";
   if (event.kind === EVENT_MESSAGE) {
-    if (event.name && skin.nameplate) {
+    if (textLayout.drawPanel && event.name && skin.nameplate) {
       drawRgbaImage(context, skin.nameplate, panelX + 38, panelY - 30);
       context.font = "21px 'Noto Serif CJK JP', 'Yu Mincho', 'MS Mincho', serif";
       context.fillText(stripScenarioTags(event.name), panelX + 64, panelY - 16);
-      context.font = "29px 'Noto Serif CJK JP', 'Yu Mincho', 'MS Mincho', serif";
+      context.font = bodyFont;
     }
     drawScenarioRichText(
       context,
       visibleMessageText(event.text),
-      panelX + 75,
-      panelY + 34,
-      skin.panel.width - 135,
-      38,
-      3,
+      textLayout.x,
+      textLayout.y,
+      textLayout.maxWidth,
+      linePitch,
+      textLayout.maxLines,
       maxChars,
+      { wordColor: style?.wordColor ?? null },
     );
   } else if (event.kind === EVENT_CHOICE) {
     event.options.slice(0, 3).forEach((option, index) => {
@@ -894,23 +969,191 @@ function paintMessageWindow(
   context.restore();
 }
 
+function hasExplicitMessageTextPosition(style) {
+  return Number.isFinite(style?.textX) && Number.isFinite(style?.textY);
+}
+
+export function resolveScenarioMessageTextLayout(canvas, skin, style = null, linePitch = 38) {
+  const explicit = hasExplicitMessageTextPosition(style);
+  if (explicit) {
+    const x = Math.round(style.textX);
+    const y = Math.round(style.textY);
+    const maxWidth = Math.max(1, Math.round(canvas.width - x - DEFAULT_MESSAGE_TEXT_RIGHT_MARGIN));
+    const visibleHeight = Math.max(1, Math.round(canvas.height - y));
+    return {
+      x,
+      y,
+      maxWidth,
+      maxLines: Math.max(1, Math.floor(visibleHeight / Math.max(1, linePitch))),
+      drawPanel: false,
+    };
+  }
+  const panelX = Math.round((canvas.width - skin.panel.width) / 2);
+  const panelY = canvas.height - skin.panel.height;
+  return {
+    x: panelX + DEFAULT_MESSAGE_TEXT_X,
+    y: panelY + DEFAULT_MESSAGE_TEXT_Y,
+    maxWidth: skin.panel.width - DEFAULT_MESSAGE_TEXT_X - DEFAULT_MESSAGE_TEXT_RIGHT_MARGIN,
+    maxLines: 3,
+    drawPanel: true,
+  };
+}
+
 function visibleMessageText(text) {
   return text.startsWith("\u3000") ? text.slice(1) : text;
 }
 
-// Default reveal speed for a new player. Disabled (instant) under automation
-// (Playwright sets navigator.webdriver) and when no DOM is present, so
-// deterministic capture and unit tests keep their existing advance semantics.
-function messageRevealMsPerCharDefault() {
+// Per-message text-style state driven by the scrmsg._bp 0x0144-0x014f opcodes.
+// `null` fields mean "use the message-window default"; a scenario sets them via
+// EVENT_MESSAGE_STYLE and the next message inherits them. Reset state mirrors
+// the engine: there is no implicit decay, the script restores defaults itself.
+export function createScenarioMessageStyleState() {
+  return {
+    fontSize: null,
+    fontWeight: null,
+    fontHeight: null,
+    fontWidth: null,
+    textX: null,
+    textY: null,
+    textPositionFlag: null,
+    textSpeed: null,
+    textUnit: null,
+    messageProcessMode: null,
+    messageWindowMode: null,
+    messageWindowSubMode: null,
+    monologueColor: null,
+    wordColor: null,
+  };
+}
+
+function snapshotScenarioMessageStyle(state) {
+  return {
+    fontSize: state.fontSize,
+    fontWeight: state.fontWeight,
+    fontHeight: state.fontHeight,
+    fontWidth: state.fontWidth,
+    textX: state.textX,
+    textY: state.textY,
+    textPositionFlag: state.textPositionFlag,
+    textSpeed: state.textSpeed,
+    textUnit: state.textUnit,
+    messageProcessMode: state.messageProcessMode,
+    messageWindowMode: state.messageWindowMode,
+    messageWindowSubMode: state.messageWindowSubMode,
+    monologueColor: state.monologueColor,
+    wordColor: state.wordColor,
+  };
+}
+
+function boundedStyleInt(value, min, max) {
+  if (!Number.isInteger(value) || value < min || value > max) {
+    return null;
+  }
+  return value;
+}
+
+function styleColor(args) {
+  const r = boundedStyleInt(args[0], 0, 255);
+  const g = boundedStyleInt(args[1], 0, 255);
+  const b = boundedStyleInt(args[2], 0, 255);
+  if (r === null || g === null || b === null) {
+    return null;
+  }
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+// Pure reducer: applies one scrmsg style opcode to a style state in place.
+// Exported for unit testing; mirrors the decoded 0x0144-0x014f semantics.
+export function applyScenarioMessageStylePatch(style, opcode, intArgs = []) {
+  const args = intArgs ?? [];
+  switch (opcode) {
+    case MESSAGE_PLUMBING_WAIT:
+    case MESSAGE_PLUMBING_WINDOW:
+    case MESSAGE_PLUMBING_RESERVED:
+      break;
+    case MESSAGE_PLUMBING_PROCESS_MODE:
+      style.messageProcessMode = boundedStyleInt(args[0], 0, 16);
+      break;
+    case MESSAGE_PLUMBING_WINDOW_MODE:
+      style.messageWindowMode = boundedStyleInt(args[0], 0, 16);
+      style.messageWindowSubMode = boundedStyleInt(args[1], 0, 16);
+      break;
+    case MESSAGE_STYLE_FONT:
+      // (font_number, font_size, font_weight)
+      style.fontSize = boundedStyleInt(args[1], 1, 200);
+      style.fontWeight = boundedStyleInt(args[2], 0, 1);
+      break;
+    case MESSAGE_STYLE_FONT_EXT:
+      // (font_number, height, width, weight)
+      style.fontHeight = boundedStyleInt(args[1], 1, 200);
+      style.fontWidth = boundedStyleInt(args[2], 1, 200);
+      style.fontWeight = boundedStyleInt(args[3], 0, 1);
+      break;
+    case MESSAGE_STYLE_POSITION:
+      // (x, y, flag)
+      style.textX = boundedStyleInt(args[0], 0, 4096);
+      style.textY = boundedStyleInt(args[1], 0, 4096);
+      style.textPositionFlag = boundedStyleInt(args[2], 0, 16);
+      break;
+    case MESSAGE_STYLE_SPEED_POS:
+      // (text_speed, unit). scrmsg._bp reads the corresponding text-origin
+      // environment values in this handler; explicit 0x0147 coordinates still
+      // provide the actual render origin when the scenario overrides it.
+      style.textSpeed = boundedStyleInt(args[0], 0, 1000);
+      style.textUnit = boundedStyleInt(args[1], 0, 16);
+      break;
+    case MESSAGE_STYLE_MONOLOGUE_COLOR:
+      style.monologueColor = styleColor(args);
+      break;
+    case MESSAGE_STYLE_WORD_COLOR:
+      style.wordColor = styleColor(args);
+      break;
+    default:
+      break;
+  }
+  return style;
+}
+
+function applyMessageStyleEvent(player, event) {
+  const style = applyScenarioMessageStylePatch(
+    player.messageStyle,
+    event.opcode,
+    event.intArgs,
+  );
+  player.safeState.messageStyleOpcode = event.opcode;
+  player.safeState.messageStyleFontSize = style.fontSize ?? 0;
+  player.safeState.messageStyleTextX = style.textX ?? -1;
+  player.safeState.messageStyleTextY = style.textY ?? -1;
+  player.safeState.messageStyleTextSpeed = style.textSpeed ?? -1;
+  player.safeState.messageStyleTextUnit = style.textUnit ?? -1;
+  player.safeState.messageStyleProcessMode = style.messageProcessMode ?? -1;
+  player.safeState.messageStyleWindowMode = style.messageWindowMode ?? -1;
+  player.safeState.messageStyleWindowSubMode = style.messageWindowSubMode ?? -1;
+  player.safeState.messageStyleCount =
+    (player.safeState.messageStyleCount ?? 0) + 1;
+  return 0;
+}
+
+// Deterministic automation captures need fully revealed text immediately.
+// Playwright sets navigator.webdriver; non-DOM tests also use instant reveal.
+function shouldUseInstantMessageReveal() {
   const nav = globalThis.navigator;
   if (!nav || nav.webdriver === true) {
-    return 0;
+    return true;
   }
-  return DEFAULT_REVEAL_MS_PER_CHAR;
+  return false;
+}
+
+function messageRevealMsPerCharDefault() {
+  return shouldUseInstantMessageReveal() ? 0 : DEFAULT_REVEAL_MS_PER_CHAR;
 }
 
 function revealMsPerCharForConfig(settings) {
   return Math.round((1 - clampConfigRatio(settings.textSpeed)) * 60);
+}
+
+function effectiveRevealMsPerCharForConfig(settings) {
+  return shouldUseInstantMessageReveal() ? 0 : revealMsPerCharForConfig(settings);
 }
 
 function autoDelayMsForConfig(settings) {
@@ -961,13 +1204,16 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
     userDataState: createScenarioUserDataState(),
     configState: createScenarioConfigState(),
     messageVisual: createScenarioMessageVisualState(),
+    messageStyle: createScenarioMessageStyleState(),
     messageWindowHidden: false,
     messageControlHover: -1,
+    pendingDialogAction: null,
     pendingBacklogVoice: null,
     automaticRunning: false,
     automaticSkip: false,
     automaticSkippable: true,
     automaticWake: null,
+    automaticStopRequested: false,
     automaticFrame: 0,
     visualFrame: 0,
     automaticUpdate: null,
@@ -999,6 +1245,9 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         return false;
       }
       this.event = decodeSessionEvent(packet, core.scenarioSessionCurrentPayload(this.handle));
+      if (this.event.kind === EVENT_MESSAGE) {
+        this.event.style = snapshotScenarioMessageStyle(this.messageStyle);
+      }
       this.autoAdvanceAt = 0;
       if (isStableSaveEvent(this.event)) {
         showScenarioMessageVisual(this.messageVisual, this.event, this.messageRevealOptions());
@@ -1055,6 +1304,10 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         sceneObjectCount: previous.sceneObjectCount ?? 0,
         sceneObjectAssetReady: previous.sceneObjectAssetReady ?? 0,
         sceneObjectEventCount: previous.sceneObjectEventCount ?? 0,
+        sceneObjectControlOpcode: previous.sceneObjectControlOpcode ?? 0,
+        sceneObjectControlCount: previous.sceneObjectControlCount ?? 0,
+        sceneObjectControlId: previous.sceneObjectControlId ?? -1,
+        sceneObjectControlAffected: previous.sceneObjectControlAffected ?? 0,
         sceneMovieCount: previous.sceneMovieCount ?? 0,
         sceneMovieArchiveNameLength: previous.sceneMovieArchiveNameLength ?? 0,
         sceneMovieFrameRate: previous.sceneMovieFrameRate ?? 0,
@@ -1076,6 +1329,16 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         messageControlDurationMs: previous.messageControlDurationMs ?? 0,
         messageControlVisible: previous.messageControlVisible ?? 0,
         messageControlCount: previous.messageControlCount ?? 0,
+        messageStyleOpcode: previous.messageStyleOpcode ?? 0,
+        messageStyleFontSize: previous.messageStyleFontSize ?? 0,
+        messageStyleTextX: previous.messageStyleTextX ?? -1,
+        messageStyleTextY: previous.messageStyleTextY ?? -1,
+        messageStyleTextSpeed: previous.messageStyleTextSpeed ?? -1,
+        messageStyleTextUnit: previous.messageStyleTextUnit ?? -1,
+        messageStyleProcessMode: previous.messageStyleProcessMode ?? -1,
+        messageStyleWindowMode: previous.messageStyleWindowMode ?? -1,
+        messageStyleWindowSubMode: previous.messageStyleWindowSubMode ?? -1,
+        messageStyleCount: previous.messageStyleCount ?? 0,
         messageWindowHidden: previous.messageWindowHidden ?? 0,
         messageControlClickIndex: previous.messageControlClickIndex ?? -1,
         messageControlClickName: previous.messageControlClickName ?? "",
@@ -1087,6 +1350,9 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         userDataSelectedSlot: previous.userDataSelectedSlot ?? 0,
         userDataLastResult: previous.userDataLastResult ?? "",
         userDataLastOk: previous.userDataLastOk ?? 0,
+        userDataPendingDialogKind: previous.userDataPendingDialogKind ?? "",
+        userDataPendingDialogSource: previous.userDataPendingDialogSource ?? "",
+        userDataPendingDialogSlot: previous.userDataPendingDialogSlot ?? -1,
         configOpen: previous.configOpen ?? 0,
         configHover: previous.configHover ?? "",
         configLastAction: previous.configLastAction ?? "",
@@ -1108,9 +1374,12 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         voiceControlOpcode: previous.voiceControlOpcode ?? 0,
         voiceControlCount: previous.voiceControlCount ?? 0,
         voiceWaitInterruptible: previous.voiceWaitInterruptible ?? 0,
+        voiceStoppedOnClick: previous.voiceStoppedOnClick ?? 0,
         sfxAssetReady: previous.sfxAssetReady ?? 0,
         sfxPlayResult: previous.sfxPlayResult ?? 0,
         sfxNameLength: previous.sfxNameLength ?? 0,
+        sfxPlayOpcode: previous.sfxPlayOpcode ?? 0,
+        sfxPan: previous.sfxPan ?? 64,
         sfxControlOpcode: previous.sfxControlOpcode ?? 0,
         sfxChannel: previous.sfxChannel ?? 0,
         sfxFadeMs: previous.sfxFadeMs ?? 0,
@@ -1133,6 +1402,9 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         scanSkippedLarge: previous.scanSkippedLarge,
       };
       if (this.event.kind === EVENT_HALTED) {
+        if (this.scenarioIndex + 1 >= this.scenarioSequence.length) {
+          recordTitleRouteClear(this.routeId, this.scenarioSequence.at(-1));
+        }
         this.queueNextScenario();
       }
       return true;
@@ -1142,6 +1414,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
       this.safeState.backlogFirstIndex = this.backlogState.firstIndex;
     },
     openBacklog() {
+      this.cancelAutoSkip();
       openScenarioBacklog(this.backlogState, this.backlog.length);
       this.messageControlHover = -1;
       this.syncBacklogState();
@@ -1208,7 +1481,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
     },
     applyConfigSettings() {
       const settings = this.configState.settings;
-      this.revealMsPerChar = revealMsPerCharForConfig(settings);
+      this.revealMsPerChar = effectiveRevealMsPerCharForConfig(settings);
       this.autoAdvanceDelayMs = autoDelayMsForConfig(settings);
       this.messageWindowOpacity = messageWindowOpacityForConfig(settings);
       this.audioMixer?.setVolumes?.({
@@ -1234,28 +1507,82 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
     applyUserDataControl(control, onUpdate = null) {
       const result = applyScenarioUserDataControl(this.userDataState, control, {
         save: (slot) => {
-          const save = this.saveToStorage(slot);
-          return { handled: true, reason: save.reason, ok: save.ok };
+          const kind = this.saveSlotSummary(slot).exists ? "overwrite" : "save";
+          return this.requestDialogAction("userDataSave", slot, kind, "scenarioUserDataSave");
         },
         load: (slot) => {
-          void this.loadFromStorage(slot).then((load) => {
-            this.safeState.userDataLastResult = load.reason;
-            this.safeState.userDataLastOk = Number(load.ok);
-            if (load.ok) {
-              this.closeUserDataWindow();
-            }
-            onUpdate?.();
-          });
-          return { handled: true, reason: "loading", ok: true };
+          if (!this.saveSlotSummary(slot).exists) {
+            return { handled: true, reason: "missing_snapshot", ok: false };
+          }
+          return this.requestDialogAction("userDataLoad", slot, "load", "scenarioUserDataLoad");
         },
       });
+      this.syncUserDataState();
+      this.safeState.userDataLastResult = result.reason ?? "";
+      this.safeState.userDataLastOk = Number(result.ok ?? result.handled ?? false);
+      return result;
+    },
+    requestDialogAction(action, slot, kind, source) {
+      this.pendingDialogAction = {
+        action,
+        slot: normalizeSaveSlot(slot),
+        kind,
+        source,
+        opened: false,
+      };
+      this.syncUserDataState();
+      return { handled: true, reason: `${kind}_confirm`, ok: true };
+    },
+    syncUserDataState() {
       this.safeState.userDataOpen = Number(this.userDataState.open);
       this.safeState.userDataMode = this.userDataState.open ? this.userDataState.mode : "";
       this.safeState.userDataPage = this.userDataState.page;
       this.safeState.userDataSelectedSlot = this.userDataState.selectedSlot;
-      this.safeState.userDataLastResult = result.reason ?? "";
-      this.safeState.userDataLastOk = Number(result.ok ?? result.handled ?? false);
-      return result;
+      this.safeState.userDataPendingDialogKind = this.pendingDialogAction?.kind ?? "";
+      this.safeState.userDataPendingDialogSource = this.pendingDialogAction?.source ?? "";
+      this.safeState.userDataPendingDialogSlot = this.pendingDialogAction?.slot ?? -1;
+    },
+    cancelPendingDialogAction(reason = "cancelled") {
+      const pending = this.pendingDialogAction;
+      this.pendingDialogAction = null;
+      this.syncUserDataState();
+      this.safeState.userDataLastResult = pending ? `${pending.kind}_${reason}` : reason;
+      this.safeState.userDataLastOk = 0;
+      return { handled: true, ok: false, reason: this.safeState.userDataLastResult };
+    },
+    confirmPendingDialogAction(onUpdate = null) {
+      const pending = this.pendingDialogAction;
+      this.pendingDialogAction = null;
+      this.syncUserDataState();
+      if (!pending) {
+        this.safeState.userDataLastResult = "no_pending_dialog";
+        this.safeState.userDataLastOk = 0;
+        return { handled: false, ok: false, reason: "no_pending_dialog" };
+      }
+      if (pending.action === "userDataSave") {
+        const save = this.saveToStorage(pending.slot);
+        this.safeState.userDataLastResult = save.reason;
+        this.safeState.userDataLastOk = Number(save.ok);
+        this.syncUserDataState();
+        return { handled: true, reason: save.reason, ok: save.ok };
+      }
+      if (pending.action === "userDataLoad") {
+        this.safeState.userDataLastResult = "loading";
+        this.safeState.userDataLastOk = 1;
+        void this.loadFromStorage(pending.slot).then((load) => {
+          this.safeState.userDataLastResult = load.reason;
+          this.safeState.userDataLastOk = Number(load.ok);
+          if (load.ok) {
+            this.closeUserDataWindow();
+          }
+          this.syncUserDataState();
+          onUpdate?.();
+        });
+        return { handled: true, reason: "loading", ok: true };
+      }
+      this.safeState.userDataLastResult = "unsupported_dialog_action";
+      this.safeState.userDataLastOk = 0;
+      return { handled: false, ok: false, reason: "unsupported_dialog_action" };
     },
     userDataSlotSummaries() {
       const start = this.userDataState.page * USER_DATA_SLOTS_PER_PAGE;
@@ -1308,14 +1635,23 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
       if (!this.automaticSkippable) {
         return false;
       }
+      this.automaticStopRequested = false;
       this.automaticSkip = true;
       this.automaticWake?.();
+      if (!this.automaticRunning && isAutomaticEvent(this.event)) {
+        this.startAutomatic(this.automaticUpdate);
+      }
       return true;
     },
     setAutoMode(on) {
       this.autoMode = on === true;
       if (this.autoMode) {
         this.skipMode = false;
+        this.automaticStopRequested = false;
+      } else if (!this.skipMode) {
+        this.automaticStopRequested = true;
+        this.automaticSkip = false;
+        this.automaticWake?.();
       }
       this.autoAdvanceAt = 0;
       if (this.autoMode || this.skipMode) {
@@ -1332,10 +1668,16 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
       this.skipMode = on === true;
       if (this.skipMode) {
         this.autoMode = false;
+        this.automaticStopRequested = false;
         // Cancel any in-progress reveal immediately.
         completeScenarioMessageReveal(this.messageVisual);
         this.skipAutomatic();
+      } else if (!this.autoMode) {
+        this.automaticStopRequested = true;
+        this.automaticSkip = false;
+        this.automaticWake?.();
       }
+      this.autoAdvanceAt = 0;
       if (this.autoMode || this.skipMode) {
         startMessageAutoAdvance(this);
       }
@@ -1350,6 +1692,10 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
       if (this.autoMode || this.skipMode) {
         this.autoMode = false;
         this.skipMode = false;
+        this.automaticStopRequested = true;
+        this.automaticSkip = false;
+        this.autoAdvanceAt = 0;
+        this.automaticWake?.();
         this.safeState.autoMode = 0;
         this.safeState.skipMode = 0;
       }
@@ -1552,6 +1898,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
       this.scenarioLoading = true;
       const nextIndex = this.scenarioIndex + 1;
       const nextName = this.scenarioSequence[nextIndex];
+      let loadedNextScenario = false;
       void createScenarioHandle(catalog, core, nextName).then((nextHandle) => {
         if (this.destroyed || nextHandle === 0) {
           if (nextHandle !== 0) {
@@ -1565,12 +1912,21 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         this.safeState.scenarioName = nextName;
         this.safeState.scenarioIndex = nextIndex;
         this.safeState.scenarioTransitions = (this.safeState.scenarioTransitions ?? 0) + 1;
+        loadedNextScenario = true;
         if (this.step()) {
           notifyAutomaticUpdate(this);
           this.startAutomatic();
         }
       }).finally(() => {
         this.scenarioLoading = false;
+        if (
+          loadedNextScenario
+          && !this.destroyed
+          && this.event?.kind === EVENT_HALTED
+          && this.scenarioIndex + 1 < this.scenarioSequence.length
+        ) {
+          this.queueNextScenario();
+        }
       });
     },
     destroy() {
@@ -1589,7 +1945,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
 }
 
 async function createScenarioHandle(catalog, core, name) {
-  const payload = await catalog.readPayloadByNameBytes(encoder.encode(name));
+  const payload = await catalog.readPayloadByNameBytes(scenarioNameBytes(name));
   if (!payload || core.payloadKind(payload.slice(0, 16)) !== PAYLOAD_KIND_DSC) {
     return 0;
   }
@@ -1639,6 +1995,8 @@ async function runAutomaticEvents(player, catalog, core) {
         player.safeState.messageControlVisible = Number(show);
         player.safeState.messageControlCount =
           (player.safeState.messageControlCount ?? 0) + 1;
+      } else if (event.kind === EVENT_MESSAGE_STYLE) {
+        applyMessageStyleEvent(player, event);
       }
       player.automaticSkippable = skippable;
       notifyAutomaticUpdate(player);
@@ -1656,6 +2014,11 @@ async function runAutomaticEvents(player, catalog, core) {
       finishSceneTransition(player);
       player.automaticSkip = false;
       player.automaticSkippable = true;
+      if (player.automaticStopRequested && !player.autoMode && !player.skipMode) {
+        player.automaticStopRequested = false;
+        notifyAutomaticUpdate(player);
+        return;
+      }
       if (!player.step()) {
         return;
       }
@@ -1781,18 +2144,22 @@ async function applySoundEvent(player, catalog, core, event) {
     recordLoopSfxControl(player, event, durationMs, volume);
     return 0;
   }
-  if (event.opcode === SOUND_SE_PLAY) {
-    const name = event.stringArgs.findLast(validAssetName) ?? "";
-    if (name.length === 0 || player.audioMixer === null) {
+  if (event.opcode === SOUND_SE_PLAY || event.opcode === SOUND_SE_PLAY_EX) {
+    const sfx = scenarioSfxPlaybackPlan(event);
+    if (sfx === null || player.audioMixer === null) {
       return 0;
     }
-    const ogg = await loadScenarioAudio(player, catalog, core, name);
-    const volume = Math.max(0, Math.min(event.intArgs[0] ?? 128, 128)) / 128;
-    const result = await player.audioMixer.playSfx(ogg, { volume, channel: 0 });
+    const ogg = await loadScenarioAudio(player, catalog, core, sfx.name);
+    const result = await player.audioMixer.playSfx(ogg, {
+      volume: sfx.volume,
+      channel: sfx.channel,
+    });
     player.safeState.sfxAssetReady = Number(ogg !== null);
     player.safeState.sfxPlayResult = Number(result.ok);
-    player.safeState.sfxNameLength = name.length;
-    player.safeState.sfxChannel = 0;
+    player.safeState.sfxNameLength = sfx.name.length;
+    player.safeState.sfxChannel = sfx.channel;
+    player.safeState.sfxPlayOpcode = sfx.opcode;
+    player.safeState.sfxPan = sfx.pan;
     return 0;
   }
   if (event.opcode === SOUND_SE_STOP) {
@@ -1821,7 +2188,29 @@ async function applySoundEvent(player, catalog, core, event) {
       afterWait: () => player.audioMixer?.fadeOutSfx?.(channel, 500),
     };
   }
+  if (event.opcode === SOUND_OPENING_MOVIE_PLAY) {
+    return applyOpeningMovieEvent(player, catalog, event);
+  }
   return 0;
+}
+
+export function scenarioSfxPlaybackPlan(event) {
+  if (event?.opcode !== SOUND_SE_PLAY && event?.opcode !== SOUND_SE_PLAY_EX) {
+    return null;
+  }
+  const name = event.stringArgs?.findLast(validAssetName) ?? "";
+  if (name.length === 0) {
+    return null;
+  }
+  const extended = event.opcode === SOUND_SE_PLAY_EX;
+  const volumeArg = extended ? event.intArgs?.[1] : event.intArgs?.[0];
+  return {
+    opcode: event.opcode,
+    name,
+    channel: extended ? soundChannel(event.intArgs?.[2]) : 0,
+    pan: extended ? Math.max(0, Math.min(event.intArgs?.[0] ?? 64, 128)) : 64,
+    volume: Math.max(0, Math.min(volumeArg ?? 128, 128)) / 128,
+  };
 }
 
 function recordVoiceControl(player, event, channel, interruptible) {
@@ -2170,6 +2559,21 @@ async function applyGraphEvent(player, catalog, core, event) {
     recordSceneObjectEvent(player, event, accepted);
     return sceneObjectWaitDuration(event);
   }
+  if (event.opcode === GRAPH_REMOVE_SCENE_OBJECT_IMMEDIATE) {
+    const id = sceneObjectId(event);
+    const removed = removeScenarioSceneObject(player.scene.sprites, id);
+    clearScenarioMovieObject(player.scene.movies, id);
+    recordSceneObjectControlEvent(player, event, id, Number(removed));
+    return 0;
+  }
+  if (event.opcode === GRAPH_STOP_SCENE_OBJECT_TRANSITIONS) {
+    const affected = stopScenarioSceneObjectTransitions(player.scene.sprites);
+    recordSceneObjectControlEvent(player, event, sceneObjectId(event), affected);
+    if (affected > 0) {
+      startVisualAnimation(player);
+    }
+    return 0;
+  }
   if (event.opcode === GRAPH_APERTURE_CONFIGURE) {
     const duration = positiveDuration(event.intArgs[1]);
     const target = configureScenarioAperture(player.scene.aperture, event.intArgs);
@@ -2316,6 +2720,51 @@ async function applyMovieSceneObjectEvent(player, catalog, core, event) {
     : Math.round(player.scene.movies.objects.get(id)?.frameRate ?? 0);
   recordSceneObjectEvent(player, event, image !== null);
   return sceneObjectWaitDuration(event);
+}
+
+async function applyOpeningMovieEvent(player, catalog, event) {
+  const name = event.stringArgs.findLast(validMovieAssetName) ?? "";
+  const payload = name.length > 0
+    ? await catalog.readPayloadByNameBytes(encoder.encode(name))
+    : null;
+  const id = OPENING_MOVIE_OBJECT_ID;
+  clearScenarioMovieObject(player.scene.movies, id);
+  removeScenarioSceneObject(player.scene.sprites, id);
+  const image = payload instanceof Uint8Array
+    ? setScenarioMovieObject(player.scene.movies, id, payload, { loop: false })
+    : null;
+  if (image !== null) {
+    setScenarioSceneObject(player.scene.sprites, id, image, {
+      assetName: name,
+      alpha: 1,
+      priority: 0,
+      blendMode: 0,
+      isMovie: true,
+      x: -image.width / 2,
+      y: -image.height / 2,
+      z: 0,
+    });
+    startVisualAnimation(player);
+  }
+  player.safeState.sceneMovieCount = player.scene.movies.objects.size;
+  player.safeState.sceneMovieArchiveNameLength = name.length;
+  player.safeState.sceneMovieMaskNameLength = 0;
+  player.safeState.sceneMovieMaskReady = 0;
+  player.safeState.sceneMovieFrameRate = image === null
+    ? 0
+    : Math.round(player.scene.movies.objects.get(id)?.frameRate ?? 0);
+  recordSceneObjectEvent(player, event, image !== null);
+  return image === null
+    ? 0
+    : {
+      durationMs: 0,
+      waitUntil: waitForScenarioMovieObjectEnd(player.scene.movies, id),
+      afterWait: () => {
+        clearScenarioMovieObject(player.scene.movies, id);
+        removeScenarioSceneObject(player.scene.sprites, id);
+      },
+      skippable: true,
+    };
 }
 
 async function applySpriteImageEvent(player, catalog, core, event, durationMs) {
@@ -2595,6 +3044,17 @@ function recordSceneObjectEvent(player, event, ready) {
   player.safeState.sceneObjectId = sceneObjectId(event);
   player.safeState.sceneObjectCount = player.scene.sprites.sceneObjects.size;
   player.safeState.sceneObjectAssetReady = Number(ready);
+  player.safeState.sceneObjectEventCount = event.eventCount ?? 0;
+}
+
+function recordSceneObjectControlEvent(player, event, id, affected) {
+  player.safeState.sceneObjectId = id;
+  player.safeState.sceneObjectCount = player.scene.sprites.sceneObjects.size;
+  player.safeState.sceneObjectControlOpcode = event.opcode;
+  player.safeState.sceneObjectControlCount =
+    (player.safeState.sceneObjectControlCount ?? 0) + 1;
+  player.safeState.sceneObjectControlId = id;
+  player.safeState.sceneObjectControlAffected = affected;
   player.safeState.sceneObjectEventCount = event.eventCount ?? 0;
 }
 
@@ -2884,8 +3344,10 @@ function startMessageAutoAdvance(player) {
       return;
     }
     if (player.event.kind === EVENT_CHOICE) {
-      // Never auto-pick a choice; leave the modes on but idle until resolved.
-      player.messageAdvanceFrame = requestAnimationFrame(frame);
+      // Never auto-pick a choice; stop playback and leave the decision to input.
+      player.cancelAutoSkip();
+      player.autoAdvanceUpdate?.();
+      player.messageAdvanceFrame = 0;
       return;
     }
     if (player.skipMode) {
@@ -2916,6 +3378,16 @@ function autoDelayForMessage(player) {
   const base = player.autoAdvanceDelayMs ?? AUTO_ADVANCE_DELAY_MS;
   const voiceMs = player.audioMixer?.activeVoiceRemainingMs?.() ?? 0;
   return Math.max(base, voiceMs);
+}
+
+function stopVoicesForManualAdvance(player) {
+  if (player.configState?.settings?.carryVoiceOnClick !== false) {
+    player.safeState.voiceStoppedOnClick = 0;
+    return false;
+  }
+  const stopped = player.audioMixer?.stopVoices?.() === true;
+  player.safeState.voiceStoppedOnClick = Number(stopped);
+  return stopped;
 }
 
 // Advance the current message once its post-reveal delay has elapsed.
@@ -2976,7 +3448,8 @@ function isAutomaticEvent(event) {
     || event?.kind === EVENT_WAIT
     || event?.kind === EVENT_SOUND
     || event?.kind === EVENT_USER_FUNCTION
-    || event?.kind === EVENT_MESSAGE_CONTROL;
+    || event?.kind === EVENT_MESSAGE_CONTROL
+    || event?.kind === EVENT_MESSAGE_STYLE;
 }
 
 function isStableSaveEvent(event) {
@@ -3011,7 +3484,7 @@ function parseSaveRecord(encoded, fallbackSequence, fallbackRoute) {
     || (value.version >= 9 && !hasSavedRoute)
     || (value.version >= 11 && !hasSavedSequence)
     || typeof value.scenarioName !== "string"
-    || !/^[A-Za-z0-9_]+$/.test(value.scenarioName)
+    || !isValidScenarioName(value.scenarioName)
     || !Number.isInteger(value.scenarioIndex)
     || scenarioSequence[value.scenarioIndex] !== value.scenarioName
     || typeof value.snapshot !== "string"
@@ -3049,7 +3522,7 @@ function isValidSavedScenarioSequence(sequence) {
   return Array.isArray(sequence)
     && sequence.length >= 1
     && sequence.length <= 256
-    && sequence.every((name) => typeof name === "string" && /^[A-Za-z0-9_]+$/.test(name));
+    && sequence.every(isValidScenarioName);
 }
 
 function isValidSavedEvent(event) {
@@ -3609,6 +4082,10 @@ function validAssetName(value) {
   return typeof value === "string" && /^[A-Za-z0-9_]+$/.test(value);
 }
 
+function validMovieAssetName(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_]+\.(?:mpg|mpeg)$/i.test(value);
+}
+
 function validArchiveName(value) {
   return typeof value === "string" && /^[A-Za-z0-9_]+\.arc$/i.test(value);
 }
@@ -3679,6 +4156,14 @@ function decodeSessionEvent(packet, payload) {
       opcode: packet.optionCount,
       offset: packet.stringArgCount,
       durationMs: packet.nameLength,
+    };
+  }
+  if (packet.eventKind === EVENT_MESSAGE_STYLE) {
+    return {
+      ...event,
+      opcode: packet.optionCount,
+      offset: packet.stringArgCount,
+      intArgs: decodeI32Values(payload, packet.nameLength),
     };
   }
   return event;
@@ -3857,21 +4342,26 @@ function handleMessageControlClick(player, controlIndex, onUpdate) {
       const result = player.saveToStorage();
       player.safeState.messageControlClickResult = result.reason;
       player.safeState.messageControlClickOk = Number(result.ok);
+      if (result.ok) {
+        player.pendingDialogAction = {
+          action: "quickSaveNotice",
+          slot: 0,
+          kind: "quickSave",
+          source: "scenarioQuickSaveNotice",
+          opened: false,
+        };
+      }
       return true;
     }
     case MESSAGE_CONTROL_QUICK_LOAD:
       player.cancelAutoSkip();
-      player.safeState.messageControlClickResult = "loading";
-      {
-        const clickIndex = controlIndex;
-        const clickName = MESSAGE_CONTROL_NAMES[controlIndex] ?? "";
-        void player.loadFromStorage().then((result) => {
-          player.safeState.messageControlClickIndex = clickIndex;
-          player.safeState.messageControlClickName = clickName;
-          player.safeState.messageControlClickResult = result.reason;
-          player.safeState.messageControlClickOk = Number(result.ok);
-          onUpdate?.();
-        });
+      if (!player.saveSlotSummary(0).exists) {
+        player.safeState.messageControlClickResult = "missing_snapshot";
+        player.safeState.messageControlClickOk = 0;
+      } else {
+        player.requestDialogAction("userDataLoad", 0, "load", "scenarioQuickLoad");
+        player.safeState.messageControlClickResult = "load_confirm";
+        player.safeState.messageControlClickOk = 1;
       }
       return true;
     case MESSAGE_CONTROL_VOICE:
@@ -3967,6 +4457,10 @@ function safeSessionState(active, event) {
     sceneObjectCount: 0,
     sceneObjectAssetReady: 0,
     sceneObjectEventCount: 0,
+    sceneObjectControlOpcode: 0,
+    sceneObjectControlCount: 0,
+    sceneObjectControlId: -1,
+    sceneObjectControlAffected: 0,
     sceneFilterCount: 0,
     sceneFilterDurationMs: 0,
     sceneFilterMode: 0,
@@ -3983,6 +4477,16 @@ function safeSessionState(active, event) {
     messageControlDurationMs: 0,
     messageControlVisible: 0,
     messageControlCount: 0,
+    messageStyleOpcode: 0,
+    messageStyleFontSize: 0,
+    messageStyleTextX: -1,
+    messageStyleTextY: -1,
+    messageStyleTextSpeed: -1,
+    messageStyleTextUnit: -1,
+    messageStyleProcessMode: -1,
+    messageStyleWindowMode: -1,
+    messageStyleWindowSubMode: -1,
+    messageStyleCount: 0,
     messageWindowHidden: 0,
     messageControlClickIndex: -1,
     messageControlClickName: "",
@@ -4003,6 +4507,9 @@ function safeSessionState(active, event) {
     userDataSelectedSlot: 0,
     userDataLastResult: "",
     userDataLastOk: 0,
+    userDataPendingDialogKind: "",
+    userDataPendingDialogSource: "",
+    userDataPendingDialogSlot: -1,
     configOpen: 0,
     configHover: "",
     configLastAction: "",
@@ -4020,9 +4527,12 @@ function safeSessionState(active, event) {
     voiceControlOpcode: 0,
     voiceControlCount: 0,
     voiceWaitInterruptible: 0,
+    voiceStoppedOnClick: 0,
     sfxAssetReady: 0,
     sfxPlayResult: 0,
     sfxNameLength: 0,
+    sfxPlayOpcode: 0,
+    sfxPan: 64,
     sfxControlOpcode: 0,
     sfxChannel: 0,
     sfxFadeMs: 0,

@@ -187,6 +187,27 @@ export function stopScenarioSceneObjectMotion(state, id) {
   return ensureSceneObjectMotions(state).delete(id);
 }
 
+export function removeScenarioSceneObject(state, id) {
+  const key = boundedInteger(id, 0, 255, -1);
+  if (key < 0) {
+    return false;
+  }
+  const hadObject = state.sceneObjects.delete(key);
+  const hadTransition = state.sceneObjectTransitions.delete(key);
+  const hadMotion = ensureSceneObjectMotions(state).delete(key);
+  state.sceneObjectBackgroundTransition?.ids.delete(key);
+  return hadObject || hadTransition || hadMotion;
+}
+
+export function stopScenarioSceneObjectTransitions(state, now = performance.now()) {
+  let stopped = 0;
+  for (const id of [...state.sceneObjectTransitions.keys()]) {
+    settleReplacedTransition(state, id, now);
+    stopped += 1;
+  }
+  return stopped;
+}
+
 export function beginScenarioBackgroundObjectRemoval(
   state,
   durationMs,

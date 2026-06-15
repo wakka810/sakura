@@ -1,8 +1,12 @@
 // Boot the browser runtime against the local install server and dump state + screenshot.
-// Usage: node tools/boot-runtime.mjs [--png out.png] [--json out.json] [--timeout-ms N] [--post-ready-ms N] [--wait-after-target-ms N] [--advance-delay-ms N] [--wait-title] [--click-title-menu Start|Load|Config|Exit] [--save-load-advance N] [--open-log-after-backlog N] [--click-message-control INDEX] [--click-userdata-control previous|next|save|load|back] [--click-config-control reset|title|back] [--advance-until-event N] [--advance-until-message-control N] [--message-control-count N] [--message-control-opcode N] [--advance-until-sprite-transition N] [--sprite-transition-scenario NAME] [--advance-until-sprite-motion N] [--advance-until-control-motion N] [--advance-until-scene-object N] [--advance-after-scene-object N] [--advance-after-scene-object-delay-ms N] [--advance-until-scene-object-transition N] [--scene-object-transition-event N] [--advance-after-scene-object-transition N] [--advance-until-filter N] [--advance-after-filter N] [--advance-until-filter-clear N] [--advance-after-filter-clear N] [--advance-until-preset-shake N] [--advance-until-sfx-control N] [--advance-until-voice-channels N] [--voice-channel-count N] [--advance-until-scenario N] [--target-scenario NAME] [--advance-until-choice N]
+// Usage: node tools/boot-runtime.mjs [--png out.png] [--json out.json] [--route pi|an|rn|ze] [--scenario-name NAME] [--start-route pi|an|rn|ze] [--start-scenario-name NAME] [--smoke-routes] [--smoke-route-chapters] [--smoke-full-routes] [--smoke-full-route ROUTE] [--timeout-ms N] [--post-ready-ms N] [--wait-after-target-ms N] [--advance-delay-ms N] [--wait-title] [--click-title-menu Start|Load|Config|Extra|Graphic|Scene|Music|IV|V|VI|Exit]... [--open-title-scene] [--click-title-scene INDEX] [--click-title-graphic INDEX] [--click-title-graphic-button previous|next|top|last|back]... [--click-title-graphic-viewer] [--click-title-music INDEX] [--click-dialog-control yes|no] [--seed-save-slot N] [--seed-dummy-save-slot N] [--save-load-advance N] [--open-log-after-backlog N] [--click-message-control INDEX] [--click-userdata-control previous|next|save|load|back] [--click-config-control reset|title|back] [--advance-until-event N] [--advance-until-message-control N] [--message-control-count N] [--message-control-opcode N] [--advance-until-sprite-transition N] [--sprite-transition-scenario NAME] [--advance-until-sprite-motion N] [--advance-until-control-motion N] [--advance-until-scene-object N] [--advance-after-scene-object N] [--advance-after-scene-object-delay-ms N] [--advance-until-scene-object-transition N] [--scene-object-transition-event N] [--advance-after-scene-object-transition N] [--advance-until-filter N] [--advance-after-filter N] [--advance-until-filter-clear N] [--advance-after-filter-clear N] [--advance-until-preset-shake N] [--advance-until-sfx-control N] [--advance-until-voice-channels N] [--voice-channel-count N] [--advance-until-scenario N] [--target-scenario NAME] [--advance-until-choice N]
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { chromium } from "playwright";
+import {
+  scenarioChapterChoices,
+  scenarioRouteChoices,
+} from "../web/scenario-routes.js";
 
 function parseArgs(argv) {
   const o = {
@@ -13,9 +17,28 @@ function parseArgs(argv) {
     postReadyMs: 1500,
     waitAfterTargetMs: 0,
     port: 8799,
+    query: "",
+    route: "",
+    scenarioName: "",
+    startRoute: "",
+    startScenarioName: "",
+    smokeRoutes: false,
+    smokeRouteChapters: false,
+    smokeFullRoutes: false,
+    smokeFullRoute: "",
     advanceDelayMs: 250,
     waitTitle: false,
     clickTitleMenu: "",
+    clickTitleMenus: [],
+    openTitleScene: false,
+    clickTitleScene: -1,
+    clickTitleGraphic: -1,
+    clickTitleGraphicButtons: [],
+    clickTitleGraphicViewer: false,
+    clickTitleMusic: -1,
+    clickDialogControl: "",
+    seedSaveSlot: -1,
+    seedDummySaveSlot: -1,
     saveLoadAdvance: 0,
     openLogAfterBacklog: 0,
     clickMessageControl: -1,
@@ -68,10 +91,42 @@ function parseArgs(argv) {
     }
     else if (a === "--port") { o.port = Number.parseInt(argv[++i], 10); }
     else if (a === "--query") { o.query = argv[++i]; }
+    else if (a === "--route") { o.route = argv[++i] ?? ""; }
+    else if (a === "--scenario-name") { o.scenarioName = argv[++i] ?? ""; }
+    else if (a === "--start-route") { o.startRoute = argv[++i] ?? ""; }
+    else if (a === "--start-scenario-name") { o.startScenarioName = argv[++i] ?? ""; }
+    else if (a === "--smoke-routes") { o.smokeRoutes = true; }
+    else if (a === "--smoke-route-chapters") { o.smokeRouteChapters = true; }
+    else if (a === "--smoke-full-routes") { o.smokeFullRoutes = true; }
+    else if (a === "--smoke-full-route") { o.smokeFullRoute = argv[++i] ?? ""; }
     else if (a === "--advance") { o.advance = Number.parseInt(argv[++i], 10); }
     else if (a === "--advance-delay-ms") { o.advanceDelayMs = Number.parseInt(argv[++i], 10); }
     else if (a === "--wait-title") { o.waitTitle = true; }
-    else if (a === "--click-title-menu") { o.clickTitleMenu = argv[++i] ?? ""; }
+    else if (a === "--click-title-menu") {
+      o.clickTitleMenu = argv[++i] ?? "";
+      o.clickTitleMenus.push(o.clickTitleMenu);
+    }
+    else if (a === "--open-title-scene") { o.openTitleScene = true; }
+    else if (a === "--click-title-scene") {
+      o.clickTitleScene = Number.parseInt(argv[++i], 10);
+    }
+    else if (a === "--click-title-graphic") {
+      o.clickTitleGraphic = Number.parseInt(argv[++i], 10);
+    }
+    else if (a === "--click-title-graphic-button") {
+      o.clickTitleGraphicButtons.push(argv[++i] ?? "");
+    }
+    else if (a === "--click-title-graphic-viewer") {
+      o.clickTitleGraphicViewer = true;
+    }
+    else if (a === "--click-title-music") {
+      o.clickTitleMusic = Number.parseInt(argv[++i], 10);
+    }
+    else if (a === "--click-dialog-control") { o.clickDialogControl = argv[++i] ?? ""; }
+    else if (a === "--seed-save-slot") { o.seedSaveSlot = Number.parseInt(argv[++i], 10); }
+    else if (a === "--seed-dummy-save-slot") {
+      o.seedDummySaveSlot = Number.parseInt(argv[++i], 10);
+    }
     else if (a === "--save-load-advance") { o.saveLoadAdvance = Number.parseInt(argv[++i], 10); }
     else if (a === "--open-log-after-backlog") {
       o.openLogAfterBacklog = Number.parseInt(argv[++i], 10);
@@ -191,7 +246,20 @@ function parseArgs(argv) {
 }
 
 const opts = parseArgs(process.argv.slice(2));
-const url = `http://127.0.0.1:${opts.port}/${opts.query ? `?${opts.query}` : ""}`;
+const url = `http://127.0.0.1:${opts.port}/${buildRuntimeQuery(opts)}`;
+
+function buildRuntimeQuery(opts) {
+  const params = new URLSearchParams(opts.query ?? "");
+  if (opts.route) {
+    params.set("route", opts.route);
+  }
+  if (opts.scenarioName) {
+    params.set("scenarioPreview", "1");
+    params.set("scenarioName", opts.scenarioName);
+  }
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
 
 const server = spawn("node", ["tools/local-server.mjs"], {
   cwd: new URL("..", import.meta.url),
@@ -234,6 +302,75 @@ try {
     await new Promise((r) => setTimeout(r, 500));
   }
   if (ready && opts.postReadyMs > 0) await new Promise((r) => setTimeout(r, opts.postReadyMs));
+
+  let seededDummySave = null;
+  if (opts.seedDummySaveSlot >= 0) {
+    seededDummySave = await seedDummySaveSlot(page, opts.seedDummySaveSlot);
+  }
+
+  let startedRoute = null;
+  if (opts.startRoute) {
+    startedRoute = await startScenarioRoute(page, opts.startRoute, opts.startScenarioName);
+  }
+  let routeSmoke = null;
+  if (opts.smokeRoutes) {
+    routeSmoke = await smokeRouteEndings(page, opts.timeoutMs, opts.advanceDelayMs);
+  }
+  let routeChapterSmoke = null;
+  if (opts.smokeRouteChapters) {
+    routeChapterSmoke = await smokeRouteChapters(page, opts.timeoutMs, opts.advanceDelayMs);
+  }
+  let fullRouteSmoke = null;
+  if (opts.smokeFullRoutes || opts.smokeFullRoute) {
+    fullRouteSmoke = await smokeFullRoutes(
+      page,
+      opts.timeoutMs,
+      opts.advanceDelayMs,
+      opts.smokeFullRoute,
+    );
+  }
+
+  let openedTitleScene = null;
+  let clickedTitleScene = null;
+  let clickedTitleGraphic = null;
+  let clickedTitleGraphicButtons = [];
+  let clickedTitleGraphicViewerResult = null;
+  let clickedTitleMusic = null;
+  if (
+    opts.waitTitle
+    || opts.clickTitleMenus.length > 0
+    || opts.openTitleScene
+    || opts.clickTitleScene >= 0
+    || opts.clickTitleGraphic >= 0
+    || opts.clickTitleGraphicButtons.length > 0
+    || opts.clickTitleGraphicViewer
+    || opts.clickTitleMusic >= 0
+  ) {
+    await waitForTitle(page, opts.timeoutMs);
+  }
+  for (const titleMenu of opts.clickTitleMenus) {
+    if (titleMenu) {
+      await clickTitleMenu(page, titleMenu);
+    }
+  }
+  if (opts.openTitleScene || opts.clickTitleScene >= 0) {
+    openedTitleScene = await openTitleScene(page);
+  }
+  if (opts.clickTitleScene >= 0) {
+    clickedTitleScene = await clickTitleScene(page, opts.clickTitleScene);
+  }
+  for (const action of opts.clickTitleGraphicButtons) {
+    clickedTitleGraphicButtons.push(await clickTitleGraphicButton(page, action));
+  }
+  if (opts.clickTitleGraphic >= 0) {
+    clickedTitleGraphic = await clickTitleGraphic(page, opts.clickTitleGraphic);
+  }
+  if (opts.clickTitleGraphicViewer) {
+    clickedTitleGraphicViewerResult = await clickTitleGraphicViewer(page);
+  }
+  if (opts.clickTitleMusic >= 0) {
+    clickedTitleMusic = await clickTitleMusic(page, opts.clickTitleMusic);
+  }
 
   await advanceRuntime(page, opts.advance ?? 0, opts.advanceDelayMs);
   if (opts.advanceUntilEvent > 0) {
@@ -339,11 +476,9 @@ try {
       opts.advanceDelayMs,
     );
   }
-  if (opts.waitTitle || opts.clickTitleMenu) {
-    await waitForTitle(page, opts.timeoutMs);
-  }
-  if (opts.clickTitleMenu) {
-    await clickTitleMenu(page, opts.clickTitleMenu);
+  let seededSave = null;
+  if (opts.seedSaveSlot >= 0) {
+    seededSave = await seedSaveSlot(page, opts.seedSaveSlot, opts.timeoutMs);
   }
   if (opts.openLogAfterBacklog > 0) {
     await openLogAfterBacklog(
@@ -372,6 +507,9 @@ try {
   }
   if (opts.clickConfigControl) {
     await clickConfigControl(page, opts.clickConfigControl);
+  }
+  if (opts.clickDialogControl) {
+    await clickDialogControl(page, opts.clickDialogControl);
   }
   if (opts.waitAfterTargetMs > 0) {
     await page.waitForTimeout(opts.waitAfterTargetMs);
@@ -454,6 +592,8 @@ try {
         sfxAssetReady: inst.player.safeState?.sfxAssetReady ?? 0,
         sfxPlayResult: inst.player.safeState?.sfxPlayResult ?? 0,
         sfxNameLength: inst.player.safeState?.sfxNameLength ?? 0,
+        sfxPlayOpcode: inst.player.safeState?.sfxPlayOpcode ?? 0,
+        sfxPan: inst.player.safeState?.sfxPan ?? 64,
         sfxControlOpcode: inst.player.safeState?.sfxControlOpcode ?? 0,
         sfxChannel: inst.player.safeState?.sfxChannel ?? 0,
         sfxFadeMs: inst.player.safeState?.sfxFadeMs ?? 0,
@@ -532,6 +672,14 @@ try {
         sceneObjectCount: inst.player.safeState?.sceneObjectCount ?? 0,
         sceneObjectAssetReady: inst.player.safeState?.sceneObjectAssetReady ?? 0,
         sceneObjectEventCount: inst.player.safeState?.sceneObjectEventCount ?? 0,
+        sceneObjectControlOpcode:
+          inst.player.safeState?.sceneObjectControlOpcode ?? 0,
+        sceneObjectControlCount:
+          inst.player.safeState?.sceneObjectControlCount ?? 0,
+        sceneObjectControlId:
+          inst.player.safeState?.sceneObjectControlId ?? -1,
+        sceneObjectControlAffected:
+          inst.player.safeState?.sceneObjectControlAffected ?? 0,
         sceneObjectMotionCount:
           inst.player.scene?.sprites?.sceneObjectMotions?.size
             ?? inst.player.safeState?.sceneObjectMotionCount
@@ -739,6 +887,9 @@ try {
         count: inst.player.safeState?.scenarioCount ?? 0,
         transitions: inst.player.safeState?.scenarioTransitions ?? 0,
         loading: inst.player.scenarioLoading === true,
+        autoMode: inst.player.safeState?.autoMode ?? 0,
+        skipMode: inst.player.safeState?.skipMode ?? 0,
+        autoAdvanceDelayMs: inst.player.autoAdvanceDelayMs ?? 0,
       } : null,
       scenarioMessageWindow: inst?.player ? (() => {
         const visual = inst.player.messageVisual ?? null;
@@ -797,9 +948,23 @@ try {
         lastOk: inst.player.safeState?.userDataLastOk ?? 0,
         lastSaveSlot: inst.player.safeState?.lastSaveSlot ?? 0,
         lastLoadSlot: inst.player.safeState?.lastLoadSlot ?? 0,
+        pendingDialogKind: inst.player.safeState?.userDataPendingDialogKind ?? "",
+        pendingDialogSource: inst.player.safeState?.userDataPendingDialogSource ?? "",
+        pendingDialogSlot: inst.player.safeState?.userDataPendingDialogSlot ?? -1,
       } : null,
       titleConfig: inst ? {
         stage: inst.stage ?? "",
+        menuMode: inst.titleMenuMode ?? "main",
+        menuControls: typeof window.sakuraTitleMenuControls === "function"
+          ? window.sakuraTitleMenuControls().map((control) => ({
+              label: control.label,
+              action: control.action,
+              routeId: control.routeId,
+              x: control.x,
+              y: control.y,
+              enabled: control.enabled,
+            }))
+          : [],
         menuHoverIndex: inst.hoverIndex ?? -1,
         menuLastAction: inst.titleLastAction ?? "",
         open: inst.titleConfigState?.open === true,
@@ -813,6 +978,22 @@ try {
         sfxVolume: Math.round((inst.titleConfigState?.settings?.sfxVolume ?? 0) * 100),
         voiceVolume: Math.round((inst.titleConfigState?.settings?.voiceVolume ?? 0) * 100),
       } : null,
+      titleClear: (() => {
+        try {
+          const encoded = window.localStorage?.getItem("sakura.title.clear.v1");
+          const parsed = encoded ? JSON.parse(encoded) : null;
+          const routes = parsed?.routes && typeof parsed.routes === "object"
+            ? Object.keys(parsed.routes).sort()
+            : [];
+          return {
+            version: parsed?.version ?? 0,
+            routeCount: routes.length,
+            routes,
+          };
+        } catch {
+          return { version: 0, routeCount: 0, routes: [] };
+        }
+      })(),
       titleUserData: inst ? {
         stage: inst.stage ?? "",
         menuHoverIndex: inst.hoverIndex ?? -1,
@@ -824,6 +1005,98 @@ try {
         hover: inst.titleUserDataState?.hover ?? null,
         lastResult: inst.titleUserDataLastResult ?? "",
         lastOk: inst.titleUserDataLastOk ?? 0,
+        pendingDialogKind: inst.pendingDialogAction?.kind ?? "",
+        pendingDialogSource: inst.pendingDialogAction?.source ?? "",
+        pendingDialogSlot: inst.pendingDialogAction?.slot ?? -1,
+      } : null,
+      titleScene: inst ? (() => {
+        const sceneChoices = typeof window.sakuraTitleSceneChoices === "function"
+          ? window.sakuraTitleSceneChoices()
+          : [];
+        return {
+        stage: inst.stage ?? "",
+        menuHoverIndex: inst.hoverIndex ?? -1,
+        menuLastAction: inst.titleLastAction ?? "",
+        open: inst.titleSceneState?.open === true,
+        hoverIndex: inst.titleSceneState?.hoverIndex ?? -1,
+        lastAction: inst.titleSceneState?.lastAction ?? "",
+        selectedRoute: inst.titleSceneState?.selectedRoute ?? "",
+        selectedScenarioName: inst.titleSceneState?.selectedScenarioName ?? "",
+        selectedReplayId: inst.titleSceneState?.selectedReplayId ?? 0,
+        selectedThumbnailAssetName: inst.titleSceneState?.selectedThumbnailAssetName ?? "",
+        choiceCount: sceneChoices.length,
+        thumbnailLoadedCount: inst.titleSceneImageCache instanceof Map
+          ? Array.from(inst.titleSceneImageCache.values()).filter((entry) => entry?.status === "ready").length
+          : 0,
+        firstScenarioName: sceneChoices[0]?.scenarioName ?? "",
+        lastScenarioName: sceneChoices.at(-1)?.scenarioName ?? "",
+        firstThumbnailAssetName: sceneChoices[0]?.thumbnailAssetName ?? "",
+        lastThumbnailAssetName: sceneChoices.at(-1)?.thumbnailAssetName ?? "",
+        };
+      })() : null,
+      titleGraphic: inst ? (() => {
+        const allAssets = Array.isArray(inst.titleGraphicAssetsCache?.assets)
+          ? inst.titleGraphicAssetsCache.assets
+          : [];
+        const visibleAssets = typeof window.sakuraTitleGraphicAssets === "function"
+          ? window.sakuraTitleGraphicAssets()
+          : [];
+        return {
+        stage: inst.stage ?? "",
+        menuHoverIndex: inst.hoverIndex ?? -1,
+        menuLastAction: inst.titleLastAction ?? "",
+        open: inst.titleGraphicState?.open === true,
+        page: inst.titleGraphicState?.page ?? 0,
+        hoverIndex: inst.titleGraphicState?.hoverIndex ?? -1,
+        selectedIndex: inst.titleGraphicState?.selectedIndex ?? -1,
+        selectedAssetName: inst.titleGraphicState?.selectedAssetName ?? "",
+        viewerOpen: inst.titleGraphicState?.viewerOpen === true,
+        viewerAssetName: inst.titleGraphicState?.viewerAssetName ?? "",
+        viewerLoadOk: inst.titleGraphicState?.viewerLoadOk ?? 0,
+        viewerLoadReason: inst.titleGraphicState?.viewerLoadReason ?? "",
+        lastAction: inst.titleGraphicState?.lastAction ?? "",
+        lastLoadOk: inst.titleGraphicState?.lastLoadOk ?? 0,
+        lastLoadReason: inst.titleGraphicState?.lastLoadReason ?? "",
+        assetCount: allAssets.length,
+        pageCount: Math.max(1, Math.ceil(allAssets.length / 8)),
+        visibleCount: visibleAssets.length,
+        unlockedCount: allAssets.filter((asset) => asset?.unlocked !== false).length,
+        lockedCount: allAssets.filter((asset) => asset?.locked === true).length,
+        visibleUnlockedCount: visibleAssets.filter((asset) => asset?.unlocked !== false).length,
+        visibleLockedCount: visibleAssets.filter((asset) => asset?.locked === true).length,
+        loadedCount: inst.titleGraphicImageCache instanceof Map
+          ? Array.from(inst.titleGraphicImageCache.values()).filter((entry) => entry?.status === "ready").length
+          : 0,
+        chromeLoadedCount: inst.titleGraphicChromeCache instanceof Map
+          ? Array.from(inst.titleGraphicChromeCache.values()).filter((entry) => entry?.status === "ready").length
+          : 0,
+        };
+      })() : null,
+      titleMusic: inst ? {
+        stage: inst.stage ?? "",
+        menuHoverIndex: inst.hoverIndex ?? -1,
+        menuLastAction: inst.titleLastAction ?? "",
+        open: inst.titleMusicState?.open === true,
+        page: inst.titleMusicState?.page ?? 0,
+        hoverIndex: inst.titleMusicState?.hoverIndex ?? -1,
+        selectedIndex: inst.titleMusicState?.selectedIndex ?? -1,
+        selectedAssetName: inst.titleMusicState?.selectedAssetName ?? "",
+        lastAction: inst.titleMusicState?.lastAction ?? "",
+        lastPlayOk: inst.titleMusicState?.lastPlayOk ?? 0,
+        lastPlayReason: inst.titleMusicState?.lastPlayReason ?? "",
+        visibleCount: typeof window.sakuraTitleMusicTracks === "function"
+          ? window.sakuraTitleMusicTracks().length
+          : 0,
+      } : null,
+      dialog: inst ? {
+        stage: inst.stage ?? "",
+        open: inst.dialogState?.open === true,
+        kind: inst.dialogState?.kind ?? "",
+        source: inst.dialogState?.source ?? "",
+        hover: inst.dialogState?.hover ?? null,
+        lastAction: inst.dialogState?.lastAction ?? "",
+        result: inst.dialogState?.result ?? "",
+        menuLastAction: inst.titleLastAction ?? "",
       } : null,
       scenarioConfig: inst?.player ? {
         open: inst.player.configState?.open === true,
@@ -844,6 +1117,10 @@ try {
       canvas: canvas ? {
         width: canvas.width, height: canvas.height,
         center: sample(canvas.width >> 1, canvas.height >> 1),
+        edgeTopLeft: sample(0, 0),
+        edgeTop: sample(canvas.width >> 1, 0),
+        edgeRight: sample(Math.max(0, canvas.width - 1), canvas.height >> 1),
+        edgeBottom: sample(canvas.width >> 1, Math.max(0, canvas.height - 1)),
         topLeft: sample(40, 40),
         bottomMid: sample(canvas.width >> 1, Math.max(0, canvas.height - 80)),
         boxBorderTop: sample(400, canvas.height - 180),
@@ -865,6 +1142,18 @@ try {
     asyncErrorStage: stage,
     state,
     saveLoad,
+    seededSave,
+    seededDummySave,
+    startedRoute,
+    openedTitleScene,
+    clickedTitleScene,
+    clickedTitleGraphic,
+    clickedTitleGraphicButtons,
+    clickedTitleGraphicViewer: clickedTitleGraphicViewerResult,
+    clickedTitleMusic,
+    routeSmoke,
+    routeChapterSmoke,
+    fullRouteSmoke,
     console: consoleLines.slice(-60),
   };
   if (opts.png) await page.screenshot({ path: opts.png });
@@ -923,8 +1212,36 @@ async function clickTitleMenu(page, itemName) {
     if (!canvas || inst?.stage !== "title" || !image) {
       return null;
     }
-    const labels = ["start", "load", "config", "exit"];
+    const controls = typeof window.sakuraTitleMenuControls === "function"
+      ? window.sakuraTitleMenuControls()
+      : [];
     const numeric = Number.parseInt(String(name), 10);
+    if (controls.length > 0) {
+      const wanted = String(name).toLowerCase();
+      const index = Number.isInteger(numeric) && String(numeric) === String(name).trim()
+        ? numeric
+        : controls.findIndex((control) => String(control.label).toLowerCase() === wanted
+          || String(control.action).toLowerCase() === wanted
+          || String(control.routeId).toLowerCase() === wanted);
+      const control = controls[index] ?? null;
+      if (!control) {
+        return null;
+      }
+      const sprite = inst.titleButtonSprites?.[control.label] ?? null;
+      const scale = Math.min(canvas.width / image.width, canvas.height / image.height);
+      const w = Math.round(image.width * scale);
+      const h = Math.round(image.height * scale);
+      const x = Math.floor((canvas.width - w) / 2);
+      const y = Math.floor((canvas.height - h) / 2);
+      const rect = canvas.getBoundingClientRect();
+      const width = (sprite?.stateWidth ?? 114) * scale;
+      const height = (sprite?.stateHeight ?? 64) * scale;
+      return {
+        clientX: rect.left + (x + (control.x * scale) + (width / 2)) * rect.width / canvas.width,
+        clientY: rect.top + (y + (control.y * scale) + (height / 2)) * rect.height / canvas.height,
+      };
+    }
+    const labels = ["start", "load", "config", "exit"];
     const index = Number.isInteger(numeric) && String(numeric) === String(name).trim()
       ? numeric
       : labels.indexOf(String(name).toLowerCase());
@@ -949,6 +1266,638 @@ async function clickTitleMenu(page, itemName) {
   }
   await page.mouse.click(point.clientX, point.clientY);
   await page.waitForTimeout(150);
+}
+
+async function openTitleScene(page) {
+  const result = await page.evaluate(() => {
+    if (typeof window.sakuraOpenTitleSceneSelect !== "function") {
+      return { ok: false, reason: "api_missing" };
+    }
+    return window.sakuraOpenTitleSceneSelect();
+  });
+  if (!result?.ok) {
+    throw new Error(`open title scene failed: ${result?.reason ?? "unknown"}`);
+  }
+  await page.waitForTimeout(100);
+  return result;
+}
+
+async function clickTitleScene(page, index) {
+  const result = await page.evaluate(async (sceneIndex) => {
+    if (typeof window.sakuraSelectTitleScene !== "function") {
+      return { ok: false, reason: "api_missing" };
+    }
+    return await window.sakuraSelectTitleScene(sceneIndex);
+  }, index);
+  if (!result?.ok) {
+    throw new Error(`click title scene ${index} failed: ${result?.reason ?? "unknown"}`);
+  }
+  await page.waitForTimeout(150);
+  return result;
+}
+
+async function clickTitleGraphic(page, index) {
+  const result = await page.evaluate(async (graphicIndex) => {
+    if (typeof window.sakuraSelectTitleGraphic !== "function") {
+      return { ok: false, reason: "api_missing" };
+    }
+    return await window.sakuraSelectTitleGraphic(graphicIndex);
+  }, index);
+  if (!result?.ok || result?.assetReady !== 1) {
+    throw new Error(`click title graphic ${index} failed: ${result?.reason ?? "unknown"}`);
+  }
+  await page.waitForTimeout(150);
+  return result;
+}
+
+async function clickTitleGraphicButton(page, action) {
+  const normalized = String(action ?? "").trim().toLowerCase();
+  const aliases = new Map([
+    ["prev", "previous"],
+    ["previous", "previous"],
+    ["next", "next"],
+    ["top", "top"],
+    ["first", "top"],
+    ["last", "last"],
+    ["back", "back"],
+  ]);
+  const button = aliases.get(normalized);
+  const centers = {
+    previous: [36 + 69.5, 650 + 21.5],
+    next: [36 + 148 + 69.5, 650 + 21.5],
+    top: [36 + (148 * 2) + 69.5, 650 + 21.5],
+    last: [36 + (148 * 3) + 69.5, 650 + 21.5],
+    back: [36 + (148 * 4) + 69.5, 650 + 21.5],
+  };
+  if (!button) {
+    throw new Error(`unknown title graphic button ${action}`);
+  }
+  await clickStagePoint(page, centers[button][0], centers[button][1]);
+  await page.waitForTimeout(180);
+  const result = await page.evaluate((clickedAction) => {
+    const state = window.__sakuraActiveInstall?.titleGraphicState ?? null;
+    return {
+      action: clickedAction,
+      open: state?.open === true,
+      page: state?.page ?? -1,
+      viewerOpen: state?.viewerOpen === true,
+      lastAction: state?.lastAction ?? "",
+      menuLastAction: window.__sakuraActiveInstall?.titleLastAction ?? "",
+    };
+  }, button);
+  if (button !== "back" && result.open !== true) {
+    throw new Error(`title graphic button ${button} unexpectedly closed the gallery`);
+  }
+  return result;
+}
+
+async function clickTitleGraphicViewer(page) {
+  const before = await page.evaluate(() => {
+    const state = window.__sakuraActiveInstall?.titleGraphicState ?? null;
+    return {
+      open: state?.open === true,
+      viewerOpen: state?.viewerOpen === true,
+      viewerAssetName: state?.viewerAssetName ?? "",
+    };
+  });
+  if (!before.viewerOpen) {
+    throw new Error("title graphic viewer is not open");
+  }
+  await clickStagePoint(page, 640, 360);
+  await page.waitForTimeout(180);
+  const after = await page.evaluate((prior) => {
+    const state = window.__sakuraActiveInstall?.titleGraphicState ?? null;
+    return {
+      action: "viewer",
+      open: state?.open === true,
+      viewerOpen: state?.viewerOpen === true,
+      viewerAssetName: prior.viewerAssetName,
+      lastAction: state?.lastAction ?? "",
+      menuLastAction: window.__sakuraActiveInstall?.titleLastAction ?? "",
+    };
+  }, before);
+  if (after.viewerOpen) {
+    throw new Error("title graphic viewer did not close after click");
+  }
+  return after;
+}
+
+async function clickStagePoint(page, x, y) {
+  const point = await page.evaluate(({ stageX, stageY }) => {
+    const canvas = document.querySelector("#stage") ?? document.querySelector("canvas");
+    if (!canvas) {
+      return null;
+    }
+    const rect = canvas.getBoundingClientRect();
+    return {
+      clientX: rect.left + (stageX * rect.width / canvas.width),
+      clientY: rect.top + (stageY * rect.height / canvas.height),
+    };
+  }, { stageX: x, stageY: y });
+  if (!point) {
+    throw new Error("stage canvas is not available");
+  }
+  await page.mouse.click(point.clientX, point.clientY);
+}
+
+async function clickTitleMusic(page, index) {
+  const result = await page.evaluate(async (musicIndex) => {
+    if (typeof window.sakuraSelectTitleMusic !== "function") {
+      return { ok: false, reason: "api_missing" };
+    }
+    return await window.sakuraSelectTitleMusic(musicIndex);
+  }, index);
+  if (!result?.ok && result?.assetReady !== 1) {
+    throw new Error(`click title music ${index} failed: ${result?.reason ?? "unknown"}`);
+  }
+  await page.waitForTimeout(150);
+  return result;
+}
+
+async function startScenarioRoute(page, route, scenarioName) {
+  const result = await page.evaluate(
+    async ({ routeId, name }) => {
+      if (typeof window.sakuraStartScenarioRoute !== "function") {
+        return { ok: false, reason: "api_missing" };
+      }
+      return await window.sakuraStartScenarioRoute(routeId, name);
+    },
+    { routeId: route, name: scenarioName ?? "" },
+  );
+  if (!result?.ok) {
+    throw new Error(`start route ${route} failed: ${result?.reason ?? "unknown"}`);
+  }
+  return result;
+}
+
+async function smokeRouteEndings(page, timeoutMs, delayMs) {
+  const results = [];
+  for (const route of scenarioRouteChoices()) {
+    const started = await startScenarioRoute(page, route.routeId, route.endingScenario);
+    if (started.scenarioIndex !== route.scenarioCount - 1) {
+      throw new Error(
+        `route ${route.routeId} started ${route.endingScenario} at index ${started.scenarioIndex}; expected ${route.scenarioCount - 1}`,
+      );
+    }
+    const observed = await waitForRouteScenario(
+      page,
+      route.routeId,
+      route.endingScenario,
+      timeoutMs,
+    );
+    const content = await advanceRouteUntilContentSignal(
+      page,
+      route.routeId,
+      route.endingScenario,
+      Math.min(Math.max(20, delayMs), 50),
+      { requireVisual: true },
+    );
+    results.push({
+      routeId: route.routeId,
+      label: route.label,
+      endingScenario: route.endingScenario,
+      scenarioCount: route.scenarioCount,
+      started,
+      observed,
+      content,
+    });
+  }
+  return { ok: true, count: results.length, results };
+}
+
+async function smokeRouteChapters(page, timeoutMs, delayMs) {
+  const results = [];
+  for (const route of scenarioRouteChoices()) {
+    const chapters = scenarioChapterChoices(route.routeId);
+    const chapterResults = [];
+    for (const chapter of chapters) {
+      const started = await startScenarioRoute(page, route.routeId, chapter.scenarioName);
+      if (started.scenarioIndex !== chapter.scenarioIndex) {
+        throw new Error(
+          `route ${route.routeId} started ${chapter.scenarioName} at index ${started.scenarioIndex}; expected ${chapter.scenarioIndex}`,
+        );
+      }
+      const observed = await waitForRouteScenario(
+        page,
+        route.routeId,
+        chapter.scenarioName,
+        timeoutMs,
+      );
+      const content = await advanceRouteUntilContentSignal(
+        page,
+        route.routeId,
+        chapter.scenarioName,
+        Math.min(Math.max(20, delayMs), 50),
+        { requireVisual: true },
+      );
+      chapterResults.push({
+        scenarioName: chapter.scenarioName,
+        scenarioIndex: chapter.scenarioIndex,
+        started,
+        observed,
+        content,
+      });
+    }
+    results.push({
+      routeId: route.routeId,
+      label: route.label,
+      scenarioCount: route.scenarioCount,
+      chapterCount: chapterResults.length,
+      chapters: chapterResults,
+    });
+  }
+  return {
+    ok: true,
+    routeCount: results.length,
+    chapterCount: results.reduce((sum, route) => sum + route.chapterCount, 0),
+    results,
+  };
+}
+
+async function smokeFullRoutes(page, timeoutMs, delayMs, routeFilter = "") {
+  const allRoutes = scenarioRouteChoices();
+  const requested = String(routeFilter ?? "").trim().toLowerCase();
+  const requestedRoute = requested
+    ? allRoutes.find((route) => route.routeId === requested)
+    : null;
+  if (requested && !requestedRoute) {
+    throw new Error(`unknown full-route smoke target ${requested}`);
+  }
+  const routes = requestedRoute ? [requestedRoute] : allRoutes;
+  const results = [];
+  for (const route of routes) {
+    console.error(
+      `full_route_smoke_start route=${route.routeId} first=${route.firstScenario} ending=${route.endingScenario} scenarios=${route.scenarioCount}`,
+    );
+    const started = await startScenarioRoute(page, route.routeId, route.firstScenario);
+    if (started.scenarioIndex !== 0) {
+      throw new Error(
+        `route ${route.routeId} started ${route.firstScenario} at index ${started.scenarioIndex}; expected 0`,
+      );
+    }
+    const observed = await waitForRouteScenario(
+      page,
+      route.routeId,
+      route.firstScenario,
+      timeoutMs,
+    );
+    await enableFullRouteFastMode(page);
+    const traversed = await waitForFullRouteEnding(page, route, timeoutMs, delayMs);
+    console.error(
+      `full_route_smoke_done route=${route.routeId} visited=${traversed.visitedCount}/${traversed.expectedCount} advances=${traversed.advances}`,
+    );
+    results.push({
+      routeId: route.routeId,
+      label: route.label,
+      scenarioCount: route.scenarioCount,
+      firstScenario: route.firstScenario,
+      endingScenario: route.endingScenario,
+      started,
+      observed,
+      traversed,
+    });
+  }
+  return {
+    ok: true,
+    routeCount: results.length,
+    scenarioCount: results.reduce((sum, route) => sum + route.traversed.expectedCount, 0),
+    observedScenarioCount: results.reduce((sum, route) => sum + route.traversed.visitedCount, 0),
+    results,
+  };
+}
+
+async function enableFullRouteFastMode(page) {
+  return await page.evaluate(() => {
+    const player = window.__sakuraActiveInstall?.player ?? null;
+    if (!player) {
+      return { ok: false, reason: "no_player" };
+    }
+    if (typeof player.startAutomatic === "function" && !player.__fullRouteOriginalStartAutomatic) {
+      player.__fullRouteOriginalStartAutomatic = player.startAutomatic;
+      player.startAutomatic = () => {};
+    }
+    player.autoMode = false;
+    player.skipMode = false;
+    player.automaticStopRequested = false;
+    if (player.automaticRunning === true) {
+      player.automaticSkip = true;
+      player.automaticWake?.();
+    }
+    return {
+      ok: true,
+      automaticRunning: Number(player.automaticRunning === true),
+      scenarioName: player.safeState?.scenarioName ?? "",
+      eventKind: player.event?.kind ?? 0,
+      eventCount: player.event?.eventCount ?? 0,
+    };
+  });
+}
+
+async function waitForFullRouteEnding(page, route, timeoutMs, delayMs) {
+  const deadline = Date.now() + timeoutMs;
+  const visited = new Map();
+  let last = null;
+  let maxScenarioIndex = -1;
+  let maxEventCount = -1;
+  let loggedScenarioIndex = -1;
+  let advances = 0;
+  const sleepMs = Math.min(Math.max(10, delayMs), 50);
+  while (Date.now() < deadline) {
+    last = await captureRouteScenario(page);
+    if (last.route !== route.routeId) {
+      throw new Error(
+        `full-route smoke drifted from ${route.routeId} to ${last.route}/${last.name}`,
+      );
+    }
+    if (last.runtimeNotifyErrors > 0) {
+      throw new Error(
+        `full-route smoke saw runtime notify errors on ${route.routeId}/${last.name}: ${last.runtimeNotifyErrors}`,
+      );
+    }
+    if (last.eventKind === 2) {
+      throw new Error(`full-route smoke reached unexpected choice on ${route.routeId}/${last.name}`);
+    }
+    if (last.name && Number.isInteger(last.index) && last.index >= 0) {
+      visited.set(last.index, last.name);
+    }
+    maxScenarioIndex = Math.max(maxScenarioIndex, last.index);
+    maxEventCount = Math.max(maxEventCount, last.eventCount);
+    if (last.index !== loggedScenarioIndex) {
+      loggedScenarioIndex = last.index;
+      console.error(
+        `full_route_smoke_progress route=${route.routeId} index=${last.index}/${route.scenarioCount - 1} name=${last.name} event=${last.eventCount}`,
+      );
+    }
+    if (
+      last.index === route.scenarioCount - 1
+      && last.name === route.endingScenario
+      && last.eventKind === 4
+      && !last.loading
+    ) {
+      return {
+        routeId: route.routeId,
+        endingScenario: route.endingScenario,
+        visitedCount: visited.size,
+        expectedCount: route.scenarioCount,
+        visited: Array.from(visited.entries())
+          .sort((left, right) => left[0] - right[0])
+          .map(([index, name]) => ({ index, name })),
+        maxScenarioIndex,
+        maxEventCount,
+        scenarioTransitions: last.scenarioTransitions,
+        advances,
+        final: last,
+      };
+    }
+    if (!last.loading) {
+      const chunk = await fastForwardFullRouteChunk(page, route.routeId, 2048);
+      advances += chunk.steps ?? 0;
+      if (chunk.choice === true) {
+        throw new Error(
+          `full-route smoke reached unexpected choice on ${route.routeId}/${chunk.scenarioName}`,
+        );
+      }
+      if (chunk.drift === true) {
+        throw new Error(
+          `full-route smoke drifted from ${route.routeId} to ${chunk.route}/${chunk.scenarioName}`,
+        );
+      }
+      if ((chunk.steps ?? 0) <= 0 && !chunk.loading && !chunk.halted && !chunk.automaticRunning) {
+        throw new Error(`full-route smoke made no progress on ${route.routeId}; chunk=${JSON.stringify(chunk)}`);
+      }
+    }
+    await page.waitForTimeout(sleepMs);
+  }
+  throw new Error(
+    `full-route smoke timed out on ${route.routeId}; last=${JSON.stringify(last)}`,
+  );
+}
+
+async function fastForwardFullRouteChunk(page, routeId, maxSteps) {
+  return await page.evaluate(({ expectedRoute, stepLimit }) => {
+    const player = window.__sakuraActiveInstall?.player ?? null;
+    if (!player) {
+      return { ok: false, reason: "no_player" };
+    }
+    if (player.automaticRunning === true) {
+      player.skipAutomatic?.();
+      return {
+        ok: true,
+        steps: 0,
+        messages: 0,
+        automatic: 0,
+        choice: false,
+        drift: false,
+        loading: player.scenarioLoading === true,
+        halted: player.event?.kind === 4,
+        automaticRunning: true,
+        route: player.safeState?.scenarioRoute ?? "",
+        scenarioName: player.safeState?.scenarioName ?? "",
+        scenarioIndex: player.safeState?.scenarioIndex ?? -1,
+        scenarioCount: player.safeState?.scenarioCount ?? 0,
+        eventKind: player.event?.kind ?? 0,
+        eventCount: player.event?.eventCount ?? 0,
+      };
+    }
+    player.cancelAutoSkip?.();
+    let steps = 0;
+    let messages = 0;
+    let automatic = 0;
+    let choice = false;
+    let drift = false;
+    for (; steps < stepLimit; steps += 1) {
+      if (player.scenarioLoading === true || player.automaticRunning === true) {
+        break;
+      }
+      const route = player.safeState?.scenarioRoute ?? "";
+      if (route !== expectedRoute) {
+        drift = true;
+        break;
+      }
+      const kind = player.event?.kind ?? 0;
+      if (kind === 4) {
+        break;
+      }
+      if (kind === 2) {
+        choice = true;
+        break;
+      }
+      let ok = false;
+      if (kind === 1) {
+        ok = player.advanceMessage?.() === 1 && player.step?.() === true;
+        messages += 1;
+      } else {
+        ok = player.step?.() === true;
+        automatic += 1;
+      }
+      if (!ok) {
+        break;
+      }
+    }
+    return {
+      ok: true,
+      steps,
+      messages,
+      automatic,
+      choice,
+      drift,
+      loading: player.scenarioLoading === true,
+      halted: player.event?.kind === 4,
+      automaticRunning: player.automaticRunning === true,
+      route: player.safeState?.scenarioRoute ?? "",
+      scenarioName: player.safeState?.scenarioName ?? "",
+      scenarioIndex: player.safeState?.scenarioIndex ?? -1,
+      scenarioCount: player.safeState?.scenarioCount ?? 0,
+      eventKind: player.event?.kind ?? 0,
+      eventCount: player.event?.eventCount ?? 0,
+    };
+  }, { expectedRoute: routeId, stepLimit: Math.max(1, maxSteps) });
+}
+
+async function advanceRouteUntilContentSignal(page, routeId, scenarioName, delayMs, options = {}) {
+  const requireVisual = options.requireVisual === true;
+  const maxAdvances = 96;
+  let last = null;
+  for (let advances = 0; advances <= maxAdvances; advances += 1) {
+    last = await captureRouteScenario(page);
+    if (last.route !== routeId || last.name !== scenarioName) {
+      throw new Error(
+        `route smoke drifted from ${routeId}/${scenarioName} to ${last.route}/${last.name}`,
+      );
+    }
+    if (last.loading) {
+      await page.waitForTimeout(delayMs);
+      continue;
+    }
+    if (requireVisual ? last.visualSignal : last.contentSignal) {
+      return { ...last, advances };
+    }
+    if (last.eventKind === 4) {
+      break;
+    }
+    await advanceRuntime(page, 1, delayMs);
+  }
+  throw new Error(
+    `route ${routeId} scenario ${scenarioName} did not reach a ${requireVisual ? "visual" : "content"} signal; last=${JSON.stringify(last)}`,
+  );
+}
+
+async function waitForRouteScenario(page, routeId, scenarioName, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const observed = await captureRouteScenario(page);
+    if (
+      observed.route === routeId
+      && observed.name === scenarioName
+      && observed.loading === false
+      && observed.eventKind > 0
+    ) {
+      return observed;
+    }
+    await page.waitForTimeout(20);
+  }
+  const actual = await page.evaluate(() => {
+    const player = window.__sakuraActiveInstall?.player ?? null;
+    return {
+      route: player?.safeState?.scenarioRoute ?? "",
+      name: player?.safeState?.scenarioName ?? "",
+      index: player?.safeState?.scenarioIndex ?? -1,
+      loading: player?.scenarioLoading === true,
+      eventKind: player?.event?.kind ?? 0,
+      eventCount: player?.event?.eventCount ?? 0,
+    };
+  });
+  throw new Error(
+    `route ${routeId} scenario ${scenarioName} did not become active; actual=${JSON.stringify(actual)}`,
+  );
+}
+
+async function captureRouteScenario(page) {
+  return await page.evaluate(() => {
+    const player = window.__sakuraActiveInstall?.player ?? null;
+    const canvas = document.getElementById("stage");
+    const ctx = canvas?.getContext?.("2d", { willReadFrequently: true }) ?? null;
+    const canvasMaxLuma = ctx ? (() => {
+      const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let max = 0;
+      for (let index = 0; index < data.length; index += 4) {
+        const luma = data[index] + data[index + 1] + data[index + 2];
+        if (luma > max) {
+          max = luma;
+        }
+      }
+      return max;
+    })() : null;
+    const visualSignal = canvasMaxLuma > 0;
+    const contentSignal = Boolean(
+      visualSignal
+      || player?.scene?.currentName
+      || (player?.safeState?.bgmAssetReady ?? 0) > 0
+      || (player?.safeState?.sceneObjectAssetReady ?? 0) > 0
+      || (player?.safeState?.sceneMovieCount ?? 0) > 0
+      || player?.event?.kind === 1
+    );
+    return {
+      route: player?.safeState?.scenarioRoute ?? "",
+      name: player?.safeState?.scenarioName ?? "",
+      index: player?.safeState?.scenarioIndex ?? -1,
+      count: player?.safeState?.scenarioCount ?? 0,
+      loading: player?.scenarioLoading === true,
+      eventKind: player?.event?.kind ?? 0,
+      eventCount: player?.event?.eventCount ?? 0,
+      backgroundName: player?.scene?.currentName ?? null,
+      bgmAssetReady: player?.safeState?.bgmAssetReady ?? 0,
+      sceneObjectAssetReady: player?.safeState?.sceneObjectAssetReady ?? 0,
+      sceneObjectCount: player?.scene?.sprites?.sceneObjects?.size ?? 0,
+      movieCount: player?.safeState?.sceneMovieCount ?? 0,
+      scenarioTransitions: player?.safeState?.scenarioTransitions ?? 0,
+      canvasMaxLuma,
+      contentSignal,
+      visualSignal,
+    };
+  });
+}
+
+async function seedSaveSlot(page, slot, timeoutMs) {
+  await waitForStableScenario(page, timeoutMs);
+  const result = await page.evaluate((slotIndex) => {
+    const player = window.__sakuraActiveInstall?.player ?? null;
+    return player?.saveToStorage?.(slotIndex) ?? { ok: false, reason: "no_player", bytes: 0 };
+  }, slot);
+  if (!result?.ok) {
+    throw new Error(`save slot ${slot} seed failed: ${result?.reason ?? "unknown"}`);
+  }
+  return result;
+}
+
+async function seedDummySaveSlot(page, slot) {
+  const result = await page.evaluate((slotIndex) => {
+    const storage = window.localStorage;
+    if (!storage) {
+      return { ok: false, reason: "storage_unavailable" };
+    }
+    const normalized = Math.max(0, Math.min(999, Math.trunc(Number(slotIndex) || 0)));
+    const record = {
+      version: 14,
+      savedAt: "2026-06-14 00:00:00",
+      slot: normalized,
+      scenarioName: "00_op_01",
+      event: {
+        eventCount: 45,
+        text: "dummy save record for title Load UI validation",
+      },
+    };
+    const encoded = JSON.stringify(record);
+    storage.setItem(`sakura.session.slot.${normalized}`, encoded);
+    if (normalized === 0) {
+      storage.setItem("sakura.session.slot.0", encoded);
+    }
+    return { ok: true, reason: "ok", slot: normalized };
+  }, slot);
+  if (!result?.ok) {
+    throw new Error(`dummy save slot ${slot} seed failed: ${result?.reason ?? "unknown"}`);
+  }
+  return result;
 }
 
 async function advanceUntilScenario(page, limit, targetScenario, delayMs) {
@@ -1587,6 +2536,46 @@ async function clickConfigControl(page, controlName) {
   }, controlName);
   if (!point) {
     throw new Error(`config control ${controlName} is not clickable`);
+  }
+  await page.mouse.click(point.clientX, point.clientY);
+  await page.waitForTimeout(150);
+}
+
+async function clickDialogControl(page, controlName) {
+  const point = await page.evaluate((name) => {
+    const canvas = document.getElementById("stage");
+    const inst = window.__sakuraActiveInstall ?? null;
+    const state = inst?.dialogState ?? null;
+    const skin = inst?.dialogWindow ?? null;
+    const action = String(name).toLowerCase();
+    if (
+      !canvas
+      || state?.open !== true
+      || (action !== "yes" && action !== "no")
+      || !skin?.buttons?.yes
+      || !skin?.buttons?.no
+      || !skin?.panels?.[state.kind]
+    ) {
+      return null;
+    }
+    const panel = skin.panels[state.kind];
+    const yes = skin.buttons.yes;
+    const no = skin.buttons.no;
+    const stateWidth = Math.floor(yes.width / 4);
+    const totalWidth = stateWidth * 2 + 20;
+    const yesX = 279 + Math.round((panel.width - totalWidth) / 2);
+    const noX = yesX + stateWidth + 20;
+    const button = action === "yes" ? yes : no;
+    const x = (action === "yes" ? yesX : noX) + stateWidth / 2;
+    const y = 392 + button.height / 2;
+    const rect = canvas.getBoundingClientRect();
+    return {
+      clientX: rect.left + x * rect.width / canvas.width,
+      clientY: rect.top + y * rect.height / canvas.height,
+    };
+  }, controlName);
+  if (!point) {
+    throw new Error(`dialog control ${controlName} is not clickable`);
   }
   await page.mouse.click(point.clientX, point.clientY);
   await page.waitForTimeout(150);

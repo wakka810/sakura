@@ -174,6 +174,41 @@ try {
   instance.exports.sakura_dealloc(audioPtr, audio.length);
 }
 
+const gdb = buildSyntheticGdb(["white", "makuralogo", "att01", "att02", "ev4001a"]);
+const gdbPtr = instance.exports.sakura_alloc(gdb.length);
+try {
+  new Uint8Array(instance.exports.memory.buffer, gdbPtr, gdb.length).set(gdb);
+  const viewedLen = instance.exports.sakura_gdb_viewed_image_names_len(gdbPtr, gdb.length);
+  const expected = "white\0makuralogo\0att01\0att02\0ev4001a\0";
+  if (viewedLen !== expected.length) {
+    throw new Error(`unexpected GDB viewed image length ${viewedLen}`);
+  }
+  const viewedPtr = instance.exports.sakura_alloc(viewedLen);
+  try {
+    const written = instance.exports.sakura_gdb_viewed_image_names_write(
+      gdbPtr,
+      gdb.length,
+      viewedPtr,
+      viewedLen,
+    );
+    if (written !== viewedLen) {
+      throw new Error(`unexpected GDB viewed image write length ${written}`);
+    }
+    const packet = new Uint8Array(
+      instance.exports.memory.buffer,
+      viewedPtr,
+      viewedLen,
+    ).slice();
+    if (new TextDecoder("ascii").decode(packet) !== expected) {
+      throw new Error("GDB viewed image packet mismatch");
+    }
+  } finally {
+    instance.exports.sakura_dealloc(viewedPtr, viewedLen);
+  }
+} finally {
+  instance.exports.sakura_dealloc(gdbPtr, gdb.length);
+}
+
 for (const [label, payload, assertSummary] of [
   [
     "scenario",
@@ -494,6 +529,30 @@ function buildSyntheticBgiAudio() {
   data.set(new TextEncoder().encode("bw  "), 4);
   data.set(ogg, 8);
   return data;
+}
+
+function buildSyntheticGdb(names) {
+  const out = [];
+  appendAscii(out, "BURIKO GDB 3.00");
+  out.push(0);
+  while (out.length < 0x80) {
+    out.push(0);
+  }
+  appendU32(out, names.length);
+  for (const name of names) {
+    appendAscii(out, name);
+    out.push(0);
+  }
+  appendU32(out, 1);
+  appendAscii(out, "MakerLogo");
+  out.push(0);
+  return new Uint8Array(out);
+}
+
+function appendAscii(out, value) {
+  for (let index = 0; index < value.length; index += 1) {
+    out.push(value.charCodeAt(index) & 0xff);
+  }
 }
 
 function buildSyntheticScenarioScript() {

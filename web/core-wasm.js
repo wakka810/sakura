@@ -215,6 +215,51 @@ export function createCore(exports) {
         deallocWasm(exports, ptr, payload.byteLength);
       }
     },
+    gdbViewedImageNames: (payload) => {
+      if (
+        typeof exports.sakura_gdb_viewed_image_names_len !== "function"
+        || typeof exports.sakura_gdb_viewed_image_names_write !== "function"
+      ) {
+        return null;
+      }
+      const ptr = allocWasm(exports, payload.byteLength);
+      try {
+        new Uint8Array(exports.memory.buffer, ptr, payload.byteLength).set(payload);
+        const packetLength = exports.sakura_gdb_viewed_image_names_len(
+          ptr,
+          payload.byteLength,
+        );
+        if (packetLength === error) {
+          return null;
+        }
+        if (packetLength === 0) {
+          return [];
+        }
+
+        const packetPtr = allocWasm(exports, packetLength);
+        try {
+          const written = exports.sakura_gdb_viewed_image_names_write(
+            ptr,
+            payload.byteLength,
+            packetPtr,
+            packetLength,
+          );
+          if (written !== packetLength) {
+            return null;
+          }
+          const packet = new Uint8Array(
+            exports.memory.buffer,
+            packetPtr,
+            packetLength,
+          ).slice();
+          return parseNulSeparatedAscii(packet);
+        } finally {
+          deallocWasm(exports, packetPtr, packetLength);
+        }
+      } finally {
+        deallocWasm(exports, ptr, payload.byteLength);
+      }
+    },
     movieDecoderCreate: (payload) => {
       const ptr = allocWasm(exports, payload.byteLength);
       try {
@@ -398,6 +443,18 @@ export function createCore(exports) {
       } finally {
         deallocWasm(exports, payloadPtr, payload.byteLength);
         deallocWasm(exports, namePtr, name.byteLength);
+      }
+    },
+    runtimeMountStringsDb: (handle, payload) => {
+      if (typeof exports.sakura_runtime_mount_strings_db !== "function") {
+        return 0;
+      }
+      const ptr = allocWasm(exports, payload.byteLength);
+      try {
+        new Uint8Array(exports.memory.buffer, ptr, payload.byteLength).set(payload);
+        return exports.sakura_runtime_mount_strings_db(handle, ptr, payload.byteLength);
+      } finally {
+        deallocWasm(exports, ptr, payload.byteLength);
       }
     },
     runtimeScriptIndexByName: (handle, name) => {
@@ -1224,4 +1281,20 @@ function decodeAsciiBytes(bytes) {
     }
   }
   return new TextDecoder("utf-8").decode(bytes.slice(0, end));
+}
+
+function parseNulSeparatedAscii(packet) {
+  const decoder = new TextDecoder("ascii");
+  const values = [];
+  let cursor = 0;
+  for (let index = 0; index < packet.byteLength; index += 1) {
+    if (packet[index] !== 0) {
+      continue;
+    }
+    if (index > cursor) {
+      values.push(decoder.decode(packet.slice(cursor, index)).toLowerCase());
+    }
+    cursor = index + 1;
+  }
+  return values;
 }

@@ -421,7 +421,6 @@ fn executes_local_system_scripts_with_host_without_asset_output() -> TestResult<
                         user_return_events += 1;
                     }
                     SystemVmEvent::Halted => {
-                        last_user_call_shape = None;
                         halted_events += 1;
                         completed_scripts += 1;
                         break;

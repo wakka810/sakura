@@ -139,6 +139,18 @@ pub unsafe extern "C" fn sakura_runtime_mount_dsc_script(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn sakura_runtime_mount_strings_db(
+    handle: u32,
+    ptr: *const u8,
+    len: usize,
+) -> u32 {
+    let Some(data) = (unsafe { slice_from_abi(ptr, len) }) else {
+        return 0;
+    };
+    mount_strings_db(handle, data).map_or(0, |_| 1)
+}
+
+#[no_mangle]
 pub extern "C" fn sakura_runtime_boot_packet_len() -> usize {
     RUNTIME_BOOT_PACKET_LEN
 }
@@ -677,6 +689,13 @@ fn mount_dsc_script(handle: u32, name: &[u8], payload: &[u8]) -> Result<crate::S
     let mut store = lock_store()?;
     let runtime = store.runtime_mut(handle)?;
     runtime.mount_dsc_script_payload(name, payload)
+}
+
+fn mount_strings_db(handle: u32, data: &[u8]) -> Result<()> {
+    let mut store = lock_store()?;
+    let runtime = store.runtime_mut(handle)?;
+    runtime.mount_strings_db(data.to_vec());
+    Ok(())
 }
 
 fn write_boot_packet(handle: u32, out: &mut [u8]) -> Result<()> {

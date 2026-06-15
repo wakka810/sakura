@@ -377,6 +377,9 @@ fn event_payload(event: &SessionEvent<'_>) -> Vec<u8> {
         }
         SessionEvent::Wait { .. } => {}
         SessionEvent::MessageControl { .. } => {}
+        SessionEvent::MessageStyle { style, .. } => {
+            write_i32_values(&mut payload, &style.int_args);
+        }
         SessionEvent::Halted => {}
     }
     payload
@@ -434,6 +437,11 @@ fn write_event_lengths(out: &mut [u8], event: &SessionEvent<'_>, payload_len: us
             write_u32(out, 24, control.opcode);
             write_u32(out, 28, saturating_u32(control.offset));
         }
+        SessionEvent::MessageStyle { style, .. } => {
+            write_u32(out, 16, saturating_u32(style.int_args.len()));
+            write_u32(out, 24, style.opcode);
+            write_u32(out, 28, saturating_u32(style.offset));
+        }
         SessionEvent::Halted => {}
     }
     write_u32(out, 32, saturating_u32(payload_len));
@@ -480,6 +488,7 @@ fn session_event_code(event: &SessionEvent<'_>) -> u32 {
         SessionEvent::Wait { .. } => 6,
         SessionEvent::Sound { .. } => 7,
         SessionEvent::MessageControl { .. } => 8,
+        SessionEvent::MessageStyle { .. } => 9,
     }
 }
 

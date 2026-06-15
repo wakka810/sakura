@@ -1,6 +1,7 @@
 use crate::archive::ArcIndex;
 use crate::audio::unwrap_bgi_audio;
 use crate::dsc::decompress_dsc;
+use crate::gdb::{gdb_viewed_image_names_nul_len, gdb_write_viewed_image_names};
 use crate::image::{cbg_to_rgba, decode_cbg, read_cbg_metadata};
 use crate::install_manifest::InstallManifest;
 use crate::render::RgbaSurface;
@@ -307,6 +308,30 @@ pub unsafe extern "C" fn sakura_bgi_audio_ogg_write(
     }
     out[..ogg.len()].copy_from_slice(ogg);
     ogg.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sakura_gdb_viewed_image_names_len(ptr: *const u8, len: usize) -> usize {
+    let Some(data) = (unsafe { slice_from_abi(ptr, len) }) else {
+        return FFI_SIZE_ERROR;
+    };
+    gdb_viewed_image_names_nul_len(data).unwrap_or(FFI_SIZE_ERROR)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sakura_gdb_viewed_image_names_write(
+    ptr: *const u8,
+    len: usize,
+    out_ptr: *mut u8,
+    out_len: usize,
+) -> usize {
+    let Some(data) = (unsafe { slice_from_abi(ptr, len) }) else {
+        return FFI_SIZE_ERROR;
+    };
+    let Some(out) = (unsafe { mutable_slice_from_abi(out_ptr, out_len) }) else {
+        return FFI_SIZE_ERROR;
+    };
+    gdb_write_viewed_image_names(data, out).unwrap_or(FFI_SIZE_ERROR)
 }
 
 #[no_mangle]

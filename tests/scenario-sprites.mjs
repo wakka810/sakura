@@ -14,18 +14,21 @@ import {
   beginScenarioSpriteControlMotion,
   stopScenarioSpriteControlMotion,
 } from "../web/scenario-sprite-motion.js";
+import { paintScenarioScene } from "../web/session-player.js";
 import {
   beginScenarioBackgroundObjectRemoval,
   fadeScenarioSceneObject,
   finishScenarioSceneObjectTransitions,
   moveScenarioSceneObject,
   paintScenarioSceneObjects,
+  removeScenarioSceneObject,
   restoreScenarioSceneObjectTransition,
   scenarioSceneObjectFrameIndex,
   setScenarioSceneObject,
   snapshotScenarioSceneObjects,
   startScenarioSceneObjectDirectionalMotion,
   stopScenarioSceneObjectMotion,
+  stopScenarioSceneObjectTransitions,
 } from "../web/scenario-scene-objects.js";
 import {
   beginScenarioAperture,
@@ -39,6 +42,8 @@ import {
   setScenarioApertureProgress,
   snapshotScenarioAperture,
 } from "../web/scenario-aperture.js";
+import { createScenarioFilterState } from "../web/scenario-filter.js";
+import { createScenarioMovieState } from "../web/scenario-movies.js";
 import {
   createScenarioRainState,
   hasActiveScenarioRain,
@@ -216,6 +221,64 @@ for (const placement of [
   }
 }
 
+const realDocumentForCompositor = globalThis.document;
+globalThis.document = {
+  createElement() {
+    return {
+      height: 0,
+      width: 0,
+      getContext() {
+        return {
+          putImageData() {},
+        };
+      },
+    };
+  },
+};
+const compositorState = createScenarioSpriteState();
+setScenarioSceneObject(compositorState, 30, sceneObjectImage, {
+  assetName: "ED01_staff_makoto",
+  x: -640,
+  y: -360,
+  alpha: 1,
+});
+const compositorDrawCalls = [];
+paintScenarioScene(
+  {
+    globalAlpha: 1,
+    globalCompositeOperation: "source-over",
+    fillRect() {},
+    save() {},
+    restore() {},
+    translate() {},
+    drawImage: (...args) => compositorDrawCalls.push(args),
+  },
+  { width: 1280, height: 720 },
+  {
+    scene: {
+      aperture: createScenarioApertureState(),
+      current: null,
+      currentName: null,
+      filter: createScenarioFilterState(),
+      movies: createScenarioMovieState(null),
+      progress: 1,
+      rain: createScenarioRainState(),
+      sprites: compositorState,
+      target: null,
+      targetName: null,
+      transitionMap: null,
+      transitionMapName: null,
+      transitioning: false,
+    },
+  },
+);
+globalThis.document = realDocumentForCompositor;
+if (compositorDrawCalls.length !== 1) {
+  throw new Error(
+    `paintScenarioScene did not composite scene objects ${JSON.stringify(compositorDrawCalls)}`,
+  );
+}
+
 const motionDrawState = createScenarioSpriteState();
 setScenarioSceneObject(motionDrawState, 5, sceneObjectImage, {
   assetName: "sp0044b_ani_l",
@@ -262,6 +325,43 @@ if (!stopScenarioSceneObjectMotion(motionDrawState, 5)) {
 const stoppedMotionSnapshot = snapshotScenarioSceneObjects(motionDrawState, 1010)[0];
 if (stoppedMotionSnapshot.motion !== null) {
   throw new Error(`scene object motion stop left snapshot state ${JSON.stringify(stoppedMotionSnapshot)}`);
+}
+
+const removalState = createScenarioSpriteState();
+setScenarioSceneObject(removalState, 12, sceneObjectImage, {
+  assetName: "ev0013b_l",
+  x: -477,
+  y: 575,
+  z: 259,
+  priority: 10,
+});
+moveScenarioSceneObject(
+  removalState,
+  12,
+  { x: 0, y: 0, z: 1280, alpha: 1 },
+  6000,
+  { now: 1000 },
+);
+startScenarioSceneObjectDirectionalMotion(
+  removalState,
+  12,
+  [0, 0, 0, 0, 8, 128, 5],
+  1000,
+);
+beginScenarioBackgroundObjectRemoval(removalState, 1000);
+if (!removeScenarioSceneObject(removalState, 12)) {
+  throw new Error("scene object removal rejected an active object");
+}
+if (
+  removalState.sceneObjects.has(12)
+  || removalState.sceneObjectTransitions.has(12)
+  || removalState.sceneObjectMotions.has(12)
+  || removalState.sceneObjectBackgroundTransition?.ids.has(12)
+) {
+  throw new Error("scene object removal left dependent state behind");
+}
+if (removeScenarioSceneObject(removalState, 12)) {
+  throw new Error("scene object removal reported a second removal");
 }
 
 const realDocument = globalThis.document;
@@ -409,6 +509,49 @@ if (
   || restoredMidpoint.transition?.remainingMs !== 1500
 ) {
   throw new Error(`scene object transition restored wrong phase ${JSON.stringify(restoredMidpoint)}`);
+}
+
+const stopTransitionState = createScenarioSpriteState();
+setScenarioSceneObject(stopTransitionState, 0, image, {
+  assetName: "ED05_BG",
+  x: 0,
+  y: 0,
+  z: 0,
+});
+setScenarioSceneObject(stopTransitionState, 30, image, {
+  assetName: "ED05_staff_past",
+  x: -640,
+  y: -360,
+  z: 900,
+});
+moveScenarioSceneObject(
+  stopTransitionState,
+  0,
+  { x: 100, y: 50, z: 0, alpha: 1 },
+  2000,
+  { now: 1000 },
+);
+moveScenarioSceneObject(
+  stopTransitionState,
+  30,
+  { x: -640, y: -720, z: 900, alpha: 1 },
+  4000,
+  { now: 1000 },
+);
+const stoppedTransitionCount = stopScenarioSceneObjectTransitions(stopTransitionState, 2000);
+const stoppedTransitions = snapshotScenarioSceneObjects(stopTransitionState, 2000);
+const stoppedBg = stoppedTransitions.find((object) => object.id === 0);
+const stoppedStaff = stoppedTransitions.find((object) => object.id === 30);
+if (
+  stoppedTransitionCount !== 2
+  || stopTransitionState.sceneObjectTransitions.size !== 0
+  || stoppedBg?.x !== 50
+  || stoppedBg?.y !== 25
+  || stoppedStaff?.y !== -450
+  || stoppedBg.transition !== null
+  || stoppedStaff.transition !== null
+) {
+  throw new Error(`scene object transition stop drifted ${JSON.stringify(stoppedTransitions)}`);
 }
 
 finishScenarioSceneObjectTransitions(state, 7000);

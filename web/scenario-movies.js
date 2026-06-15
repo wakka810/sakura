@@ -1,9 +1,11 @@
 const DEFAULT_FRAME_RATE = 30;
-const MAX_MOVIE_BYTES = 32 * 1024 * 1024;
+// The shipped opening movie `op.mpg` is 166,502,404 bytes. Keep a bounded cap
+// above that asset while rejecting accidental archive-sized inputs.
+const MAX_MOVIE_BYTES = 192 * 1024 * 1024;
 const MAX_CATCH_UP_FRAMES = 240;
 
 export function createScenarioMovieState(core) {
-  return { core, objects: new Map() };
+  return { core, objects: new Map(), completionWaiters: new Map() };
 }
 
 export function setScenarioMovieObject(
@@ -13,6 +15,7 @@ export function setScenarioMovieObject(
   {
     canvasFactory = defaultCanvasFactory,
     elapsedMs = 0,
+    loop = true,
     now = performance.now(),
   } = {},
 ) {
@@ -29,6 +32,7 @@ export function setScenarioMovieObject(
     decoderHandle: 0,
     frameRate: DEFAULT_FRAME_RATE,
     decodedFrames: 0,
+    loop: loop === true,
     startedAt: now - boundedElapsed(elapsedMs),
   };
   if (!initializeDecoder(state, movie, payload)) {
@@ -46,10 +50,12 @@ export function clearScenarioMovieObject(state, id) {
   const key = boundedId(id);
   const movie = state.objects.get(key);
   if (!movie) {
+    resolveScenarioMovieWaiters(state, key);
     return false;
   }
   state.core.movieDecoderDestroy(movie.decoderHandle);
   state.objects.delete(key);
+  resolveScenarioMovieWaiters(state, key);
   return true;
 }
 
@@ -85,8 +91,11 @@ export function advanceScenarioMovies(
         movie.decodedFrames += 1;
         remaining -= 1;
         frameChanged = true;
-      } else if (resets >= 1 || !resetDecoder(state, movie)) {
+      } else if (!movie.loop || resets >= 1 || !resetDecoder(state, movie)) {
         clearScenarioMovieObject(state, id);
+        sceneObjectState.sceneObjects.delete(id);
+        sceneObjectState.sceneObjectTransitions?.delete(id);
+        sceneObjectState.sceneObjectMotions?.delete(id);
         active = false;
         break;
       } else {
@@ -113,6 +122,29 @@ export function hasActiveScenarioMovies(state, sceneObjectState) {
 export function scenarioMovieElapsedMs(state, id, now = performance.now()) {
   const movie = state.objects.get(boundedId(id));
   return movie ? boundedElapsed(now - movie.startedAt) : 0;
+}
+
+export function waitForScenarioMovieObjectEnd(state, id) {
+  const key = boundedId(id);
+  if (!state.objects.has(key)) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const waiters = state.completionWaiters.get(key) ?? new Set();
+    waiters.add(resolve);
+    state.completionWaiters.set(key, waiters);
+  });
+}
+
+function resolveScenarioMovieWaiters(state, id) {
+  const waiters = state.completionWaiters.get(id);
+  if (!waiters) {
+    return;
+  }
+  state.completionWaiters.delete(id);
+  for (const resolve of waiters) {
+    resolve();
+  }
 }
 
 function resetDecoder(state, movie) {

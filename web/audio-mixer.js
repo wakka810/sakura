@@ -261,6 +261,11 @@ export function createAudioMixer() {
       resetVoiceChannel(channelIndex);
       return active;
     },
+    stopVoices() {
+      const active = state.voiceActiveChannels > 0;
+      resetVoice();
+      return active;
+    },
     waitForVoice(channel) {
       const slot = voiceChannels[clampSfxChannel(channel)];
       if (slot.audio === null) {

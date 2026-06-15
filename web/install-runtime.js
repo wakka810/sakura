@@ -9,9 +9,10 @@ import {
 import { countSoundTracePrefix, safeServiceTraceState } from "./service-trace-state.js";
 import { emptyHostState } from "./host-state.js";
 import { createInitialScenarioPlayer } from "./session-player.js";
-import { normalizeScenarioRoute } from "./scenario-routes.js";
+import { normalizeScenarioName, normalizeScenarioRoute } from "./scenario-routes.js";
 import { createAudioMixer } from "./audio-mixer.js";
 import { PRIORITY_GRAPH_SERVICE_IDS } from "./graph-renderer.js";
+import { TITLE_MUSIC_TRACKS } from "./title-music.js";
 
 const PAYLOAD_KIND_DSC = 1;
 const PAYLOAD_KIND_COMPRESSED_BG = 2;
@@ -47,6 +48,8 @@ const SYSTEM_RUNTIME_TIMING_QUEUED = 105;
 const RUNTIME_AUDIO_FINALIZE_VERSION = 2;
 const DEFAULT_ENTRY_SCRIPT_NAME_TEXT = "scrdrv._bp";
 const ENTRY_SCRIPT_NAME = new TextEncoder().encode(DEFAULT_ENTRY_SCRIPT_NAME_TEXT);
+const STRINGS_DB_NAME_TEXT = "BGI.gdb";
+const STRINGS_DB_NAME = new TextEncoder().encode(STRINGS_DB_NAME_TEXT);
 const LOCAL_GRAPH9C_PROBE_OFFSET = 0x12df;
 const LOCAL_GRAPH88_PROBE_OFFSET = 0x197;
 const RUNTIME_SESSION_TICK_MS = 50;
@@ -170,6 +173,7 @@ export async function mountServerInstall(core, hooks = {}) {
     exeCount: payload.exeCount ?? 0,
     arcCount: payload.archiveCount ?? 0,
     arcEntries: payload.entryCount ?? 0,
+    gdbCount: payload.sidecarCount ?? 0,
     arcIndexBytes: 0,
     invalidArcCount: 0,
   }, core, hooks);
@@ -178,10 +182,22 @@ export async function mountServerInstall(core, hooks = {}) {
 async function mountLocalFileIterable(files, core, hooks) {
   files = await orderInstallFiles(files, core);
   const catalog = createLocalCatalog();
-  const summary = { exeCount: 0, arcCount: 0, arcEntries: 0, arcIndexBytes: 0, invalidArcCount: 0 };
+  const summary = {
+    exeCount: 0,
+    arcCount: 0,
+    arcEntries: 0,
+    gdbCount: 0,
+    arcIndexBytes: 0,
+    invalidArcCount: 0,
+  };
   for await (const file of files) {
     if (file.name === "BGI.exe") {
       summary.exeCount += 1;
+    }
+    if (isRootStringsDbFile(file)) {
+      catalog.mountSidecar(file);
+      summary.gdbCount += 1;
+      continue;
     }
     if (file.name.toLowerCase().endsWith(".arc")) {
       const prefix = await readArcIndexPrefix(file);
@@ -203,6 +219,20 @@ async function mountLocalFileIterable(files, core, hooks) {
     }
   }
   return mountCatalog(catalog, summary, core, hooks);
+}
+
+function isRootStringsDbFile(file) {
+  if (file?.name?.toLowerCase?.() !== STRINGS_DB_NAME_TEXT.toLowerCase()) {
+    return false;
+  }
+  const relativePath = typeof file.webkitRelativePath === "string"
+    ? file.webkitRelativePath
+    : "";
+  if (relativePath.length === 0) {
+    return true;
+  }
+  const parts = relativePath.split(/[\\/]+/).filter(Boolean);
+  return parts.length <= 2 && parts.at(-1)?.toLowerCase() === STRINGS_DB_NAME_TEXT.toLowerCase();
 }
 
 export function syncMountedAudioState(mounted) {
@@ -234,12 +264,16 @@ async function mountCatalog(catalog, summary, core, hooks) {
   const cbgProbe = await probeLocalCbg(catalog, core);
   const audioProbe = await probeLocalAudio(catalog, core);
   const titleImage = await loadTitleImage(catalog, core);
-  const menuButtons = await loadMenuButtons(catalog, core);
+  const titleButtonSprites = await loadTitleButtonSprites(catalog, core);
+  const titleMusicSprites = await loadTitleMusicSprites(catalog, core);
+  const menuButtons = titleMenuButtons(titleButtonSprites);
   const bootScreens = await loadBootScreens(catalog, core);
   const messageWindow = await loadMessageWindow(catalog, core);
   const logWindow = await loadLogWindow(catalog, core);
   const userDataWindow = await loadUserDataWindow(catalog, core);
   const configWindow = await loadConfigWindow(catalog, core);
+  const dialogWindow = await loadDialogWindow(catalog, core);
+  const gdbState = await loadGdbState(catalog, core);
   const audioMixer = createAudioMixer();
   const playerState = { active: false };
   const fullSummary = {
@@ -262,6 +296,10 @@ async function mountCatalog(catalog, summary, core, hooks) {
     localRuntimeAudioPostStage: 0,
     localRuntimeAudioFinalizeVersion: RUNTIME_AUDIO_FINALIZE_VERSION,
     localRuntimeAudioProbeOggBytes: audioProbe.ogg?.byteLength ?? 0,
+    localRuntimeStringsDbReady: Number(gdbState.payload !== null),
+    localRuntimeStringsDbBytes: gdbState.payload?.byteLength ?? 0,
+    localRuntimeGdbViewedImageCount: gdbState.viewedImages.size,
+    localRuntimeGdbViewedImageParseOk: gdbState.parseOk,
     localRuntimeScenarioSessionReady: Number(playerState.active === true),
     localRuntimeScenarioSessionEventKind: playerState.eventKind ?? 0,
     localRuntimeScenarioSessionMode: playerState.mode ?? 0,
@@ -278,6 +316,8 @@ async function mountCatalog(catalog, summary, core, hooks) {
     localSystemRuntimeReady: 0,
     localSystemRuntimeManifestCount: 0,
     localSystemRuntimeBootPayloadReady: 0,
+    localSystemRuntimeStringsDbMounted: 0,
+    localSystemRuntimeStringsDbBytes: 0,
     localSystemRuntimeDscScriptCount: 0,
     localSystemRuntimeScriptCount: 0,
     localSystemRuntimeSystemScriptCount: 0,
@@ -411,6 +451,7 @@ async function mountCatalog(catalog, summary, core, hooks) {
   };
   const mounted = {
     catalog,
+    core,
     bootImage: runtimeProbeImagePreviewEnabled() ? cbgProbe.image : null,
     audioOgg: audioProbe.ogg,
     audio: false,
@@ -425,12 +466,17 @@ async function mountCatalog(catalog, summary, core, hooks) {
     destroyed: false,
     scenarioPreviewEnabled: runtimeScenarioPreviewEnabled(),
     titleImage,
+    titleButtonSprites,
+    titleMusicSprites,
     menuButtons,
     bootScreens,
     messageWindow,
     logWindow,
     userDataWindow,
     configWindow,
+    dialogWindow,
+    stringsDb: gdbState.payload,
+    gdbViewedImages: gdbState.viewedImages,
     bootPhase: 0,
     stage: runtimeScenarioPreviewEnabled()
       ? "scenario"
@@ -446,6 +492,7 @@ async function mountCatalog(catalog, summary, core, hooks) {
         renderedLocalImage: fullSummary.localRuntimeRenderProbe === 1,
         audioReady: fullSummary.localRuntimeAudioReady === 1,
         audioMixer: audioMixer.state(),
+        gdbViewedImageCount: gdbState.viewedImages.size,
         player: playerState,
         serviceTrace: { ready: false, total: 0, recorded: 0, events: [] },
         systemHost: emptyHostState(),
@@ -482,7 +529,6 @@ async function mountCatalog(catalog, summary, core, hooks) {
     maxInstructionsPerEvent,
   ).then((packet) => {
     if (packet === null) {
-      mounted.summary.localSystemRuntimeNotifyErrors += 1;
       notifyRuntimeUpdate(hooks, mounted);
       return null;
     }
@@ -491,12 +537,23 @@ async function mountCatalog(catalog, summary, core, hooks) {
     notifyRuntimeUpdate(hooks, mounted);
     return packet;
   });
-  mounted.startScenario = () => {
+  mounted.startScenario = (options = {}) => {
     if (mounted.stage === "scenario" && (mounted.player || mounted.scenarioPlayerQueued)) {
       return mounted.scenarioPlayerPromise ?? Promise.resolve(mounted.player ?? null);
     }
     mounted.stage = "scenario";
-    return queueScenarioPlayer(catalog, core, mounted, hooks);
+    return queueScenarioPlayer(catalog, core, mounted, hooks, options);
+  };
+  mounted.startScenarioRoute = (route, scenarioName = "") => {
+    mounted.player?.destroy?.();
+    mounted.player = null;
+    mounted.scenarioPlayerQueued = false;
+    mounted.scenarioPlayerPromise = null;
+    mounted.stage = "scenario";
+    return queueScenarioPlayer(catalog, core, mounted, hooks, {
+      route,
+      scenarioName,
+    });
   };
   mounted.loadScenarioFromStorage = async (slotIndex = 0) => {
     let loadResult = null;
@@ -550,6 +607,8 @@ function startSystemRuntime(catalog, core, mounted, hooks) {
           mounted.summary.localSystemRuntimeManifestCount = runtimeState.manifestCount;
           mounted.summary.localSystemRuntimeBootPayloadReady = runtimeState.bootPayloadReady;
           mounted.summary.localSystemRuntimeDscScriptCount = runtimeState.dscScripts;
+          mounted.summary.localSystemRuntimeStringsDbMounted = runtimeState.stringsDbMounted ?? 0;
+          mounted.summary.localSystemRuntimeStringsDbBytes = runtimeState.stringsDbBytes ?? 0;
           mounted.summary.localSystemRuntimeScriptCount = 0;
           mounted.summary.localSystemRuntimeSystemScriptCount = 0;
           mounted.summary.localSystemRuntimeScenarioScriptCount = 0;
@@ -584,6 +643,8 @@ function startSystemRuntime(catalog, core, mounted, hooks) {
       mounted.summary.localSystemRuntimeManifestCount = runtimeState.manifestCount;
       mounted.summary.localSystemRuntimeBootPayloadReady = runtimeState.bootPayloadReady;
       mounted.summary.localSystemRuntimeDscScriptCount = runtimeState.dscScripts;
+      mounted.summary.localSystemRuntimeStringsDbMounted = runtimeState.stringsDbMounted ?? 0;
+      mounted.summary.localSystemRuntimeStringsDbBytes = runtimeState.stringsDbBytes ?? 0;
       mounted.summary.localSystemRuntimeEntryScriptRequestedLen =
         mounted.runtimeSessionEntryName.length;
       mounted.summary.localSystemRuntimeEntryScriptRequestedHash =
@@ -839,13 +900,10 @@ function queueScenarioPlayer(catalog, core, mounted, hooks, options = {}) {
     return mounted.scenarioPlayerPromise ?? Promise.resolve(mounted.player ?? null);
   }
   mounted.scenarioPlayerQueued = true;
-  const requestedScenario = new URLSearchParams(window.location.search).get("scenarioName") ?? "";
-  const preferredScenario = /^[A-Za-z0-9_]+$/.test(requestedScenario)
-    ? requestedScenario
-    : "00_op_01";
-  const route = normalizeScenarioRoute(
-    new URLSearchParams(window.location.search).get("route"),
-  );
+  const params = new URLSearchParams(window.location.search);
+  const requestedScenario = options.scenarioName ?? params.get("scenarioName") ?? "";
+  const preferredScenario = normalizeScenarioName(requestedScenario, "00_op_01");
+  const route = normalizeScenarioRoute(options.route ?? params.get("route"));
   const promise = createInitialScenarioPlayer(catalog, core, preferredScenario, route).then(async (player) => {
     if (!isActive(hooks, mounted) || player === null) {
       player?.destroy();
@@ -967,12 +1025,27 @@ function emptyScriptProbeSummary() {
 async function createRuntimeFromCatalog(catalog, core) {
   const handle = core.runtimeCreate();
   if (handle === 0) {
-    return { handle: 0, dscScripts: 0, manifestCount: 0, bootPayloadReady: 0, status: SYSTEM_RUNTIME_CREATE_FAILED };
+    return {
+      handle: 0,
+      dscScripts: 0,
+      manifestCount: 0,
+      bootPayloadReady: 0,
+      stringsDbMounted: 0,
+      stringsDbBytes: 0,
+      status: SYSTEM_RUNTIME_CREATE_FAILED,
+    };
   }
   let fullArchiveCount = 0;
   let fullArchiveBytes = 0;
   let manifestCount = 0;
   let mountedDscScripts = 0;
+  let stringsDbMounted = 0;
+  let stringsDbBytes = 0;
+  const stringsDb = await catalog.readSidecarByNameBytes(STRINGS_DB_NAME);
+  if (stringsDb instanceof Uint8Array && stringsDb.byteLength > 0) {
+    stringsDbBytes = stringsDb.byteLength;
+    stringsDbMounted = core.runtimeMountStringsDb(handle, stringsDb) === 1 ? 1 : 0;
+  }
   const archives = Array.from(catalog.archives());
   const recordsByArchive = groupCatalogRecordsByArchive(catalog);
   for (let archiveIndex = 0; archiveIndex < archives.length; archiveIndex += 1) {
@@ -987,6 +1060,8 @@ async function createRuntimeFromCatalog(catalog, core) {
           dscScripts: mountedDscScripts,
           manifestCount,
           bootPayloadReady: 0,
+          stringsDbMounted,
+          stringsDbBytes,
           status: SYSTEM_RUNTIME_ARCHIVE_MOUNT_FAILED,
         };
       }
@@ -1010,6 +1085,8 @@ async function createRuntimeFromCatalog(catalog, core) {
             dscScripts: mountedDscScripts,
             manifestCount,
             bootPayloadReady: 0,
+            stringsDbMounted,
+            stringsDbBytes,
             status: SYSTEM_RUNTIME_ARCHIVE_MOUNT_FAILED,
           };
         }
@@ -1044,6 +1121,8 @@ async function createRuntimeFromCatalog(catalog, core) {
         dscScripts: mountedDscScripts,
         manifestCount,
         bootPayloadReady: 0,
+        stringsDbMounted,
+        stringsDbBytes,
         status: SYSTEM_RUNTIME_ARCHIVE_MOUNT_FAILED,
       };
     }
@@ -1070,6 +1149,8 @@ async function createRuntimeFromCatalog(catalog, core) {
         dscScripts: mountedDscScripts,
         manifestCount,
         bootPayloadReady: 0,
+        stringsDbMounted,
+        stringsDbBytes,
         status: SYSTEM_RUNTIME_BOOT_PAYLOAD_MISSING,
       };
     }
@@ -1080,6 +1161,8 @@ async function createRuntimeFromCatalog(catalog, core) {
         dscScripts: mountedDscScripts,
         manifestCount,
         bootPayloadReady: 1,
+        stringsDbMounted,
+        stringsDbBytes,
         status: SYSTEM_RUNTIME_BOOT_MOUNT_FAILED,
       };
     }
@@ -1099,6 +1182,8 @@ async function createRuntimeFromCatalog(catalog, core) {
     manifestCount,
     fullArchiveCount,
     fullArchiveBytes,
+    stringsDbMounted,
+    stringsDbBytes,
     bootPayloadReady,
     status: SYSTEM_RUNTIME_OK,
   };
@@ -1262,16 +1347,72 @@ async function loadBootScreens(catalog, core) {
   return screens;
 }
 
-async function loadMenuButtons(catalog, core) {
-  // Title menu buttons are 4-state sprite sheets (idle/hover/pressed/disabled), states laid out horizontally.
-  const defs = [["Start","SGTitle000000"],["Load","SGTitle000100"],["Config","SGTitle000200"],["Exit","SGTitle000300"]];
-  const out = [];
+function titleMenuButtons(sprites) {
+  return ["Start", "Load", "Config", "Exit"]
+    .map((name) => sprites?.[name] ?? null)
+    .filter(Boolean);
+}
+
+async function loadTitleButtonSprites(catalog, core) {
+  // Title buttons are 4-state sprite sheets: idle/hover/pressed/disabled.
+  const defs = [
+    ["Start", "SGTitle000000"],
+    ["Load", "SGTitle000100"],
+    ["Config", "SGTitle000200"],
+    ["Exit", "SGTitle000300"],
+    ["Extra", "SGTitle000400"],
+    ["Graphic", "SGTitle000500"],
+    ["Scene", "SGTitle000600"],
+    ["Music", "SGTitle000700"],
+    ["back", "SGTitle000800"],
+    ["IV", "SGTitle000900"],
+    ["V", "SGTitle001000"],
+    ["VI", "SGTitle001100"],
+  ];
+  const out = {};
   for (const [label, name] of defs) {
     try {
       const payload = await catalog.readPayloadByNameBytes(new TextEncoder().encode(name));
       if (!payload) continue;
       const image = decodeMountedImage(core, payload);
-      if (image) out.push({ label, image, stateWidth: Math.floor(image.width / 4), stateHeight: image.height });
+      if (image) {
+        out[label] = {
+          label,
+          image,
+          stateWidth: Math.floor(image.width / 4),
+          stateHeight: image.height,
+        };
+      }
+    } catch (_) {}
+  }
+  return out;
+}
+
+async function loadTitleMusicSprites(catalog, core) {
+  const out = { background: null, tracks: new Map() };
+  const encoder = new TextEncoder();
+  try {
+    const payload = await catalog.readPayloadByNameBytes(encoder.encode("SGMusic990000"));
+    const image = payload ? decodeMountedImage(core, payload) : null;
+    if (image) {
+      out.background = image;
+    }
+  } catch (_) {}
+  for (let index = 0; index < TITLE_MUSIC_TRACKS.length; index += 1) {
+    const track = TITLE_MUSIC_TRACKS[index];
+    const spriteName = `SGMusic${String((index + 1) * 100).padStart(6, "0")}`;
+    try {
+      const payload = await catalog.readPayloadByNameBytes(encoder.encode(spriteName));
+      const image = payload ? decodeMountedImage(core, payload) : null;
+      if (image) {
+        out.tracks.set(track, {
+          label: track,
+          spriteName,
+          image,
+          stateWidth: Math.floor(image.width / 3),
+          stateHeight: image.height,
+        });
+      }
     } catch (_) {}
   }
   return out;
@@ -1284,6 +1425,25 @@ async function loadTitleImage(catalog, core) {
     return decodeMountedImage(core, payload);
   } catch (_) {
     return null;
+  }
+}
+
+async function loadGdbState(catalog, core) {
+  try {
+    const payload = await catalog.readSidecarByNameBytes(STRINGS_DB_NAME);
+    if (!(payload instanceof Uint8Array)) {
+      return { payload: null, viewedImages: new Set(), parseOk: 0 };
+    }
+    const names = typeof core.gdbViewedImageNames === "function"
+      ? core.gdbViewedImageNames(payload)
+      : null;
+    return {
+      payload,
+      viewedImages: new Set(Array.isArray(names) ? names : []),
+      parseOk: Number(Array.isArray(names)),
+    };
+  } catch (_) {
+    return { payload: null, viewedImages: new Set(), parseOk: 0 };
   }
 }
 
@@ -1447,6 +1607,42 @@ async function loadConfigWindow(catalog, core) {
     },
     buttons: { reset, title, back },
     faces,
+  };
+}
+
+async function loadDialogWindow(catalog, core) {
+  const [
+    yes,
+    no,
+    exit,
+    title,
+    save,
+    overwrite,
+    load,
+    deletePanel,
+    quickSave,
+  ] = await Promise.all([
+    loadNamedImage(catalog, core, "SGDialog000000"),
+    loadNamedImage(catalog, core, "SGDialog000100"),
+    loadNamedImage(catalog, core, "SGDialog990000"),
+    loadNamedImage(catalog, core, "SGDialog990001"),
+    loadNamedImage(catalog, core, "SGDialog990002"),
+    loadNamedImage(catalog, core, "SGDialog990003"),
+    loadNamedImage(catalog, core, "SGDialog990005"),
+    loadNamedImage(catalog, core, "SGDialog990006"),
+    loadNamedImage(catalog, core, "SGDialog990007"),
+  ]);
+  return {
+    buttons: { yes, no },
+    panels: {
+      exit,
+      title,
+      save,
+      overwrite,
+      load,
+      delete: deletePanel,
+      quickSave,
+    },
   };
 }
 
@@ -1764,7 +1960,6 @@ function startRuntimeSessionLoop(mounted, core, hooks) {
           RUNTIME_SESSION_MAX_INSTRUCTIONS,
         );
         if (packet === null) {
-          mounted.summary.localSystemRuntimeNotifyErrors += 1;
           notifyRuntimeUpdate(hooks, mounted);
           shouldContinue = false;
           return;

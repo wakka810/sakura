@@ -1,9 +1,9 @@
 use sakura_core::{
     analyze_scenario_script, analyze_system_script, cbg_to_rgba, classify_dsc_script, decode_cbg,
-    decode_raw_bitmap, decompress_dsc, decrypt_cbg_stream, is_buriko_script_v1,
-    read_bgi_audio_metadata, read_cbg_metadata, sniff_payload, ArcArchive, AssetCatalog,
-    InstallManifest, LoadedScriptKind, PayloadKind, Runtime, RuntimeConfig, SakuraError,
-    ScenarioArrayArg, ScenarioEvent, ScenarioProgram, ScenarioVm, SystemHost,
+    decode_raw_bitmap, decompress_dsc, decompress_sdc, decrypt_cbg_stream, gdb_viewed_image_names,
+    is_buriko_script_v1, read_bgi_audio_metadata, read_cbg_metadata, sniff_payload, ArcArchive,
+    AssetCatalog, InstallManifest, LoadedScriptKind, PayloadKind, Runtime, RuntimeConfig,
+    SakuraError, ScenarioArrayArg, ScenarioEvent, ScenarioProgram, ScenarioVm, SystemHost,
     SystemInstructionKind, SystemProgram,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,6 +37,30 @@ struct SystemScriptRankRow {
     user_load: usize,
     user_ret: usize,
     user_dispatch: usize,
+}
+
+#[derive(Debug, Clone)]
+struct SystemDecodedRow {
+    offset: usize,
+    opcode: u8,
+    label: String,
+    string_excerpt: String,
+    push_value: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct GalleryImageFeature {
+    name: String,
+    archive_name: String,
+    width: usize,
+    height: usize,
+    feature: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+struct GalleryThumbFeature {
+    slot_label: String,
+    image: GalleryImageFeature,
 }
 
 fn main() -> Result<()> {
@@ -104,6 +128,47 @@ fn main() -> Result<()> {
             })?;
             validate_catalog(&game_dir)?;
         }
+        "catalog-asset-audit" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli catalog-asset-audit <game-dir> [name-prefix] [limit]"
+                        .to_owned(),
+                )
+            })?;
+            let prefix = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let limit = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| arg.parse::<usize>().ok())
+                .unwrap_or(128)
+                .clamp(1, 10000);
+            catalog_asset_audit(&game_dir, &prefix, limit)?;
+        }
+        "gallery-match" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli gallery-match <game-dir> [thumb-limit] [candidate-limit]"
+                        .to_owned(),
+                )
+            })?;
+            let thumb_limit = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| arg.parse::<usize>().ok())
+                .unwrap_or(24)
+                .clamp(1, 1000);
+            let candidate_limit = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| arg.parse::<usize>().ok())
+                .unwrap_or(5)
+                .clamp(1, 32);
+            gallery_match(&game_dir, thumb_limit, candidate_limit)?;
+        }
         "image-info" => {
             let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
                 SakuraError::UnsupportedFormat(
@@ -150,6 +215,23 @@ fn main() -> Result<()> {
             })?;
             validate_scripts(&game_dir)?;
         }
+        "sdc-decompress" => {
+            let input = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli sdc-decompress <input.sdc> [output.bin]".to_owned(),
+                )
+            })?;
+            let output = args.next().map(PathBuf::from);
+            sdc_decompress_file(&input, output.as_deref())?;
+        }
+        "gdb-viewed-images" => {
+            let input = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli gdb-viewed-images <BGI.gdb>".to_owned(),
+                )
+            })?;
+            gdb_viewed_images(&input)?;
+        }
         "scenario-opcode-audit" => {
             let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
                 SakuraError::UnsupportedFormat(
@@ -158,6 +240,27 @@ fn main() -> Result<()> {
             })?;
             let prefix = args.next().and_then(|arg| arg.into_string().ok());
             audit_scenario_opcodes(&game_dir, prefix.as_deref())?;
+        }
+        "scenario-raw-dump" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli scenario-raw-dump <game-dir> <scenario-name> <out-path>"
+                        .to_owned(),
+                )
+            })?;
+            let scenario_name = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .ok_or_else(|| {
+                    SakuraError::UnsupportedFormat("missing scenario name".to_owned())
+                })?;
+            let out_path = args
+                .next()
+                .map(PathBuf::from)
+                .ok_or_else(|| SakuraError::UnsupportedFormat("missing output path".to_owned()))?;
+            let script = load_scenario_script(&game_dir, &scenario_name)?;
+            fs::write(&out_path, &script)?;
+            println!("wrote {} bytes to {}", script.len(), out_path.display());
         }
         "scenario-command-audit" => {
             let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
@@ -178,6 +281,41 @@ fn main() -> Result<()> {
                 .and_then(|arg| parse_u32_arg(&arg))
                 .ok_or_else(|| SakuraError::UnsupportedFormat("invalid opcode".to_owned()))?;
             audit_scenario_command(&game_dir, &scenario_name, opcode)?;
+        }
+        "scenario-image-audit" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli scenario-image-audit <game-dir> [name-prefix] [opcode]"
+                        .to_owned(),
+                )
+            })?;
+            let first = args.next().and_then(|arg| arg.into_string().ok());
+            let second = args.next().and_then(|arg| arg.into_string().ok());
+            let (prefix, opcode) = match (first, second) {
+                (None, None) => (None, 0x0280),
+                (Some(value), None) => match parse_u32_arg(&value) {
+                    Some(opcode) => (None, opcode),
+                    None => (Some(value), 0x0280),
+                },
+                (Some(prefix), Some(opcode)) => (
+                    Some(prefix),
+                    parse_u32_arg(&opcode).ok_or_else(|| {
+                        SakuraError::UnsupportedFormat("invalid opcode".to_owned())
+                    })?,
+                ),
+                (None, Some(_)) => unreachable!(),
+            };
+            audit_scenario_images(&game_dir, prefix.as_deref(), opcode)?;
+        }
+        "scenario-voice-speaker-audit" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli scenario-voice-speaker-audit <game-dir> [name-prefix]"
+                        .to_owned(),
+                )
+            })?;
+            let prefix = args.next().and_then(|arg| arg.into_string().ok());
+            audit_scenario_voice_speakers(&game_dir, prefix.as_deref())?;
         }
         "scenario-control-audit" => {
             let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
@@ -324,6 +462,36 @@ fn main() -> Result<()> {
                 .unwrap_or(64);
             system_value_scan(&game_dir, script_index, value, limit)?;
         }
+        "system-immediates" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli system-immediates <game-dir> <script-index> [min] [max] [limit]"
+                        .to_owned(),
+                )
+            })?;
+            let script_index = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| arg.parse::<usize>().ok())
+                .ok_or_else(|| SakuraError::UnsupportedFormat("missing script index".to_owned()))?;
+            let min_value = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| parse_hex_or_decimal(&arg).ok())
+                .unwrap_or(0);
+            let max_value = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| parse_hex_or_decimal(&arg).ok())
+                .unwrap_or(4096);
+            let limit = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| arg.parse::<usize>().ok())
+                .unwrap_or(160)
+                .clamp(1, 2000);
+            system_immediates(&game_dir, script_index, min_value, max_value, limit)?;
+        }
         "system-string-ref-scan" => {
             let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
                 SakuraError::UnsupportedFormat(
@@ -341,6 +509,48 @@ fn main() -> Result<()> {
                 .and_then(|arg| arg.parse::<usize>().ok())
                 .unwrap_or(64);
             system_string_ref_scan(&game_dir, target.as_bytes(), limit)?;
+        }
+        "system-data-strings" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli system-data-strings <game-dir> <script-index> [limit] [start-offset]"
+                        .to_owned(),
+                )
+            })?;
+            let script_index = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| arg.parse::<usize>().ok())
+                .ok_or_else(|| SakuraError::UnsupportedFormat("missing script index".to_owned()))?;
+            let limit = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| arg.parse::<usize>().ok())
+                .unwrap_or(128);
+            let start_offset = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| parse_hex_or_decimal(&arg).ok());
+            system_data_strings(&game_dir, script_index, limit, start_offset)?;
+        }
+        "system-code-strings" => {
+            let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
+                SakuraError::UnsupportedFormat(
+                    "usage: sakura-cli system-code-strings <game-dir> <script-index> [limit]"
+                        .to_owned(),
+                )
+            })?;
+            let script_index = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| arg.parse::<usize>().ok())
+                .ok_or_else(|| SakuraError::UnsupportedFormat("missing script index".to_owned()))?;
+            let limit = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .and_then(|arg| arg.parse::<usize>().ok())
+                .unwrap_or(256);
+            system_code_strings(&game_dir, script_index, limit)?;
         }
         "system-script-list" => {
             let game_dir = args.next().map(PathBuf::from).ok_or_else(|| {
@@ -485,6 +695,10 @@ fn print_help() {
     println!(
         "                           validate canonical ARC catalog lookup without asset names"
     );
+    println!("  catalog-asset-audit <game-dir> [name-prefix] [limit]");
+    println!("                           list mounted ARC assets matching a lowercase prefix");
+    println!("  gallery-match <game-dir> [thumb-limit] [candidate-limit]");
+    println!("                           rank likely full CG matches for CG-mode thumbnails");
     println!("  image-info <game-dir> <asset-name> [...]");
     println!("                           report decoded image dimensions for named local assets");
     println!("  image-extract <game-dir> <asset-name> <output.pam>");
@@ -493,10 +707,18 @@ fn print_help() {
     println!(
         "                           validate v1 Ethornell script structure without text output"
     );
+    println!("  sdc-decompress <input.sdc> [output.bin]");
+    println!("                           decompress an SDC FORMAT payload such as BGI.gdb");
+    println!("  gdb-viewed-images <BGI.gdb>");
+    println!("                           list viewed image basenames from a BURIKO GDB sidecar");
     println!("  scenario-opcode-audit <game-dir> [name-prefix]");
     println!("                           list scenario command opcode counts without text output");
     println!("  scenario-command-audit <game-dir> <scenario-name> <opcode>");
     println!("                           list argument shapes for one scenario command");
+    println!("  scenario-image-audit <game-dir> [name-prefix] [opcode]");
+    println!("                           aggregate scenario image command asset names");
+    println!("  scenario-voice-speaker-audit <game-dir> [name-prefix]");
+    println!("                           aggregate voice prefix to message speaker hashes");
     println!("  scenario-control-audit <game-dir> <scenario-name>");
     println!("                           list non-rendering scenario control commands");
     println!("  scenario-byte-window <game-dir> <scenario-name> <offset> [word-count]");
@@ -516,10 +738,18 @@ fn print_help() {
     println!(
         "                           list safe immediate/code-reference matches in one system script"
     );
+    println!("  system-immediates <game-dir> <script-index> [min] [max] [limit]");
+    println!("                           summarize push immediates with bounded opcode contexts");
     println!("  system-string-ref-scan <game-dir> <ascii-target> [limit]");
     println!(
         "                           list system scripts that reference an ASCII string operand"
     );
+    println!("  system-data-strings <game-dir> <script-index> [limit] [start-offset]");
+    println!(
+        "                           list null-terminated strings in a system script data tail"
+    );
+    println!("  system-code-strings <game-dir> <script-index> [limit]");
+    println!("                           list GetString operands in a system script");
     println!("  system-script-list <game-dir> [limit] [start-system-index]");
     println!(
         "                           list system-script indexes with runtime indexes and safe names"
@@ -1106,6 +1336,148 @@ fn system_value_scan(
     Err(SakuraError::InvalidScript("target script index not found".to_owned()).into())
 }
 
+fn system_immediates(
+    game_dir: &Path,
+    target_script_index: usize,
+    min_value: usize,
+    max_value: usize,
+    limit: usize,
+) -> Result<()> {
+    let archive_paths = collect_archive_files(game_dir)?;
+    let mut script_index = 0usize;
+
+    for path in &archive_paths {
+        let data = fs::read(path)?;
+        let archive = ArcArchive::parse(&data)?;
+        for entry in archive.entries() {
+            let payload = archive.entry_data(entry)?;
+            if sniff_payload(payload) != PayloadKind::Dsc {
+                continue;
+            }
+            let decompressed = decompress_dsc(payload)?;
+            if classify_dsc_script(entry.name.as_bytes(), &decompressed)
+                != Some(LoadedScriptKind::System)
+            {
+                continue;
+            }
+            let current = script_index;
+            script_index += 1;
+            if current != target_script_index {
+                continue;
+            }
+            let program = SystemProgram::parse(&decompressed)?;
+            let rows = decode_system_rows(&program);
+            let mut by_value: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+            let min_value = min_value as u64;
+            let max_value = max_value as u64;
+            for row in &rows {
+                let Some(value) = row.push_value else {
+                    continue;
+                };
+                if value < min_value || value > max_value {
+                    continue;
+                }
+                by_value.entry(value).or_default().push(row.offset);
+            }
+
+            println!("system_immediates_version=1");
+            println!("script_index={target_script_index}");
+            println!("min_value={min_value}");
+            println!("max_value={max_value}");
+            println!("code_offset=0x{:x}", program.code_offset());
+            println!("code_end=0x{:x}", program.code_end());
+            println!("decoded_count={}", rows.len());
+            println!("value_count={}", by_value.len());
+
+            for (printed, (value, offsets)) in by_value.iter().enumerate() {
+                if printed >= limit {
+                    break;
+                }
+                let offset_list = offsets
+                    .iter()
+                    .take(12)
+                    .map(|offset| format!("0x{offset:x}"))
+                    .collect::<Vec<_>>()
+                    .join("|");
+                println!(
+                    "value={} hex=0x{:x} count={} offsets={}",
+                    value,
+                    value,
+                    offsets.len(),
+                    offset_list
+                );
+            }
+
+            let mut context_printed = 0usize;
+            for (index, row) in rows.iter().enumerate() {
+                let Some(value) = row.push_value else {
+                    continue;
+                };
+                if value < min_value || value > max_value {
+                    continue;
+                }
+                if context_printed >= limit {
+                    break;
+                }
+                let start = index.saturating_sub(4);
+                let end = (index + 8).min(rows.len());
+                let window = rows[start..end]
+                    .iter()
+                    .map(|item| {
+                        format!("0x{:x}:{}:{}", item.offset, item.label, item.string_excerpt)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|");
+                println!(
+                    "context={} focus=0x{:x} value={} hex=0x{:x} opcode=0x{:02x} window={}",
+                    context_printed, row.offset, value, value, row.opcode, window
+                );
+                context_printed += 1;
+            }
+            println!("context_count={context_printed}");
+            return Ok(());
+        }
+    }
+
+    Err(SakuraError::InvalidScript("target script index not found".to_owned()).into())
+}
+
+fn decode_system_rows(program: &SystemProgram<'_>) -> Vec<SystemDecodedRow> {
+    let mut rows = Vec::new();
+    let mut cursor = program.code_offset();
+    while cursor < program.code_end() {
+        if !matches!(program.has_complete_min_instruction(cursor), Ok(true)) {
+            break;
+        }
+        let instruction = match program.decode(cursor) {
+            Ok(instruction) => instruction,
+            Err(_) => break,
+        };
+        rows.push(SystemDecodedRow {
+            offset: instruction.offset,
+            opcode: instruction.opcode,
+            label: safe_instruction_label(&instruction.kind),
+            string_excerpt: instruction_string_excerpt(&instruction.kind),
+            push_value: system_instruction_push_value(&instruction.kind),
+        });
+        if instruction.next_offset <= cursor {
+            break;
+        }
+        cursor = instruction.next_offset;
+    }
+    rows
+}
+
+fn system_instruction_push_value(kind: &SystemInstructionKind<'_>) -> Option<u64> {
+    match kind {
+        SystemInstructionKind::PushU8(value) => Some(u64::from(*value)),
+        SystemInstructionKind::PushU16(value) => Some(u64::from(*value)),
+        SystemInstructionKind::PushU32(value) => Some(u64::from(*value)),
+        SystemInstructionKind::PushU64(value) => Some(*value),
+        _ => None,
+    }
+}
+
 fn system_instruction_matches_value(kind: &SystemInstructionKind<'_>, target: usize) -> bool {
     match kind {
         SystemInstructionKind::PushU8(value) => usize::from(*value) == target,
@@ -1224,6 +1596,157 @@ fn system_string_ref_scan(game_dir: &Path, target: &[u8], limit: usize) -> Resul
         );
     }
     Ok(())
+}
+
+fn system_data_strings(
+    game_dir: &Path,
+    target_script_index: usize,
+    limit: usize,
+    start_offset: Option<usize>,
+) -> Result<()> {
+    let archive_paths = collect_archive_files(game_dir)?;
+    let mut system_index = 0usize;
+
+    for path in &archive_paths {
+        let data = fs::read(path)?;
+        let archive = ArcArchive::parse(&data)?;
+        for entry in archive.entries() {
+            let payload = archive.entry_data(entry)?;
+            if sniff_payload(payload) != PayloadKind::Dsc {
+                continue;
+            }
+            let decompressed = decompress_dsc(payload)?;
+            if classify_dsc_script(entry.name.as_bytes(), &decompressed)
+                != Some(LoadedScriptKind::System)
+            {
+                continue;
+            }
+            let current = system_index;
+            system_index += 1;
+            if current != target_script_index {
+                continue;
+            }
+            let program = SystemProgram::parse(&decompressed)?;
+            let data_start = start_offset
+                .unwrap_or_else(|| program.code_end())
+                .min(decompressed.len());
+            let strings = collect_null_terminated_data_strings(&decompressed, data_start);
+            println!("system_data_strings_version=1");
+            println!("script_index={current}");
+            println!("name={}", format_string_excerpt(entry.name.as_bytes(), 64));
+            println!("code_end=0x{:x}", program.code_end());
+            println!("scan_start=0x{data_start:x}");
+            println!("string_count={}", strings.len());
+            for (row_index, (offset, bytes)) in strings.into_iter().take(limit).enumerate() {
+                println!(
+                    "row={row_index} offset=0x{offset:x} len={} string={}",
+                    bytes.len(),
+                    format_string_excerpt(bytes, 96),
+                );
+            }
+            return Ok(());
+        }
+    }
+
+    Err(SakuraError::InvalidScript("target script index not found".to_owned()).into())
+}
+
+fn system_code_strings(game_dir: &Path, target_script_index: usize, limit: usize) -> Result<()> {
+    let archive_paths = collect_archive_files(game_dir)?;
+    let mut system_index = 0usize;
+
+    for path in &archive_paths {
+        let data = fs::read(path)?;
+        let archive = ArcArchive::parse(&data)?;
+        for entry in archive.entries() {
+            let payload = archive.entry_data(entry)?;
+            if sniff_payload(payload) != PayloadKind::Dsc {
+                continue;
+            }
+            let decompressed = decompress_dsc(payload)?;
+            if classify_dsc_script(entry.name.as_bytes(), &decompressed)
+                != Some(LoadedScriptKind::System)
+            {
+                continue;
+            }
+            let current = system_index;
+            system_index += 1;
+            if current != target_script_index {
+                continue;
+            }
+            let program = SystemProgram::parse(&decompressed)?;
+            let mut rows = Vec::new();
+            let mut cursor = program.code_offset();
+            while cursor < program.code_end() {
+                if !matches!(program.has_complete_min_instruction(cursor), Ok(true)) {
+                    break;
+                }
+                let instruction = match program.decode(cursor) {
+                    Ok(instruction) => instruction,
+                    Err(_) => break,
+                };
+                if let SystemInstructionKind::GetString {
+                    bytes: Some(bytes), ..
+                } = &instruction.kind
+                {
+                    rows.push((instruction.offset, *bytes));
+                }
+                if instruction.next_offset <= cursor {
+                    break;
+                }
+                cursor = instruction.next_offset;
+            }
+
+            println!("system_code_strings_version=1");
+            println!("script_index={current}");
+            println!("name={}", format_string_excerpt(entry.name.as_bytes(), 64));
+            println!("code_offset=0x{:x}", program.code_offset());
+            println!("code_end=0x{:x}", program.code_end());
+            println!("string_count={}", rows.len());
+            for (row_index, (offset, bytes)) in rows.into_iter().take(limit).enumerate() {
+                let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                println!(
+                    "row={row_index} offset=0x{offset:x} len={} string={} hex={hex}",
+                    bytes.len(),
+                    format_string_excerpt(bytes, 96),
+                );
+            }
+            return Ok(());
+        }
+    }
+
+    Err(SakuraError::InvalidScript("target script index not found".to_owned()).into())
+}
+
+fn collect_null_terminated_data_strings(data: &[u8], start: usize) -> Vec<(usize, &[u8])> {
+    let mut rows = Vec::new();
+    let mut cursor = start;
+    while cursor < data.len() {
+        while cursor < data.len() && data[cursor] == 0 {
+            cursor += 1;
+        }
+        let offset = cursor;
+        while cursor < data.len() && data[cursor] != 0 {
+            cursor += 1;
+        }
+        if cursor > offset {
+            let bytes = &data[offset..cursor];
+            if is_probable_data_string(bytes) {
+                rows.push((offset, bytes));
+            }
+        }
+    }
+    rows
+}
+
+fn is_probable_data_string(bytes: &[u8]) -> bool {
+    bytes.len() >= 2
+        && bytes
+            .iter()
+            .all(|byte| matches!(*byte, 0x20..=0x7e | 0x80..=0xfc))
+        && bytes
+            .iter()
+            .any(|byte| byte.is_ascii_alphanumeric() || *byte >= 0x80)
 }
 
 fn list_system_scripts(game_dir: &Path, limit: usize, start_system_index: usize) -> Result<()> {
@@ -1686,6 +2209,296 @@ fn validate_catalog(game_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn catalog_asset_audit(game_dir: &Path, prefix: &str, limit: usize) -> Result<()> {
+    let mut rows = Vec::<(String, String, usize, PayloadKind)>::new();
+    let mut archive_counts = BTreeMap::<String, usize>::new();
+    let prefix = prefix.as_bytes();
+
+    for path in collect_archive_files(game_dir)? {
+        let data = fs::read(&path)?;
+        let archive = ArcArchive::parse(&data)?;
+        let archive_name = path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("")
+            .to_owned();
+        for entry in archive.entries() {
+            let key = entry.name.as_bytes().to_ascii_lowercase();
+            if !key.starts_with(prefix) {
+                continue;
+            }
+            let payload = archive.entry_data(entry)?;
+            *archive_counts.entry(archive_name.clone()).or_default() += 1;
+            rows.push((
+                String::from_utf8_lossy(&key).into_owned(),
+                archive_name.clone(),
+                payload.len(),
+                sniff_payload(payload),
+            ));
+        }
+    }
+
+    rows.sort_by(|left, right| {
+        left.1
+            .cmp(&right.1)
+            .then_with(|| left.0.cmp(&right.0))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    let unique_count = rows
+        .iter()
+        .map(|(name, _, _, _)| name.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+
+    println!("catalog_asset_audit_version=1");
+    println!("prefix={}", String::from_utf8_lossy(prefix));
+    println!("asset_count={}", rows.len());
+    println!("unique_count={unique_count}");
+    println!("archive_count={}", archive_counts.len());
+    for (archive, count) in &archive_counts {
+        println!("archive={archive} count={count}");
+    }
+    for (index, (name, archive, size, kind)) in rows.iter().take(limit).enumerate() {
+        println!("row={index} name={name} archive={archive} size={size} kind={kind:?}");
+    }
+    Ok(())
+}
+
+fn gallery_match(game_dir: &Path, thumb_limit: usize, candidate_limit: usize) -> Result<()> {
+    let mut thumbnails_by_slot = BTreeMap::<(usize, String), GalleryThumbFeature>::new();
+    let mut candidates = Vec::<GalleryImageFeature>::new();
+    for path in collect_archive_files(game_dir)? {
+        let data = fs::read(&path)?;
+        let archive = ArcArchive::parse(&data)?;
+        let archive_name = path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        for entry in archive.entries() {
+            let key = entry.name.as_bytes().to_ascii_lowercase();
+            let name = String::from_utf8_lossy(&key).into_owned();
+            if let Some((slot_order, slot_label)) = gallery_thumbnail_key(&name) {
+                if !archive_name.starts_with("data02")
+                    || sniff_payload(archive.entry_data(entry)?) != PayloadKind::CompressedBg
+                {
+                    continue;
+                }
+                let image = decode_local_image(archive.entry_data(entry)?)?;
+                let feature =
+                    gallery_image_feature(&image, Some((200.0, 0.0, 200.0, 113.0)), 32, 18)?;
+                let candidate = GalleryThumbFeature {
+                    slot_label: slot_label.clone(),
+                    image: GalleryImageFeature {
+                        name,
+                        archive_name: archive_name.clone(),
+                        width: usize::from(image.width),
+                        height: usize::from(image.height),
+                        feature,
+                    },
+                };
+                let slot_key = (slot_order, slot_label);
+                let replace = thumbnails_by_slot.get(&slot_key).is_none_or(|current| {
+                    gallery_thumbnail_rank(&candidate.image.archive_name)
+                        < gallery_thumbnail_rank(&current.image.archive_name)
+                });
+                if replace {
+                    thumbnails_by_slot.insert(slot_key, candidate);
+                }
+                continue;
+            }
+            if !gallery_full_cg_candidate(&name, &archive_name) {
+                continue;
+            }
+            let payload = archive.entry_data(entry)?;
+            if sniff_payload(payload) != PayloadKind::CompressedBg {
+                continue;
+            }
+            let image = decode_local_image(payload)?;
+            let feature = gallery_image_feature(&image, None, 32, 18)?;
+            candidates.push(GalleryImageFeature {
+                name,
+                archive_name: archive_name.clone(),
+                width: usize::from(image.width),
+                height: usize::from(image.height),
+                feature,
+            });
+        }
+    }
+    candidates.sort_by(|left, right| {
+        left.archive_name
+            .cmp(&right.archive_name)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let thumbnails = thumbnails_by_slot.values().collect::<Vec<_>>();
+
+    println!("gallery_match_version=1");
+    println!("thumbnail_count={}", thumbnails.len());
+    println!("candidate_count={}", candidates.len());
+    println!("thumb_limit={thumb_limit}");
+    println!("candidate_limit={candidate_limit}");
+    for (row_index, thumb) in thumbnails.iter().take(thumb_limit).enumerate() {
+        let mut matches = candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    gallery_feature_distance(&thumb.image.feature, &candidate.feature),
+                    candidate,
+                )
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| {
+            left.0
+                .total_cmp(&right.0)
+                .then_with(|| left.1.archive_name.cmp(&right.1.archive_name))
+                .then_with(|| left.1.name.cmp(&right.1.name))
+        });
+        println!(
+            "row={row_index} slot={} thumb={} archive={} size={}x{}",
+            thumb.slot_label,
+            thumb.image.name,
+            thumb.image.archive_name,
+            thumb.image.width,
+            thumb.image.height,
+        );
+        for (rank, (score, candidate)) in matches.iter().take(candidate_limit).enumerate() {
+            println!(
+                "  match={rank} score={score:.3} name={} archive={} size={}x{}",
+                candidate.name, candidate.archive_name, candidate.width, candidate.height,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn gallery_thumbnail_key(name: &str) -> Option<(usize, String)> {
+    let suffix = name.strip_prefix("ev_thum_")?;
+    if suffix.is_empty() {
+        return None;
+    }
+    let digit_len = suffix.bytes().take_while(u8::is_ascii_digit).count();
+    if digit_len == 0 {
+        return None;
+    }
+    let number = suffix[..digit_len].parse::<usize>().ok()?;
+    let variant = &suffix[digit_len..];
+    if !variant
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let variant_rank = variant.bytes().fold(0usize, |acc, byte| {
+        acc.saturating_mul(36)
+            .saturating_add(usize::from(byte.to_ascii_lowercase()))
+    });
+    let order = number
+        .saturating_mul(0x10000)
+        .saturating_add(if variant.is_empty() {
+            0
+        } else {
+            variant_rank.saturating_add(1)
+        });
+    Some((order, suffix.to_owned()))
+}
+
+fn gallery_thumbnail_rank(archive_name: &str) -> usize {
+    if archive_name.eq_ignore_ascii_case("data02502.arc") {
+        0
+    } else if archive_name.to_ascii_lowercase().starts_with("data02") {
+        1
+    } else {
+        2
+    }
+}
+
+fn gallery_full_cg_candidate(name: &str, archive_name: &str) -> bool {
+    let archive = archive_name.to_ascii_lowercase();
+    name.starts_with("ev")
+        && !name.starts_with("ev_thum")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && archive.starts_with("data02")
+}
+
+fn gallery_image_feature(
+    image: &sakura_core::CbgImage,
+    source_rect: Option<(f32, f32, f32, f32)>,
+    feature_width: usize,
+    feature_height: usize,
+) -> Result<Vec<f32>> {
+    let rgba = cbg_to_rgba(image)?;
+    let width = usize::from(image.width);
+    let height = usize::from(image.height);
+    let (src_x, src_y, src_w, src_h) =
+        source_rect.unwrap_or((0.0, 0.0, width as f32, height as f32));
+    let mut feature = Vec::with_capacity(feature_width * feature_height * 3);
+    for y in 0..feature_height {
+        let sample_y = (src_y + ((y as f32 + 0.5) * src_h / feature_height as f32))
+            .floor()
+            .clamp(0.0, (height.saturating_sub(1)) as f32) as usize;
+        for x in 0..feature_width {
+            let sample_x = (src_x + ((x as f32 + 0.5) * src_w / feature_width as f32))
+                .floor()
+                .clamp(0.0, (width.saturating_sub(1)) as f32) as usize;
+            let offset = (sample_y * width + sample_x) * 4;
+            feature.push(rgba[offset] as f32);
+            feature.push(rgba[offset + 1] as f32);
+            feature.push(rgba[offset + 2] as f32);
+        }
+    }
+    Ok(feature)
+}
+
+fn gallery_feature_distance(left: &[f32], right: &[f32]) -> f64 {
+    let len = left.len().min(right.len());
+    if len == 0 {
+        return f64::INFINITY;
+    }
+    let mut total = 0.0f64;
+    for index in 0..len {
+        let diff = f64::from(left[index] - right[index]);
+        total += diff * diff;
+    }
+    (total / len as f64).sqrt()
+}
+
+fn sdc_decompress_file(input: &Path, output: Option<&Path>) -> Result<()> {
+    let data = fs::read(input)?;
+    let decompressed = decompress_sdc(&data)?;
+    println!("sdc_decompress_version=1");
+    println!("input={}", input.display());
+    println!("input_bytes={}", data.len());
+    println!("output_bytes={}", decompressed.len());
+    if let Some(output) = output {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output)?;
+        file.write_all(&decompressed)?;
+        println!("output={}", output.display());
+    }
+    Ok(())
+}
+
+fn gdb_viewed_images(input: &Path) -> Result<()> {
+    let data = fs::read(input)?;
+    let names = gdb_viewed_image_names(&data)?;
+    println!("gdb_viewed_images_version=1");
+    println!("input={}", input.display());
+    println!("input_bytes={}", data.len());
+    println!("viewed_image_count={}", names.len());
+    for (index, name) in names.iter().enumerate() {
+        println!(
+            "viewed_image_index={} name={}",
+            index,
+            String::from_utf8_lossy(name)
+        );
+    }
+    Ok(())
+}
+
 fn image_info(game_dir: &Path, names: &[String]) -> Result<()> {
     let requested = names
         .iter()
@@ -2018,7 +2831,7 @@ fn audit_scenario_command(game_dir: &Path, scenario_name: &str, opcode: u32) -> 
     let mut vm = ScenarioVm::new(program);
     let mut event_index = 0usize;
     let mut match_count = 0usize;
-    println!("scenario_command_audit_version=2");
+    println!("scenario_command_audit_version=3");
     println!("scenario={scenario_name}");
     println!("opcode=0x{opcode:04x}");
     loop {
@@ -2047,12 +2860,447 @@ fn audit_scenario_command(game_dir: &Path, scenario_name: &str, opcode: u32) -> 
                 );
                 match_count += 1;
             }
+            ScenarioEvent::Message(message) if message.opcode == opcode => {
+                print_scenario_command_match(
+                    match_count,
+                    event_index,
+                    message.offset,
+                    &message.int_args,
+                    message.name.into_iter().collect::<Vec<_>>().as_slice(),
+                    &[],
+                );
+                match_count += 1;
+            }
+            ScenarioEvent::Choice(choice) if choice.opcode == opcode => {
+                print_scenario_command_match(
+                    match_count,
+                    event_index,
+                    choice.offset,
+                    &choice.int_args,
+                    &choice.options,
+                    &[],
+                );
+                match_count += 1;
+            }
+            ScenarioEvent::Wait(wait) if wait.opcode == opcode => {
+                let duration_ms = i32::try_from(wait.duration_ms).unwrap_or(i32::MAX);
+                print_scenario_command_match(
+                    match_count,
+                    event_index,
+                    wait.offset,
+                    &[duration_ms],
+                    &[],
+                    &[],
+                );
+                match_count += 1;
+            }
+            ScenarioEvent::MessageControl(control) if control.opcode == opcode => {
+                let duration_ms = i32::try_from(control.duration_ms).unwrap_or(i32::MAX);
+                print_scenario_command_match(
+                    match_count,
+                    event_index,
+                    control.offset,
+                    &[duration_ms],
+                    &[],
+                    &[],
+                );
+                match_count += 1;
+            }
+            ScenarioEvent::MessageStyle(style) if style.opcode == opcode => {
+                print_scenario_command_match(
+                    match_count,
+                    event_index,
+                    style.offset,
+                    &style.int_args,
+                    &[],
+                    &[],
+                );
+                match_count += 1;
+            }
             ScenarioEvent::Halted => break,
             _ => {}
         }
     }
+    if match_count == 0 && opcode < 0x0180 {
+        let program = ScenarioProgram::parse(&script)?;
+        let commands = ScenarioVm::new(program).control_command_trace()?;
+        for (command_index, command) in commands.iter().enumerate() {
+            if command.opcode != opcode {
+                continue;
+            }
+            print_scenario_command_match(
+                match_count,
+                command_index + 1,
+                command.offset,
+                &command.int_args,
+                &command.string_args,
+                &[],
+            );
+            match_count += 1;
+        }
+    }
     println!("match_count={match_count}");
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct ScenarioImageAuditRow {
+    category: &'static str,
+    event_count: usize,
+    scenario_names: BTreeSet<Vec<u8>>,
+    first_order: usize,
+    first_scenario: Vec<u8>,
+    first_event: usize,
+    first_offset: usize,
+    durations_ms: BTreeSet<i32>,
+}
+
+#[derive(Debug, Default)]
+struct ScenarioVoiceSpeakerRow {
+    voice_count: usize,
+    message_count: usize,
+    scenario_names: BTreeSet<Vec<u8>>,
+    first_order: usize,
+    first_scenario: Vec<u8>,
+    first_event: usize,
+    first_offset: usize,
+}
+
+fn audit_scenario_images(game_dir: &Path, prefix: Option<&str>, opcode: u32) -> Result<()> {
+    if !(0x0100..=0x03ff).contains(&opcode) {
+        return Err(SakuraError::UnsupportedFormat(
+            "scenario image opcode must be in 0x0100..=0x03ff".to_owned(),
+        )
+        .into());
+    }
+
+    let archive_paths = collect_archive_files(game_dir)?;
+    let normalized_prefix = prefix.map(|value| value.as_bytes().to_ascii_lowercase());
+    let mut canonical = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+    for path in &archive_paths {
+        let data = fs::read(path)?;
+        let archive = ArcArchive::parse(&data)?;
+        for entry in archive.entries() {
+            let name = entry.name.as_bytes();
+            if normalized_prefix
+                .as_deref()
+                .is_some_and(|want| !name.to_ascii_lowercase().starts_with(want))
+            {
+                continue;
+            }
+            let payload = archive.entry_data(entry)?;
+            if sniff_payload(payload) != PayloadKind::Dsc {
+                continue;
+            }
+            let decompressed = decompress_dsc(payload)?;
+            if is_buriko_script_v1(&decompressed) {
+                canonical.insert(name.to_ascii_lowercase(), decompressed);
+            }
+        }
+    }
+
+    let mut rows = BTreeMap::<Vec<u8>, ScenarioImageAuditRow>::new();
+    let mut category_counts = BTreeMap::<&'static str, usize>::new();
+    let mut command_count = 0usize;
+    let mut hit_count = 0usize;
+    let mut error_count = 0usize;
+    let mut scenario_count = 0usize;
+    let mut skipped_function_library_count = 0usize;
+
+    for (scenario_name, data) in canonical {
+        if scenario_name.eq_ignore_ascii_case(b"yuzu_2g") {
+            skipped_function_library_count += 1;
+            continue;
+        }
+        scenario_count += 1;
+        let program = match ScenarioProgram::parse(&data) {
+            Ok(program) => program,
+            Err(error) => {
+                error_count += 1;
+                println!(
+                    "scenario={} error={error}",
+                    String::from_utf8_lossy(&scenario_name)
+                );
+                continue;
+            }
+        };
+        let mut vm = ScenarioVm::new(program);
+        let mut event_index = 0usize;
+        loop {
+            let event = match vm.next_event() {
+                Ok(event) => event,
+                Err(error) => {
+                    error_count += 1;
+                    println!(
+                        "scenario={} event={} error={error}",
+                        String::from_utf8_lossy(&scenario_name),
+                        event_index + 1
+                    );
+                    break;
+                }
+            };
+            event_index += 1;
+            match event {
+                ScenarioEvent::Graph(command) if command.opcode == opcode => {
+                    command_count += 1;
+                    for name in command
+                        .string_args
+                        .iter()
+                        .filter(|name| scenario_image_asset_name(name))
+                    {
+                        hit_count += 1;
+                        let key = name.to_ascii_lowercase();
+                        let category = scenario_image_category(&key);
+                        let row = rows.entry(key).or_insert_with(|| ScenarioImageAuditRow {
+                            category,
+                            first_order: hit_count,
+                            first_scenario: scenario_name.clone(),
+                            first_event: event_index,
+                            first_offset: command.offset,
+                            ..ScenarioImageAuditRow::default()
+                        });
+                        row.event_count += 1;
+                        row.scenario_names.insert(scenario_name.clone());
+                        if let Some(duration) = command.int_args.first().copied() {
+                            row.durations_ms.insert(duration);
+                        }
+                    }
+                }
+                ScenarioEvent::Halted => break,
+                _ => {}
+            }
+        }
+    }
+
+    for row in rows.values() {
+        *category_counts.entry(row.category).or_default() += 1;
+    }
+
+    println!("scenario_image_audit_version=1");
+    println!("opcode=0x{opcode:04x}");
+    println!("prefix={}", prefix.unwrap_or(""));
+    println!("scenario_count={scenario_count}");
+    println!("skipped_function_library_count={skipped_function_library_count}");
+    println!("command_count={command_count}");
+    println!("image_hit_count={hit_count}");
+    println!("image_count={}", rows.len());
+    println!("error_count={error_count}");
+    println!(
+        "category_counts={}",
+        category_counts
+            .iter()
+            .map(|(category, count)| format!("{category}:{count}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+
+    let mut ordered = rows.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|(_, row)| row.first_order);
+    for (index, (name, row)) in ordered.iter().enumerate() {
+        println!(
+            "image={index} name={} category={} hits={} scenarios={} first_scenario={} first_event={} first_offset=0x{:x} durations_ms=[{}]",
+            String::from_utf8_lossy(name),
+            row.category,
+            row.event_count,
+            row.scenario_names.len(),
+            String::from_utf8_lossy(&row.first_scenario),
+            row.first_event,
+            row.first_offset,
+            row.durations_ms
+                .iter()
+                .map(i32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+    Ok(())
+}
+
+fn audit_scenario_voice_speakers(game_dir: &Path, prefix: Option<&str>) -> Result<()> {
+    let archive_paths = collect_archive_files(game_dir)?;
+    let normalized_prefix = prefix.map(|value| value.as_bytes().to_ascii_lowercase());
+    let mut canonical = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+    for path in &archive_paths {
+        let data = fs::read(path)?;
+        let archive = ArcArchive::parse(&data)?;
+        for entry in archive.entries() {
+            let name = entry.name.as_bytes();
+            if normalized_prefix
+                .as_deref()
+                .is_some_and(|want| !name.to_ascii_lowercase().starts_with(want))
+            {
+                continue;
+            }
+            let payload = archive.entry_data(entry)?;
+            if sniff_payload(payload) != PayloadKind::Dsc {
+                continue;
+            }
+            let decompressed = decompress_dsc(payload)?;
+            if is_buriko_script_v1(&decompressed) {
+                canonical.insert(name.to_ascii_lowercase(), decompressed);
+            }
+        }
+    }
+
+    let mut rows = BTreeMap::<(Vec<u8>, u64, usize), ScenarioVoiceSpeakerRow>::new();
+    let mut voice_count = 0usize;
+    let mut associated_count = 0usize;
+    let mut scenario_count = 0usize;
+    let mut skipped_function_library_count = 0usize;
+    let mut error_count = 0usize;
+    let mut order = 0usize;
+    for (scenario_name, data) in canonical {
+        if scenario_name.eq_ignore_ascii_case(b"yuzu_2g") {
+            skipped_function_library_count += 1;
+            continue;
+        }
+        scenario_count += 1;
+        let program = match ScenarioProgram::parse(&data) {
+            Ok(program) => program,
+            Err(error) => {
+                error_count += 1;
+                println!(
+                    "scenario={} error={error}",
+                    String::from_utf8_lossy(&scenario_name)
+                );
+                continue;
+            }
+        };
+        let mut vm = ScenarioVm::new(program);
+        let mut pending_voice: Option<(Vec<u8>, usize, usize)> = None;
+        let mut event_index = 0usize;
+        loop {
+            let event = match vm.next_event() {
+                Ok(event) => event,
+                Err(error) => {
+                    error_count += 1;
+                    println!(
+                        "scenario={} event={} error={error}",
+                        String::from_utf8_lossy(&scenario_name),
+                        event_index + 1
+                    );
+                    break;
+                }
+            };
+            event_index += 1;
+            match event {
+                ScenarioEvent::Sound(command)
+                    if command.opcode == 0x01a8 || command.opcode == 0x01a9 =>
+                {
+                    if let Some(name) = command
+                        .string_args
+                        .iter()
+                        .rev()
+                        .find(|value| scenario_voice_asset_name(value))
+                    {
+                        voice_count += 1;
+                        pending_voice = Some((
+                            scenario_voice_prefix(name).to_vec(),
+                            event_index,
+                            command.offset,
+                        ));
+                    }
+                }
+                ScenarioEvent::Message(message) => {
+                    if let Some((voice_prefix, voice_event, voice_offset)) = pending_voice.take() {
+                        associated_count += 1;
+                        let speaker = message.name.unwrap_or(b"");
+                        let key = (voice_prefix.clone(), fnv1a64(speaker), speaker.len());
+                        let row = rows.entry(key).or_insert_with(|| ScenarioVoiceSpeakerRow {
+                            first_order: order,
+                            first_scenario: scenario_name.clone(),
+                            first_event: voice_event,
+                            first_offset: voice_offset,
+                            ..ScenarioVoiceSpeakerRow::default()
+                        });
+                        row.voice_count += 1;
+                        row.message_count += 1;
+                        row.scenario_names.insert(scenario_name.clone());
+                        order += 1;
+                    }
+                }
+                ScenarioEvent::Halted => break,
+                _ => {}
+            }
+        }
+    }
+
+    let mut sorted = rows.into_iter().collect::<Vec<_>>();
+    sorted.sort_by(|left, right| {
+        right
+            .1
+            .voice_count
+            .cmp(&left.1.voice_count)
+            .then_with(|| left.1.first_order.cmp(&right.1.first_order))
+    });
+    println!("scenario_voice_speaker_audit_version=1");
+    println!("prefix={}", prefix.unwrap_or(""));
+    println!("scenario_count={scenario_count}");
+    println!("skipped_function_library_count={skipped_function_library_count}");
+    println!("voice_count={voice_count}");
+    println!("associated_count={associated_count}");
+    println!("row_count={}", sorted.len());
+    println!("error_count={error_count}");
+    for ((voice_prefix, speaker_hash, speaker_len), row) in sorted {
+        println!(
+            "voice_prefix={} speaker_len={} speaker_hash={:016x} voice_count={} message_count={} scenario_count={} first_scenario={} first_event={} first_offset=0x{:x}",
+            String::from_utf8_lossy(&voice_prefix),
+            speaker_len,
+            speaker_hash,
+            row.voice_count,
+            row.message_count,
+            row.scenario_names.len(),
+            String::from_utf8_lossy(&row.first_scenario),
+            row.first_event,
+            row.first_offset,
+        );
+    }
+    Ok(())
+}
+
+fn scenario_voice_asset_name(value: &[u8]) -> bool {
+    let len = value.len();
+    (5..=48).contains(&len)
+        && value
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        && value.iter().any(|byte| *byte == b'_')
+}
+
+fn scenario_voice_prefix(name: &[u8]) -> &[u8] {
+    let end = name
+        .iter()
+        .position(|byte| *byte == b'_')
+        .unwrap_or(name.len());
+    &name[..end]
+}
+
+fn scenario_image_asset_name(value: &[u8]) -> bool {
+    let len = value.len();
+    (3..=48).contains(&len)
+        && value
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        && matches!(
+            scenario_image_category(&value.to_ascii_lowercase()),
+            "background" | "event" | "sprite" | "icon" | "system"
+        )
+}
+
+fn scenario_image_category(value: &[u8]) -> &'static str {
+    if value.starts_with(b"bg") {
+        "background"
+    } else if value.starts_with(b"ev") {
+        "event"
+    } else if value.starts_with(b"sp") {
+        "sprite"
+    } else if value.starts_with(b"ic") {
+        "icon"
+    } else if value.starts_with(b"sg") {
+        "system"
+    } else {
+        "other"
+    }
 }
 
 fn audit_scenario_controls(game_dir: &Path, scenario_name: &str) -> Result<()> {
@@ -2176,6 +3424,12 @@ fn scenario_event_window(
                 ScenarioEvent::MessageControl(control) => println!(
                     "event={event_index} kind=message-control opcode=0x{:04x} offset=0x{:x} duration_ms={}",
                     control.opcode, control.offset, control.duration_ms,
+                ),
+                ScenarioEvent::MessageStyle(style) => println!(
+                    "event={event_index} kind=message-style opcode=0x{:04x} offset=0x{:x} ints=[{}]",
+                    style.opcode,
+                    style.offset,
+                    format_i32_args(&style.int_args),
                 ),
                 ScenarioEvent::Halted => println!("event={event_index} kind=halted"),
             }

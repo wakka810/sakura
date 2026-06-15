@@ -88,6 +88,12 @@ pub fn write_scenario_first_event_packet(payload: &[u8], out: &mut [u8]) -> Resu
             write_u32(out, 12, saturating_u32(control.offset));
             write_u32(out, 24, control.duration_ms);
         }
+        ScenarioEvent::MessageStyle(style) => {
+            write_u32(out, 4, 9);
+            write_u32(out, 8, style.opcode);
+            write_u32(out, 12, saturating_u32(style.offset));
+            write_u32(out, 24, saturating_u32(style.int_args.len()));
+        }
         ScenarioEvent::Halted => write_u32(out, 4, 4),
     }
     Ok(())

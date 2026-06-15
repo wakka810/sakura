@@ -70,6 +70,7 @@ fn session_event_code(event: &SessionEvent<'_>) -> u32 {
         SessionEvent::Wait { .. } => 6,
         SessionEvent::Sound { .. } => 7,
         SessionEvent::MessageControl { .. } => 8,
+        SessionEvent::MessageStyle { .. } => 9,
     }
 }
 
