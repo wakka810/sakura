@@ -119,6 +119,35 @@ export function createAudioMixer() {
       trackScriptVolume = clampVolume(volume);
       audio.volume = effectiveBgmVolume(trackScriptVolume);
       state.trackReady = 1;
+      if (loop) {
+        // Looping BGM must not stop on its own. Browsers pause media elements
+        // on tab blur / audio-focus loss; auto-resume the current looping track
+        // when that happens. Intentional stops null `audio` (and clear onpause
+        // in resetBgm), so the `audio === currentAudio` guard skips those.
+        const currentAudio = audio;
+        let lastResumeAt = 0;
+        audio.onpause = () => {
+          if (audio !== currentAudio || currentAudio.ended) {
+            return;
+          }
+          // Don't fight the browser while the tab is hidden; the page's
+          // visibilitychange handler resumes on return. Throttle resumes so a
+          // contended audio focus can't trigger a pause/play storm (which would
+          // jank the main thread).
+          if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+            return;
+          }
+          const now = globalThis.performance?.now?.() ?? Date.now();
+          if (now - lastResumeAt < 700) {
+            return;
+          }
+          lastResumeAt = now;
+          const resumed = currentAudio.play();
+          if (resumed && typeof resumed.catch === "function") {
+            resumed.catch(() => {});
+          }
+        };
+      }
       try {
         await audio.play();
         state.playSuccess += 1;
@@ -255,6 +284,27 @@ export function createAudioMixer() {
       resetBgm();
       return active;
     },
+    // Resume the current looping BGM if a browser policy paused it (tab blur,
+    // audio-focus loss). No-op when already playing or when no track is active.
+    resumeTrack() {
+      if (audio !== null && audio.paused && !audio.ended) {
+        const resumed = audio.play();
+        if (resumed && typeof resumed.catch === "function") {
+          resumed.catch(() => {});
+        }
+        return true;
+      }
+      return false;
+    },
+    // Pause the current track without tearing it down (the looping auto-resume
+    // handler will pull it back when appropriate).
+    pauseTrack() {
+      if (audio !== null && !audio.paused) {
+        audio.pause();
+        return true;
+      }
+      return false;
+    },
     stopVoice(channel) {
       const channelIndex = clampSfxChannel(channel);
       const active = voiceChannels[channelIndex].audio !== null;
@@ -315,6 +365,11 @@ export function createAudioMixer() {
       ...state,
       loopSfxVolume: loopSfxAudio?.volume ?? 0,
       trackVolume: audio?.volume ?? 0,
+      trackPaused: audio ? audio.paused : null,
+      trackEnded: audio ? audio.ended : null,
+      trackLoop: audio ? audio.loop : null,
+      trackCurrentTime: audio?.currentTime ?? 0,
+      trackDuration: audio && Number.isFinite(audio.duration) ? audio.duration : 0,
     }),
     destroy: resetAll,
   };
@@ -351,6 +406,9 @@ export function createAudioMixer() {
     state.ready = false;
     state.trackReady = 0;
     trackScriptVolume = 1;
+    if (audio !== null) {
+      audio.onpause = null;
+    }
     audio?.pause();
     audio = null;
     if (activeUrl !== null) {

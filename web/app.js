@@ -699,6 +699,25 @@ canvas.addEventListener("click", (event) => {
     }
   }
 }, true);
+// Browsers pause media elements when the tab is hidden / loses audio focus.
+// When the page becomes visible again, resume the title BGM so it does not
+// stay silently stopped.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") {
+    return;
+  }
+  const mounted = activeInstall;
+  if (mounted?.stage === "title" && mounted.titleBgmPlaying) {
+    mounted.audioMixer?.resumeTrack?.();
+  }
+  retryTitleBgm(mounted);
+});
+window.addEventListener("focus", () => {
+  const mounted = activeInstall;
+  if (mounted?.stage === "title" && mounted.titleBgmPlaying) {
+    mounted.audioMixer?.resumeTrack?.();
+  }
+});
 canvas.addEventListener("contextmenu", (event) => {
   if (dialogIsOpen(activeInstall)) {
     event.preventDefault();
@@ -2302,25 +2321,54 @@ const TITLE_SFX_DECIDE = "SSE000001";
 // with scenario SE; UI SFX only play at the title in any case.
 const TITLE_SFX_CHANNEL = 8;
 
-async function loadTitleSfx(mounted, name) {
-  if (!mounted.titleSfxCache) {
-    mounted.titleSfxCache = new Map();
+// Reuse one persistent Audio element per UI sound. The previous mixer.playSfx
+// path created a brand-new Audio element + blob URL on every hover; rapid mouse
+// movement across the menu churned hundreds of elements, which stutters the main
+// thread and can interrupt the BGM. Decoding the Ogg once and replaying the same
+// element (currentTime = 0) avoids that churn entirely.
+async function loadTitleSfxElement(mounted, name) {
+  if (!mounted.titleSfxElements) {
+    mounted.titleSfxElements = new Map();
   }
-  if (!mounted.titleSfxCache.has(name)) {
+  if (!mounted.titleSfxElements.has(name)) {
+    let element = null;
     const payload = await mounted.catalog?.readPayloadByNameBytes?.(assetNameEncoder.encode(name));
     const ogg = payload ? mounted.core?.bgiAudioOgg?.(payload) ?? null : null;
-    mounted.titleSfxCache.set(name, ogg);
+    if (ogg) {
+      element = new Audio();
+      element.preload = "auto";
+      element.src = URL.createObjectURL(new Blob([ogg], { type: "audio/ogg" }));
+    }
+    mounted.titleSfxElements.set(name, element);
   }
-  return mounted.titleSfxCache.get(name) ?? null;
+  return mounted.titleSfxElements.get(name) ?? null;
+}
+
+// UI SFX volume follows the Config master/SE levels, like the in-engine SE bus.
+function titleSfxVolume(mounted) {
+  const settings = mounted?.titleConfigState?.settings ?? readStoredScenarioConfigSettings();
+  const master = settings ? settings.masterVolume : 1;
+  const sfx = settings ? settings.sfxVolume : 1;
+  return Math.max(0, Math.min((Number(master) || 0) * (Number(sfx) || 0), 1));
 }
 
 function playTitleSfx(mounted, name) {
-  if (!mounted?.audioMixer?.playSfx) {
+  if (!mounted) {
     return;
   }
-  void loadTitleSfx(mounted, name).then((ogg) => {
-    if (ogg) {
-      mounted.audioMixer.playSfx(ogg, { channel: TITLE_SFX_CHANNEL });
+  void loadTitleSfxElement(mounted, name).then((element) => {
+    if (!element) {
+      return;
+    }
+    try {
+      element.volume = titleSfxVolume(mounted);
+      element.currentTime = 0;
+      const played = element.play();
+      if (played && typeof played.catch === "function") {
+        played.catch(() => {});
+      }
+    } catch {
+      // ignore transient play/seek races
     }
   });
 }

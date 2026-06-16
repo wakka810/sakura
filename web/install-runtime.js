@@ -60,6 +60,12 @@ const RUNTIME_SESSION_BOOTSTRAP_MAX_STEPS = 192;
 const RUNTIME_SESSION_BOOTSTRAP_READY_GRAPH_SERVICE_IDS = new Set([0x4c, 0x94, 0x95, 0x96]);
 const RUNTIME_SESSION_TICK_EVENTS = 1;
 const RUNTIME_SESSION_MAX_INSTRUCTIONS = 100000;
+// Per-step instruction cap for the one-time warm bootstrap. The bootstrap runs
+// concurrently with the frontend title (the page already shows the title + BGM),
+// so a single multi-100k-instruction system-VM step would block the main thread
+// for seconds (a visible freeze). Keep each step short; the bootstrap simply
+// uses more (yielding) steps to reach readiness.
+const RUNTIME_SESSION_BOOTSTRAP_MAX_INSTRUCTIONS = 6000;
 const RUNTIME_CREATE_YIELD_INTERVAL = 4;
 const RUNTIME_QUEUE_SAFE_ARG_LIMIT = 256;
 const RUNTIME_GRAPH_PROBE_SAMPLE_BYTES = 64;
@@ -865,7 +871,18 @@ function startSystemRuntime(catalog, core, mounted, hooks) {
       asyncStage = SYSTEM_RUNTIME_STAGE_NOTIFY_BEGIN;
       notifyRuntimeUpdate(hooks, mounted);
       asyncStage = SYSTEM_RUNTIME_STAGE_NOTIFY_DONE;
-      startRuntimeSessionLoop(mounted, core, hooks);
+      // The continuous system-VM session loop steps the ._bp system scripts
+      // forever. Past the one-time warm bootstrap (which already captured the
+      // entry sound/graph queues the frontend uses), stepping them drives the
+      // engine into its unbounded internal-structure subsystem, producing
+      // multi-second synchronous WASM steps that freeze the main thread and
+      // interrupt the title BGM (observed as "setTimeout handler took N ms"
+      // violations). The frontend title/scenario does not depend on it, so only
+      // run the continuous loop under explicit diagnostics (?deepProbe=1).
+      // Probes/tests can still start it via resumeRuntimeSession().
+      if (diagnosticsEnabled) {
+        startRuntimeSessionLoop(mounted, core, hooks);
+      }
       asyncStage = SYSTEM_RUNTIME_STAGE_AUDIO_SCHEDULE_BEGIN;
       scheduleRuntimeAudioFinalization(mounted, hooks, entrySoundQueue);
       asyncStage = SYSTEM_RUNTIME_STAGE_AUDIO_SCHEDULE_DONE;
@@ -1738,6 +1755,16 @@ function updateAudioMixerSummary(mounted) {
 }
 
 function prepareAudioMixer(mounted, ogg, queue) {
+  // mounted.audioMixer.prepare() calls resetBgm(), which stops whatever BGM is
+  // currently playing. This path only feeds the diagnostic "Play queued audio"
+  // button (playFirstQueued); the frontend owns all real playback (the title
+  // BGM via startTitleBgm and scenario BGM via the ScenarioPlayer). Running it
+  // in normal play resets the playing title BGM (observed: a scheduled
+  // finalization setTimeout calling prepare -> resetBgm -> pause of the title
+  // track). Only prepare the mixer queue under explicit diagnostics.
+  if (!runtimeDiagnosticsEnabled()) {
+    return;
+  }
   mounted.summary.localRuntimeAudioPrepareAttempts += 1;
   try {
     mounted.audioMixer.prepare(ogg, queue);
@@ -2161,7 +2188,7 @@ async function warmMountedRuntimeSession(mounted, core, hooks) {
       core,
       hooks,
       step === 0 ? RUNTIME_SESSION_BOOTSTRAP_EVENTS : 1,
-      RUNTIME_SESSION_MAX_INSTRUCTIONS,
+      RUNTIME_SESSION_BOOTSTRAP_MAX_INSTRUCTIONS,
     );
     if (packet === null) {
       return null;
