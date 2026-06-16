@@ -505,6 +505,11 @@ canvas.addEventListener("mousemove", (event) => {
   }
   const hit = titleMenuHit(mounted, event.clientX, event.clientY);
   if (hit !== mounted.hoverIndex) {
+    // Cursor-move SFX (SSE000000) plays when the selection lands on a new
+    // button, matching the original title menu behaviour.
+    if (hit >= 0) {
+      playTitleSfx(mounted, TITLE_SFX_CURSOR);
+    }
     mounted.hoverIndex = hit;
     paintMountedFrame(mounted);
   }
@@ -626,7 +631,7 @@ globalThis.sakuraAdvanceBoot = () => {
   if (dialogIsOpen(mounted)) {
     return true;
   }
-  if (mounted.stage === "boot") { if (bootPhaseIsHold(mounted)) { advanceBootPhase(mounted); publishRuntimeState(true); } return true; }
+  if (mounted.stage === "boot") { advanceBootPhase(mounted); publishRuntimeState(true); return true; }
   if (mounted.stage === "title") {
     if (
       titleConfigIsOpen(mounted)
@@ -646,10 +651,11 @@ canvas.addEventListener("click", (event) => {
   if (!mounted) return;
   retryTitleBgm(mounted);
   if (mounted.stage === "boot") {
-    if (bootPhaseIsHold(mounted)) {
-      advanceBootPhase(mounted);
-      publishRuntimeState(true);
-    }
+    // The original logo->title sequence lets a click/repeated clicks skip the
+    // current crossfade or hold and advance toward the title. Advance one phase
+    // per click regardless of whether it is a hold or a transition.
+    advanceBootPhase(mounted);
+    publishRuntimeState(true);
     return;
   }
   if (mounted.stage === "title") {
@@ -686,6 +692,8 @@ canvas.addEventListener("click", (event) => {
     }
     const hit = titleMenuHit(mounted, event.clientX, event.clientY);
     if (activateTitleMenu(mounted, hit)) {
+      // Decide/click SFX (SSE000001) on a successful menu activation.
+      playTitleSfx(mounted, TITLE_SFX_DECIDE);
       event.preventDefault();
       event.stopPropagation();
     }
@@ -832,6 +840,8 @@ function publishRuntimeState(force = false) {
   const state = {
     ...(activeInstall?.safeState ?? { mounted: false }),
     summary,
+    hostStage: activeInstall?.stage ?? null,
+    hostBootPhase: activeInstall?.bootPhase ?? 0,
     player: activeInstall?.player?.safeState ?? { active: false },
     input: input.snapshot(),
     entrySoundQueue: activeInstall?.safeState?.entrySoundQueue ?? {
@@ -1637,6 +1647,23 @@ function openTitleConfigWindow(mounted) {
     state.settings = settings;
   }
   openScenarioConfigWindow(state);
+  applyTitleConfigVolumes(mounted);
+}
+
+// Apply the Config master/BGM/SE/voice levels to the title audio mixer so that
+// volume changes made at the title screen actually affect the title BGM (and
+// any UI SFX), mirroring the in-scenario player's applyConfigSettings().
+function applyTitleConfigVolumes(mounted) {
+  const settings = mounted?.titleConfigState?.settings ?? readStoredScenarioConfigSettings();
+  if (!settings || !mounted?.audioMixer?.setVolumes) {
+    return;
+  }
+  mounted.audioMixer.setVolumes({
+    master: settings.masterVolume,
+    bgm: settings.bgmVolume,
+    sfx: settings.sfxVolume,
+    voice: settings.voiceVolume,
+  });
 }
 
 function updateTitleConfigHover(mounted, clientX, clientY) {
@@ -1657,6 +1684,7 @@ function applyTitleConfigClick(mounted, clientX, clientY) {
   const control = scenarioConfigControlAt(point.x, point.y, state, mounted.configWindow);
   const result = applyScenarioConfigControl(state, control);
   if (result.handled && result.reason !== "title_pending") {
+    applyTitleConfigVolumes(mounted);
     storeScenarioConfigSettings(state.settings);
   } else if (result.reason === "title_pending") {
     storeScenarioConfigSettings(state.settings);
@@ -2242,6 +2270,7 @@ async function startTitleBgm(mounted) {
   if (result?.ok === true) {
     mounted.titleBgmPlaying = name;
     mounted.titleBgmPendingRetry = false;
+    applyTitleConfigVolumes(mounted);
   } else {
     mounted.titleBgmPendingRetry = true;
   }
@@ -2263,6 +2292,39 @@ function retryTitleBgm(mounted) {
   }
 }
 
+// Title menu sound effects. title._bp registers system.arc SSE000000 to sound
+// slot 16 (cursor / hover-move) and SSE000001 to slot 17 (decide / click) via
+// `service:Sound:20`; the menu button widget plays them on hover-enter and on
+// click. Both are DSC-compressed `bw ` Ogg waves (decoded by core.bgiAudioOgg).
+const TITLE_SFX_CURSOR = "SSE000000";
+const TITLE_SFX_DECIDE = "SSE000001";
+// Dedicated one-shot channel (top of the mixer's 9) so UI SFX never collide
+// with scenario SE; UI SFX only play at the title in any case.
+const TITLE_SFX_CHANNEL = 8;
+
+async function loadTitleSfx(mounted, name) {
+  if (!mounted.titleSfxCache) {
+    mounted.titleSfxCache = new Map();
+  }
+  if (!mounted.titleSfxCache.has(name)) {
+    const payload = await mounted.catalog?.readPayloadByNameBytes?.(assetNameEncoder.encode(name));
+    const ogg = payload ? mounted.core?.bgiAudioOgg?.(payload) ?? null : null;
+    mounted.titleSfxCache.set(name, ogg);
+  }
+  return mounted.titleSfxCache.get(name) ?? null;
+}
+
+function playTitleSfx(mounted, name) {
+  if (!mounted?.audioMixer?.playSfx) {
+    return;
+  }
+  void loadTitleSfx(mounted, name).then((ogg) => {
+    if (ogg) {
+      mounted.audioMixer.playSfx(ogg, { channel: TITLE_SFX_CHANNEL });
+    }
+  });
+}
+
 const TITLE_NOAUTO = typeof location !== "undefined" && (location.search || "").includes("noauto");
 let stageFadeAlpha = 1;
 let stageAnimRunning = false;
@@ -2275,6 +2337,7 @@ function stageEnter(mounted) {
   mounted.stageEnteredAt = performance.now();
   startStageAnim(mounted);
   if (mounted.stage === "title") {
+    applyTitleConfigVolumes(mounted);
     void startTitleBgm(mounted);
   } else {
     stopTitleBgm(mounted);

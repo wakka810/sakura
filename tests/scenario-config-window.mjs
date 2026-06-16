@@ -40,39 +40,70 @@ const state = createScenarioConfigState();
 openScenarioConfigWindow(state);
 assert.equal(state.open, true);
 
-const slider = scenarioConfigControlAt(562, 156, state, skin);
+// textSpeed meter: trackX=330, y=118, 10 icons at +28. Last icon (step 9) sits
+// at x=330+9*28=582; clicking it sets value=9/9=1.
+const slider = scenarioConfigControlAt(582, 125, state, skin);
 assert.equal(slider?.kind, "slider");
 assert.equal(slider.key, "textSpeed");
+assert.equal(slider.step, 9);
 assert.equal(scenarioConfigHoverKey(slider), "textSpeed");
 let result = applyScenarioConfigControl(state, slider);
 assert.equal(result.reason, "textSpeed");
 assert.equal(state.settings.textSpeed, 1);
 
-const screenMode = scenarioConfigControlAt(450, 320, state, skin);
+// First icon (step 0) -> value 0.
+const sliderMin = scenarioConfigControlAt(338, 125, state, skin);
+assert.equal(sliderMin.step, 0);
+applyScenarioConfigControl(state, sliderMin);
+assert.equal(state.settings.textSpeed, 0);
+
+// screenMode row Y=309: left column X=324 is フルスクリーン.
+const screenMode = scenarioConfigControlAt(400, 320, state, skin);
 assert.equal(screenMode?.kind, "choice");
 assert.equal(screenMode.key, "screenMode");
+assert.equal(screenMode.side, "left");
+assert.equal(scenarioConfigHoverKey(screenMode), "screenMode:left");
 applyScenarioConfigControl(state, screenMode);
 assert.equal(state.settings.screenMode, "fullscreen");
 
-const face = scenarioConfigControlAt(748, 390, state, skin);
+// Right column X=473 is ウィンドウ.
+const windowMode = scenarioConfigControlAt(540, 320, state, skin);
+assert.equal(windowMode.side, "right");
+applyScenarioConfigControl(state, windowMode);
+assert.equal(state.settings.screenMode, "window");
+
+// する/しない rows: left=true, right=false (e.g. continueSkipAfterChoice, Y=437).
+const skipOn = scenarioConfigControlAt(400, 450, state, skin);
+assert.equal(skipOn.key, "continueSkipAfterChoice");
+assert.equal(skipOn.value, true);
+applyScenarioConfigControl(state, skipOn);
+assert.equal(state.settings.continueSkipAfterChoice, true);
+
+// Portrait grid: columns 766,876,986,1096; rows 386,526. Index 0 = top-left.
+const face = scenarioConfigControlAt(780, 400, state, skin);
 assert.deepEqual(face, { kind: "characterVoice", index: 0 });
 applyScenarioConfigControl(state, face);
 assert.equal(state.settings.characterVoices[0], false);
 
-const reset = scenarioConfigControlAt(408, 680, state, skin);
+// Index 7 = bottom-right (col 3, row 1).
+const face7 = scenarioConfigControlAt(1140, 560, state, skin);
+assert.deepEqual(face7, { kind: "characterVoice", index: 7 });
+
+// Reset top-left (44,40), Title (940,40) + Back (1092,40) top-right.
+const reset = scenarioConfigControlAt(60, 55, state, skin);
 assert.deepEqual(reset, { kind: "button", action: "reset" });
 result = applyScenarioConfigControl(state, reset);
 assert.equal(result.reason, "reset");
 assert.equal(state.settings.textSpeed, 0.5);
 assert.equal(state.settings.characterVoices[0], true);
 
-const title = scenarioConfigControlAt(582, 680, state, skin);
+const title = scenarioConfigControlAt(960, 55, state, skin);
 assert.deepEqual(title, { kind: "button", action: "title" });
 result = applyScenarioConfigControl(state, title);
 assert.equal(result.reason, "title_pending");
 assert.equal(state.open, true);
 
-const back = scenarioConfigControlAt(756, 680, state, skin);
+const back = scenarioConfigControlAt(1110, 55, state, skin);
 assert.deepEqual(back, { kind: "button", action: "back" });
 result = applyScenarioConfigControl(state, back);
 assert.equal(result.reason, "closed");

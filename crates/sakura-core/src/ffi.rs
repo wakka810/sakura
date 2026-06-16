@@ -1,5 +1,5 @@
 use crate::archive::ArcIndex;
-use crate::audio::unwrap_bgi_audio;
+use crate::audio::unwrap_bgi_audio_owned;
 use crate::dsc::decompress_dsc;
 use crate::gdb::{gdb_viewed_image_names_nul_len, gdb_write_viewed_image_names};
 use crate::image::{cbg_to_rgba, decode_cbg, read_cbg_metadata};
@@ -281,7 +281,7 @@ pub unsafe extern "C" fn sakura_bgi_audio_ogg_len(ptr: *const u8, len: usize) ->
     let Some(data) = (unsafe { slice_from_abi(ptr, len) }) else {
         return FFI_SIZE_ERROR;
     };
-    let Ok(ogg) = unwrap_bgi_audio(data) else {
+    let Ok(ogg) = unwrap_bgi_audio_owned(data) else {
         return FFI_SIZE_ERROR;
     };
     ogg.len()
@@ -300,13 +300,13 @@ pub unsafe extern "C" fn sakura_bgi_audio_ogg_write(
     let Some(out) = (unsafe { mutable_slice_from_abi(out_ptr, out_len) }) else {
         return FFI_SIZE_ERROR;
     };
-    let Ok(ogg) = unwrap_bgi_audio(data) else {
+    let Ok(ogg) = unwrap_bgi_audio_owned(data) else {
         return FFI_SIZE_ERROR;
     };
     if out.len() < ogg.len() {
         return FFI_SIZE_ERROR;
     }
-    out[..ogg.len()].copy_from_slice(ogg);
+    out[..ogg.len()].copy_from_slice(&ogg);
     ogg.len()
 }
 
