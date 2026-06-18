@@ -568,8 +568,8 @@ function titleGraphicFullAssetName(assetName, gallerySlot) {
 function normalizeTitleGraphicUnlock(options) {
   const viewedImages = options?.viewedImages instanceof Set ? options.viewedImages : null;
   return {
-    forceUnlock: options?.forceUnlock === true || viewedImages === null,
-    viewedImages,
+    forceUnlock: options?.forceUnlock === true,
+    viewedImages: viewedImages ?? new Set(),
   };
 }
 

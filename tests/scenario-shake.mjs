@@ -1,4 +1,5 @@
 import {
+  createScenarioScreenShake,
   createPresetScenarioShake,
   scenarioShakeOffset,
 } from "../web/scenario-shake.js";
@@ -32,6 +33,32 @@ if (finished.active || finished.x !== 0 || finished.y !== 0) {
 const weak = createPresetScenarioShake(0, 0, 0);
 if (weak.durationMs !== 240 || weak.vectorX !== 1 || weak.vectorY !== 0) {
   throw new Error("0x03f1 weak horizontal preset is incorrect");
+}
+
+const screenShake = createScenarioScreenShake([0, 10, 2, 25, 5, 240], 2000);
+if (
+  screenShake.durationMs !== 240
+  || screenShake.mode !== 0
+  || screenShake.cycles !== 2
+  || screenShake.decayPercent !== 25
+  || screenShake.peakPixels !== 5
+) {
+  throw new Error("0x0232 screen shake arguments were not decoded");
+}
+
+const screenInitial = scenarioShakeOffset(screenShake, 2000);
+if (!screenInitial.active || screenInitial.x !== 0 || screenInitial.y !== -5) {
+  throw new Error(`0x0232 initial triangular offset drifted ${JSON.stringify(screenInitial)}`);
+}
+
+const screenMid = scenarioShakeOffset(screenShake, 2060);
+if (!screenMid.active || screenMid.x !== 0 || screenMid.y !== 5) {
+  throw new Error(`0x0232 first-cycle triangular peak drifted ${JSON.stringify(screenMid)}`);
+}
+
+const screenDecayed = scenarioShakeOffset(screenShake, 2180);
+if (!screenDecayed.active || screenDecayed.x !== 0 || screenDecayed.y !== 4) {
+  throw new Error(`0x0232 cycle decay drifted ${JSON.stringify(screenDecayed)}`);
 }
 
 console.log("scenario_shake=ok");

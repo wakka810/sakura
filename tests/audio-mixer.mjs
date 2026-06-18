@@ -133,6 +133,16 @@ if (
 ) {
   throw new Error(`unexpected track play state ${JSON.stringify({ track, state })}`);
 }
+const fadeInMixer = createAudioMixer();
+const fadeInTrack = await fadeInMixer.playTrack(new Uint8Array([0x4f, 0x67]), {
+  loop: true,
+  volume: 0.75,
+  fadeInMs: 1000,
+});
+if (!fadeInTrack.ok || fadeInMixer.state().trackVolume !== 0) {
+  throw new Error(`track fade-in did not start silent ${JSON.stringify(fadeInMixer.state())}`);
+}
+fadeInMixer.destroy();
 const voice = await trackMixer.playVoice(new Uint8Array([0x4f, 0x67, 0x67]), {
   volume: 0.75,
 });
@@ -255,6 +265,12 @@ const resumedTrack = await trackMixer.playTrack(new Uint8Array([0x4f, 0x67]), {
 });
 if (!resumedTrack.ok) {
   throw new Error("track did not resume for volume-change test");
+}
+if (!trackMixer.setTrackCurrentTime(12.5) || trackMixer.state().trackCurrentTime !== 12.5) {
+  throw new Error(`track currentTime restore failed ${JSON.stringify(trackMixer.state())}`);
+}
+if (!trackMixer.setLoopingSfxCurrentTime(3.25) || trackMixer.state().loopSfxCurrentTime !== 3.25) {
+  throw new Error(`looping SFX currentTime restore failed ${JSON.stringify(trackMixer.state())}`);
 }
 if (!trackMixer.setVolumes({ master: 0.5, bgm: 0.5, voice: 0.25, sfx: 0.5 })) {
   throw new Error("config volume update was rejected");

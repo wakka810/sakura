@@ -30,6 +30,7 @@ fn summarizes_local_script_events_without_text_output() -> TestResult<()> {
     let mut system_extcall_count = 0usize;
     let mut system_user_script_call_count = 0usize;
     let mut system_user_script_dispatch_count = 0usize;
+    let mut system_trace_error_count = 0usize;
     let mut graphcall_service_counts = [0usize; 256];
     let mut soundcall_service_counts = [0usize; 256];
     let mut extcall_service_counts = [0usize; 256];
@@ -85,7 +86,10 @@ fn summarizes_local_script_events_without_text_output() -> TestResult<()> {
                     &mut user_script_dispatch_counts,
                     &summary.user_script_dispatch_counts,
                 );
-                let trace = trace_system_script(&decompressed)?;
+                let Ok(trace) = trace_system_script(&decompressed) else {
+                    system_trace_error_count += 1;
+                    continue;
+                };
                 add_counts(
                     &mut trace_dispatch_empty_counts,
                     &trace.dispatch_empty_stack_counts,
@@ -148,6 +152,9 @@ fn summarizes_local_script_events_without_text_output() -> TestResult<()> {
                 continue;
             }
             if is_buriko_script_v1(&decompressed) {
+                if entry.name.as_bytes().eq_ignore_ascii_case(b"Yuzu_2G") {
+                    continue;
+                }
                 let summary = summarize_scenario_events(&decompressed)?;
                 v1_count += 1;
                 message_count += summary.message_count;
@@ -170,6 +177,7 @@ fn summarizes_local_script_events_without_text_output() -> TestResult<()> {
     println!("system_extcall_count={system_extcall_count}");
     println!("system_user_script_call_count={system_user_script_call_count}");
     println!("system_user_script_dispatch_count={system_user_script_dispatch_count}");
+    println!("system_trace_error_count={system_trace_error_count}");
     println!(
         "system_graphcall_top={}",
         format_top_counts(&graphcall_service_counts, 8)

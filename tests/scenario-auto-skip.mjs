@@ -35,6 +35,29 @@ try {
 
   await openOpeningPreview(page);
   const skipBefore = await advanceToOpeningMessage(page);
+  await page.evaluate(() => {
+    const player = window.__sakuraActiveInstall?.player ?? null;
+    if (player) {
+      player.configState.settings.skipMode = "read";
+    }
+  });
+  const readSkipOn = await page.evaluate(() => window.sakuraToggleSkip?.());
+  assert.deepEqual(readSkipOn, { autoMode: 0, skipMode: 1 });
+  await page.waitForTimeout(700);
+  assert.equal(
+    await currentEventCount(page),
+    skipBefore,
+    "read-only skip advanced unread messages",
+  );
+  const readSkipOff = await page.evaluate(() => window.sakuraToggleSkip?.());
+  assert.deepEqual(readSkipOff, { autoMode: 0, skipMode: 0 });
+
+  await page.evaluate(() => {
+    const player = window.__sakuraActiveInstall?.player ?? null;
+    if (player) {
+      player.configState.settings.skipMode = "all";
+    }
+  });
   const skipOn = await page.evaluate(() => window.sakuraToggleSkip?.());
   assert.deepEqual(skipOn, { autoMode: 0, skipMode: 1 });
   await page.waitForTimeout(1800);
@@ -51,6 +74,12 @@ try {
 
   await openOpeningPreview(page);
   const keySkipBefore = await advanceToOpeningMessage(page);
+  await page.evaluate(() => {
+    const player = window.__sakuraActiveInstall?.player ?? null;
+    if (player) {
+      player.configState.settings.skipMode = "all";
+    }
+  });
   await page.keyboard.down("Control");
   await page.waitForTimeout(1800);
   const keySkipHeld = await currentEventCount(page);

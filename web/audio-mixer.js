@@ -107,7 +107,7 @@ export function createAudioMixer() {
         return { ok: false, reason: "blocked" };
       }
     },
-    async playTrack(ogg, { loop = true, volume = 1 } = {}) {
+    async playTrack(ogg, { loop = true, volume = 1, fadeInMs = 0 } = {}) {
       state.playAttempts += 1;
       resetBgm();
       if (!configureBgm(ogg)) {
@@ -117,7 +117,8 @@ export function createAudioMixer() {
       }
       audio.loop = loop;
       trackScriptVolume = clampVolume(volume);
-      audio.volume = effectiveBgmVolume(trackScriptVolume);
+      const fadeDuration = clampDuration(fadeInMs);
+      audio.volume = fadeDuration > 0 ? 0 : effectiveBgmVolume(trackScriptVolume);
       state.trackReady = 1;
       if (loop) {
         // Looping BGM must not stop on its own. Browsers pause media elements
@@ -152,6 +153,9 @@ export function createAudioMixer() {
         await audio.play();
         state.playSuccess += 1;
         state.trackPlaySuccess += 1;
+        if (fadeDuration > 0) {
+          rampBgmVolume(trackScriptVolume, fadeDuration, false);
+        }
         return { ok: true, reason: "ok" };
       } catch {
         state.playBlocked += 1;
@@ -270,6 +274,17 @@ export function createAudioMixer() {
     changeTrackVolume(volume, durationMs) {
       return rampBgmVolume(volume, durationMs, false);
     },
+    setTrackCurrentTime(seconds) {
+      if (audio === null || !Number.isFinite(seconds) || seconds < 0) {
+        return false;
+      }
+      try {
+        audio.currentTime = seconds;
+        return true;
+      } catch {
+        return false;
+      }
+    },
     setVolumes({ master, bgm, voice, sfx } = {}) {
       if (master !== undefined) mix.master = clampVolume(master);
       if (bgm !== undefined) mix.bgm = clampVolume(bgm);
@@ -335,6 +350,17 @@ export function createAudioMixer() {
       state.loopSfxTargetVolume = clampVolume(volume);
       return rampLoopSfxVolume(volume, durationMs, false);
     },
+    setLoopingSfxCurrentTime(seconds) {
+      if (loopSfxAudio === null || !Number.isFinite(seconds) || seconds < 0) {
+        return false;
+      }
+      try {
+        loopSfxAudio.currentTime = seconds;
+        return true;
+      } catch {
+        return false;
+      }
+    },
     stopLoopingSfx() {
       const active = loopSfxAudio !== null;
       resetLoopSfx();
@@ -364,6 +390,7 @@ export function createAudioMixer() {
     state: () => ({
       ...state,
       loopSfxVolume: loopSfxAudio?.volume ?? 0,
+      loopSfxCurrentTime: loopSfxAudio?.currentTime ?? 0,
       trackVolume: audio?.volume ?? 0,
       trackPaused: audio ? audio.paused : null,
       trackEnded: audio ? audio.ended : null,

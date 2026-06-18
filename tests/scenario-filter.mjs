@@ -68,8 +68,37 @@ filterScenarioPixels(copied, {
   strength: 256,
   mode: 0,
 });
-if (copied[0] !== 20 || copied[1] !== 40 || copied[2] !== 80 || copied[3] !== 255) {
-  throw new Error("mode-0 filter did not preserve the source pixels");
+if (copied[0] !== 255 || copied[1] !== 255 || copied[2] !== 255 || copied[3] !== 255) {
+  throw new Error("mode-0 full-strength white filter did not match the BGI blend formula");
+}
+
+const blended = new Uint8ClampedArray([20, 40, 80, 255]);
+filterScenarioPixels(blended, {
+  r: 0,
+  g: 128,
+  b: 255,
+  strength: 128,
+  mode: 0,
+});
+if (blended[0] !== 10 || blended[1] !== 84 || blended[2] !== 167 || blended[3] !== 255) {
+  throw new Error(`mode-0 partial blend drifted ${Array.from(blended)}`);
+}
+
+const zeroStrength = new Uint8ClampedArray([20, 40, 80, 255]);
+filterScenarioPixels(zeroStrength, {
+  r: 255,
+  g: 255,
+  b: 255,
+  strength: 0,
+  mode: 0,
+});
+if (
+  zeroStrength[0] !== 20
+  || zeroStrength[1] !== 40
+  || zeroStrength[2] !== 80
+  || zeroStrength[3] !== 255
+) {
+  throw new Error("zero-strength filter did not preserve the source pixels");
 }
 
 if (clearScenarioColorFilter(state, [1, 1000]) !== 1000) {

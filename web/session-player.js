@@ -77,6 +77,7 @@ import {
   snapshotScenarioRain,
 } from "./scenario-rain.js";
 import {
+  createScenarioScreenShake,
   createPresetScenarioShake,
   scenarioShakeOffset,
 } from "./scenario-shake.js";
@@ -133,7 +134,13 @@ import {
   USER_DATA_SLOTS_PER_PAGE,
 } from "./scenario-userdata-window.js";
 import {
+  loadViewedData,
+  recordViewed,
+  viewedDataHas,
+} from "./viewed-data.js";
+import {
   applyScenarioConfigControl,
+  applyScenarioScreenMode,
   closeScenarioConfigWindow,
   createScenarioConfigState,
   openScenarioConfigWindow,
@@ -226,6 +233,21 @@ const SOUND_VOICE_PLAY_EX = 0x01a8;
 const SOUND_VOICE_PLAY = 0x01a9;
 const SOUND_VOICE_STOP = 0x01aa;
 const SOUND_VOICE_WAIT = 0x01ac;
+const CHARACTER_VOICE_PREFIXES = Object.freeze([
+  ["rnd"], // SGCnfgWnd100000: 御桜稟
+  ["szd"], // SGCnfgWnd100100: 夏目雫
+  ["mkd"], // SGCnfgWnd100200: 鳥谷真琴
+  ["aid"], // SGCnfgWnd100300: 夏目藍
+  ["hrd"], // SGCnfgWnd100400: 氷川里奈
+  ["ymd"], // SGCnfgWnd100500: 川内野優美
+  ["kid"], // SGCnfgWnd110000: その他男性 (observed 0x01a9 prefix).
+  ["ked"], // SGCnfgWnd110100: その他女性 (observed 0x01a9 prefix).
+]);
+const CHARACTER_VOICE_PREFIX_TO_INDEX = new Map(
+  CHARACTER_VOICE_PREFIXES.flatMap((prefixes, index) => (
+    prefixes.map((prefix) => [prefix, index])
+  )),
+);
 const SOUND_OPENING_MOVIE_PLAY = 0x01bf;
 const OPENING_MOVIE_OBJECT_ID = 0;
 const GRAPH_SHAKE_START = 0x0232;
@@ -272,8 +294,11 @@ const GRAPH_RAIN_DENSITY = 0x03d8;
 const GRAPH_PRESET_SHAKE = 0x03f1;
 const SAVE_SLOT_KEY = "sakura.session.slot.0";
 const SAVE_SLOT_KEY_PREFIX = "sakura.session.slot.";
-const SAVE_RECORD_VERSION = 14;
-const SUPPORTED_SAVE_RECORD_VERSIONS = new Set([4, 5, 6, 7, 8, 9, 10, 11, 12, 13, SAVE_RECORD_VERSION]);
+const QUICK_SAVE_SLOT_KEY = "sakura.session.quick";
+const READ_EVENT_STORAGE_KEY = "sakura.read.events.v1";
+const READ_EVENT_LIMIT = 50_000;
+const SAVE_RECORD_VERSION = 15;
+const SUPPORTED_SAVE_RECORD_VERSIONS = new Set([4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, SAVE_RECORD_VERSION]);
 const SCENARIO_BACKLOG_LIMIT = 512;
 const INITIAL_SCENARIO_MAX_BYTES = 256 * 1024;
 const SCENARIO_IMAGE_CACHE_LIMIT = 32;
@@ -308,6 +333,7 @@ async function tryScenarioByName(catalog, core, wantName, route) {
   if (!player.step()) { core.scenarioSessionDestroy(handle); return null; }
   player.safeState.scenarioName = normalizedName;
   player.safeState.scenarioRoute = plan.routeId;
+  recordViewed(player.viewedData, "scene", normalizedName);
   return player;
 }
 
@@ -360,6 +386,7 @@ export async function createInitialScenarioPlayer(
     }
     player.safeState.scenarioName = name;
     player.safeState.scenarioRoute = fallbackRoute;
+    recordViewed(player.viewedData, "scene", name);
     player.safeState.scanCount = scanned;
     player.safeState.scanSkippedLarge = skippedLarge;
     createInitialScenarioPlayer.lastProbe = { scanned, skippedLarge, ready: true };
@@ -375,21 +402,30 @@ export function readScenarioSaveSlotSummary(slotIndex, storage = scenarioStorage
   const encoded = storage?.getItem(saveSlotKey(slotIndex)) ?? (
     normalizeSaveSlot(slotIndex) === 0 ? storage?.getItem(SAVE_SLOT_KEY) : null
   );
+  return readScenarioSaveSummaryFromEncoded(encoded, normalizeSaveSlot(slotIndex));
+}
+
+export function readScenarioQuickSaveSummary(storage = scenarioStorage()) {
+  return readScenarioSaveSummaryFromEncoded(storage?.getItem(QUICK_SAVE_SLOT_KEY), 0);
+}
+
+function readScenarioSaveSummaryFromEncoded(encoded, slot) {
   if (!encoded) {
-    return { slot: normalizeSaveSlot(slotIndex), exists: false };
+    return { slot, exists: false };
   }
   try {
     const value = JSON.parse(encoded);
     return {
-      slot: normalizeSaveSlot(slotIndex),
+      slot,
       exists: true,
       scenarioName: typeof value.scenarioName === "string" ? value.scenarioName : "",
       eventCount: Number.isInteger(value.event?.eventCount) ? value.event.eventCount : 0,
       savedAt: typeof value.savedAt === "string" ? value.savedAt : "",
       text: typeof value.event?.text === "string" ? value.event.text : "",
+      backgroundName: typeof value.visual?.backgroundName === "string" ? value.visual.backgroundName : "",
     };
   } catch {
-    return { slot: normalizeSaveSlot(slotIndex), exists: false };
+    return { slot, exists: false };
   }
 }
 
@@ -498,7 +534,7 @@ export function bindScenarioPlayerInput(canvas, getMounted, onUpdate) {
       inputResult = 5;
     } else if (isAutomaticEvent(player.event)) {
       stopVoicesForManualAdvance(player);
-      inputResult = player.skipAutomatic() ? 3 : 0;
+      inputResult = player.skipSkippableAutomatic() ? 3 : 0;
     } else if (
       player.event.kind === EVENT_MESSAGE
       && player.advanceMessage() === 1
@@ -513,6 +549,7 @@ export function bindScenarioPlayerInput(canvas, getMounted, onUpdate) {
       player.step()
     ) {
       stopVoicesForManualAdvance(player);
+      player.resumeAutoSkipAfterChoice();
       inputResult = 2;
     }
     player.safeState.inputResult = inputResult;
@@ -1168,6 +1205,25 @@ function clampConfigRatio(value) {
   return Math.max(0, Math.min(Number(value) || 0, 1));
 }
 
+export function scenarioVoiceCharacterIndex(name) {
+  const prefix = scenarioVoicePrefix(name);
+  return prefix === "" ? -1 : CHARACTER_VOICE_PREFIX_TO_INDEX.get(prefix) ?? -1;
+}
+
+export function scenarioVoiceEnabled(settings, name) {
+  const index = scenarioVoiceCharacterIndex(name);
+  if (index < 0) {
+    return true;
+  }
+  return settings?.characterVoices?.[index] !== false;
+}
+
+function scenarioVoicePrefix(name) {
+  const value = String(name ?? "").toLowerCase();
+  const match = /^([a-z]+)(?:_|[0-9])/.exec(value);
+  return match?.[1] ?? "";
+}
+
 function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, routeId = null) {
   return {
     handle,
@@ -1199,9 +1255,14 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
     imageCache: new Map(),
     audioCache: new Map(),
     audioMixer: null,
+    audioState: createScenarioAudioState(),
+    readEventKeys: loadScenarioReadEventKeys(),
+    viewedData: loadViewedData(),
     backlog: [],
     backlogState: createScenarioBacklogState(),
     userDataState: createScenarioUserDataState(),
+    userDataThumbnails: new Map(),
+    onOverlayRepaint: null,
     configState: createScenarioConfigState(),
     messageVisual: createScenarioMessageVisualState(),
     messageStyle: createScenarioMessageStyleState(),
@@ -1221,6 +1282,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
     // Auto/Skip playback modes (real-user features; off under automation).
     autoMode: false,
     skipMode: false,
+    choiceResumeMode: "",
     autoAdvanceAt: 0,
     messageAdvanceFrame: 0,
     // Typing reveal ms/char. Real users get the engine's char-by-char reveal;
@@ -1240,6 +1302,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
       };
     },
     step() {
+      markScenarioEventRead(this, this.event);
       const packet = core.scenarioSessionStep(this.handle);
       if (packet === null) {
         return false;
@@ -1363,6 +1426,11 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         configBgmVolume: previous.configBgmVolume ?? 0,
         configSfxVolume: previous.configSfxVolume ?? 0,
         configVoiceVolume: previous.configVoiceVolume ?? 0,
+        configScreenModeFullscreen: previous.configScreenModeFullscreen ?? 0,
+        configScreenModeApplied: previous.configScreenModeApplied ?? 0,
+        configScreenModeReasonLength: previous.configScreenModeReasonLength ?? 0,
+        readEventCount: this.readEventKeys.size,
+        currentEventRead: Number(scenarioCurrentEventIsRead(this)),
         bgmAssetReady: previous.bgmAssetReady ?? 0,
         bgmPlayResult: previous.bgmPlayResult ?? 0,
         bgmNameLength: previous.bgmNameLength ?? 0,
@@ -1371,6 +1439,8 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         voicePlayResult: previous.voicePlayResult ?? 0,
         voiceNameLength: previous.voiceNameLength ?? 0,
         voiceChannel: previous.voiceChannel ?? 0,
+        voiceCharacterIndex: previous.voiceCharacterIndex ?? -1,
+        voiceSuppressedByConfig: previous.voiceSuppressedByConfig ?? 0,
         voiceControlOpcode: previous.voiceControlOpcode ?? 0,
         voiceControlCount: previous.voiceControlCount ?? 0,
         voiceWaitInterruptible: previous.voiceWaitInterruptible ?? 0,
@@ -1461,6 +1531,11 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
       const result = applyScenarioConfigControl(this.configState, control);
       if (result.handled) {
         this.applyConfigSettings();
+        if (result.reason === "screenMode") {
+          const screenMode = applyScenarioScreenMode(this.configState.settings);
+          this.safeState.configScreenModeApplied = Number(screenMode.ok);
+          this.safeState.configScreenModeReasonLength = screenMode.reason.length;
+        }
         if (result.reason !== "title_pending") {
           this.storeConfigSettings();
         }
@@ -1503,6 +1578,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
       this.safeState.configBgmVolume = Math.round(settings.bgmVolume * 100);
       this.safeState.configSfxVolume = Math.round(settings.sfxVolume * 100);
       this.safeState.configVoiceVolume = Math.round(settings.voiceVolume * 100);
+      this.safeState.configScreenModeFullscreen = Number(settings.screenMode === "fullscreen");
     },
     applyUserDataControl(control, onUpdate = null) {
       const result = applyScenarioUserDataControl(this.userDataState, control, {
@@ -1580,6 +1656,17 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         });
         return { handled: true, reason: "loading", ok: true };
       }
+      if (pending.action === "quickLoad") {
+        this.safeState.userDataLastResult = "loading";
+        this.safeState.userDataLastOk = 1;
+        void this.loadQuickSaveFromStorage().then((load) => {
+          this.safeState.userDataLastResult = load.reason;
+          this.safeState.userDataLastOk = Number(load.ok);
+          this.syncUserDataState();
+          onUpdate?.();
+        });
+        return { handled: true, reason: "loading", ok: true };
+      }
       this.safeState.userDataLastResult = "unsupported_dialog_action";
       this.safeState.userDataLastOk = 0;
       return { handled: false, ok: false, reason: "unsupported_dialog_action" };
@@ -1588,21 +1675,64 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
       const start = this.userDataState.page * USER_DATA_SLOTS_PER_PAGE;
       return Array.from(
         { length: USER_DATA_SLOTS_PER_PAGE },
-        (_, index) => this.saveSlotSummary(start + index),
+        (_, index) => {
+          const summary = this.saveSlotSummary(start + index);
+          if (summary.exists && summary.backgroundName) {
+            summary.thumbnail = this.resolveUserDataThumbnail(summary.backgroundName);
+          }
+          return summary;
+        },
       );
+    },
+    // Decode the saved scene CG into a thumbnail image, async + cached. Returns
+    // the decoded RGBA image when ready, else null (a repaint is requested when
+    // the decode completes).
+    resolveUserDataThumbnail(name) {
+      if (!/^[A-Za-z0-9_]+$/.test(String(name))) {
+        return null;
+      }
+      const cached = this.userDataThumbnails.get(name);
+      if (cached) {
+        return cached.image ?? null;
+      }
+      this.userDataThumbnails.set(name, { status: "loading", image: null });
+      void (async () => {
+        let image = null;
+        try {
+          const payload = await catalog.readPayloadByNameBytes(encoder.encode(name));
+          image = payload ? core.imageRgba(payload) ?? null : null;
+        } catch {
+          image = null;
+        }
+        this.userDataThumbnails.set(name, { status: image ? "ready" : "missing", image });
+        this.onOverlayRepaint?.();
+      })();
+      return null;
     },
     saveSlotSummary(slotIndex) {
       return readScenarioSaveSlotSummary(slotIndex);
+    },
+    quickSaveSummary() {
+      return readScenarioQuickSaveSummary();
     },
     async replayBacklogVoice(entryIndex) {
       const entry = this.backlog[entryIndex];
       if (!entry?.voiceName || this.audioMixer === null) {
         return { ok: false, reason: "voice_unavailable" };
       }
+      const characterIndex = scenarioVoiceCharacterIndex(entry.voiceName);
+      if (!scenarioVoiceEnabled(this.configState.settings, entry.voiceName)) {
+        this.safeState.voiceCharacterIndex = characterIndex;
+        this.safeState.voiceSuppressedByConfig = 1;
+        this.safeState.voiceNameLength = entry.voiceName.length;
+        return { ok: false, reason: "voice_disabled" };
+      }
       const ogg = await loadScenarioAudio(this, catalog, core, entry.voiceName);
       const result = await this.audioMixer.playVoice(ogg, {
         volume: entry.voiceVolume ?? 1,
       });
+      this.safeState.voiceCharacterIndex = characterIndex;
+      this.safeState.voiceSuppressedByConfig = 0;
       this.backlogState.replayingIndex = result.ok ? entryIndex : -1;
       return result;
     },
@@ -1635,8 +1765,34 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
       if (!this.automaticSkippable) {
         return false;
       }
+      if (!scenarioCanSkipCurrent(this)) {
+        this.automaticSkip = false;
+        this.safeState.skipSuppressedByReadMode = 1;
+        return false;
+      }
       this.automaticStopRequested = false;
       this.automaticSkip = true;
+      this.safeState.skipSuppressedByReadMode = 0;
+      this.automaticWake?.();
+      if (!this.automaticRunning && isAutomaticEvent(this.event)) {
+        this.startAutomatic(this.automaticUpdate);
+      }
+      return true;
+    },
+    // A single manual click skips the current *skippable* automatic event —
+    // timed CG transitions (e.g. the opening's 0x0280 3000ms crossfades), the
+    // opening movie (0x01bf) and interruptible voice/SE waits — regardless of
+    // skip mode. This is the original "click to skip" behaviour (`連打でスキップ`):
+    // each click skips one auto-event and lands on the next message, so rapid
+    // clicking fast-forwards the opening. Only events the scenario marked
+    // skippable/interruptible are affected; non-skippable waits are preserved.
+    skipSkippableAutomatic() {
+      if (!this.automaticSkippable) {
+        return false;
+      }
+      this.automaticStopRequested = false;
+      this.automaticSkip = true;
+      this.safeState.skipSuppressedByReadMode = 0;
       this.automaticWake?.();
       if (!this.automaticRunning && isAutomaticEvent(this.event)) {
         this.startAutomatic(this.automaticUpdate);
@@ -1669,12 +1825,18 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
       if (this.skipMode) {
         this.autoMode = false;
         this.automaticStopRequested = false;
-        // Cancel any in-progress reveal immediately.
-        completeScenarioMessageReveal(this.messageVisual);
+        if (scenarioCanSkipCurrent(this)) {
+          // Cancel any in-progress reveal immediately.
+          completeScenarioMessageReveal(this.messageVisual);
+          this.safeState.skipSuppressedByReadMode = 0;
+        } else {
+          this.safeState.skipSuppressedByReadMode = 1;
+        }
         this.skipAutomatic();
       } else if (!this.autoMode) {
         this.automaticStopRequested = true;
         this.automaticSkip = false;
+        this.safeState.skipSuppressedByReadMode = 0;
         this.automaticWake?.();
       }
       this.autoAdvanceAt = 0;
@@ -1700,6 +1862,26 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         this.safeState.skipMode = 0;
       }
     },
+    resumeAutoSkipAfterChoice() {
+      const mode = this.choiceResumeMode;
+      this.choiceResumeMode = "";
+      this.safeState.choiceResumeMode = "";
+      if (
+        mode === "skip"
+        && this.configState.settings.continueSkipAfterChoice === true
+      ) {
+        this.setSkipMode(true);
+        return true;
+      }
+      if (
+        mode === "auto"
+        && this.configState.settings.continueAutoAfterChoice === true
+      ) {
+        this.setAutoMode(true);
+        return true;
+      }
+      return false;
+    },
     advanceMessage() {
       return core.scenarioSessionAdvanceMessage(this.handle);
     },
@@ -1709,7 +1891,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
     save() {
       return core.scenarioSessionSnapshot(this.handle);
     },
-    saveToStorage(slotIndex = 0) {
+    saveToStorage(slotIndex = 0, { quick = false } = {}) {
       if (!isStableSaveEvent(this.event) || this.scenarioLoading || this.automaticRunning) {
         return { ok: false, bytes: 0, reason: "unstable_event" };
       }
@@ -1758,24 +1940,38 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
           aperture: snapshotScenarioAperture(this.scene.aperture),
           rain: snapshotScenarioRain(this.scene.rain),
         },
+        audio: snapshotScenarioAudioState(this.audioState, this.audioMixer?.state?.()),
       };
       const encoded = JSON.stringify(record);
-      storage.setItem(saveSlotKey(slot), encoded);
-      if (slot === 0) {
-        storage.setItem(SAVE_SLOT_KEY, encoded);
+      try {
+        if (quick) {
+          storage.setItem(QUICK_SAVE_SLOT_KEY, encoded);
+        } else {
+          storage.setItem(saveSlotKey(slot), encoded);
+        }
+        if (slot === 0 && !quick) {
+          storage.setItem(SAVE_SLOT_KEY, encoded);
+        }
+      } catch {
+        return { ok: false, bytes: saved.byteLength, reason: "storage_write_failed" };
       }
       this.safeState.lastSaveBytes = saved.byteLength;
       this.safeState.lastSaveSlot = slot;
       return { ok: true, bytes: saved.byteLength, reason: "ok" };
     },
-    async loadFromStorage(slotIndex = 0) {
+    quickSaveToStorage() {
+      return this.saveToStorage(0, { quick: true });
+    },
+    async loadFromStorage(slotIndex = 0, { quick = false } = {}) {
       if (this.scenarioLoading || this.automaticRunning) {
         return { ok: false, bytes: 0, reason: "player_busy" };
       }
       const slot = normalizeSaveSlot(slotIndex);
       const storage = globalThis.window?.localStorage ?? globalThis.localStorage;
-      const encoded = storage?.getItem(saveSlotKey(slot))
-        ?? (slot === 0 ? storage?.getItem(SAVE_SLOT_KEY) : null);
+      const encoded = quick
+        ? storage?.getItem(QUICK_SAVE_SLOT_KEY)
+        : storage?.getItem(saveSlotKey(slot))
+          ?? (slot === 0 ? storage?.getItem(SAVE_SLOT_KEY) : null);
       if (encoded === null) {
         return { ok: false, bytes: 0, reason: "missing_snapshot" };
       }
@@ -1790,6 +1986,9 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         bytes: parsed.record.snapshot.byteLength,
         reason: result.reason,
       };
+    },
+    async loadQuickSaveFromStorage() {
+      return this.loadFromStorage(0, { quick: true });
     },
     async restoreSaveRecord(record) {
       const nextHandle = await createScenarioHandle(catalog, core, record.scenarioName);
@@ -1823,6 +2022,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
       this.event = record.event;
       showScenarioMessageVisual(this.messageVisual, this.event);
       this.event.backlogLength = this.backlog.length;
+      await restoreSceneAudio(this, catalog, core, record.audio);
       const previous = this.safeState;
       this.safeState = {
         ...safeSessionState(true, record.event),
@@ -1886,6 +2086,33 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         configBgmVolume: previous.configBgmVolume ?? 0,
         configSfxVolume: previous.configSfxVolume ?? 0,
         configVoiceVolume: previous.configVoiceVolume ?? 0,
+        configScreenModeFullscreen: previous.configScreenModeFullscreen ?? 0,
+        configScreenModeApplied: previous.configScreenModeApplied ?? 0,
+        configScreenModeReasonLength: previous.configScreenModeReasonLength ?? 0,
+        readEventCount: this.readEventKeys.size,
+        currentEventRead: Number(scenarioCurrentEventIsRead(this)),
+        bgmAssetReady: previous.bgmAssetReady ?? 0,
+        bgmPlayResult: previous.bgmPlayResult ?? 0,
+        bgmNameLength: previous.bgmNameLength ?? 0,
+        bgmFadeMs: previous.bgmFadeMs ?? 0,
+        voiceAssetReady: previous.voiceAssetReady ?? 0,
+        voicePlayResult: previous.voicePlayResult ?? 0,
+        voiceNameLength: previous.voiceNameLength ?? 0,
+        voiceChannel: previous.voiceChannel ?? 0,
+        voiceCharacterIndex: previous.voiceCharacterIndex ?? -1,
+        voiceSuppressedByConfig: previous.voiceSuppressedByConfig ?? 0,
+        voiceControlOpcode: previous.voiceControlOpcode ?? 0,
+        voiceControlCount: previous.voiceControlCount ?? 0,
+        voiceWaitInterruptible: previous.voiceWaitInterruptible ?? 0,
+        voiceStoppedOnClick: previous.voiceStoppedOnClick ?? 0,
+        sfxAssetReady: previous.sfxAssetReady ?? 0,
+        sfxPlayResult: previous.sfxPlayResult ?? 0,
+        sfxNameLength: previous.sfxNameLength ?? 0,
+        sfxPlayOpcode: previous.sfxPlayOpcode ?? 0,
+        sfxPan: previous.sfxPan ?? 64,
+        loopSfxControlOpcode: previous.loopSfxControlOpcode ?? 0,
+        loopSfxFadeMs: previous.loopSfxFadeMs ?? 0,
+        loopSfxTargetVolume: previous.loopSfxTargetVolume ?? 0,
         scanCount: previous.scanCount,
         scanSkippedLarge: previous.scanSkippedLarge,
       };
@@ -1910,6 +2137,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         this.handle = nextHandle;
         this.scenarioIndex = nextIndex;
         this.safeState.scenarioName = nextName;
+        recordViewed(this.viewedData, "scene", nextName);
         this.safeState.scenarioIndex = nextIndex;
         this.safeState.scenarioTransitions = (this.safeState.scenarioTransitions ?? 0) + 1;
         loadedNextScenario = true;
@@ -1998,6 +2226,7 @@ async function runAutomaticEvents(player, catalog, core) {
       } else if (event.kind === EVENT_MESSAGE_STYLE) {
         applyMessageStyleEvent(player, event);
       }
+      durationMs = scenarioEffectiveAutomaticDurationMs(player, event, durationMs);
       player.automaticSkippable = skippable;
       notifyAutomaticUpdate(player);
       await waitForAutomaticEvent(
@@ -2031,6 +2260,20 @@ async function runAutomaticEvents(player, catalog, core) {
   }
 }
 
+export function scenarioEffectiveAutomaticDurationMs(player, event, durationMs) {
+  if (event?.kind !== EVENT_GRAPH
+    || durationMs <= 0
+    || player?.configState?.settings?.instantTransitions !== true) {
+    return durationMs;
+  }
+  if (player.safeState) {
+    player.safeState.instantTransitionAppliedCount =
+      (player.safeState.instantTransitionAppliedCount ?? 0) + 1;
+    player.safeState.instantTransitionOriginalDurationMs = durationMs;
+  }
+  return 0;
+}
+
 function applyUserFunctionEvent(player, event) {
   const name = event.name.toLowerCase();
   if (name === "allclearbustshot" || name === "_allclearbustshot") {
@@ -2050,21 +2293,27 @@ async function applySoundEvent(player, catalog, core, event) {
     if (!/^[A-Za-z0-9_]+$/.test(name) || player.audioMixer === null) {
       return 0;
     }
+    recordViewed(player.viewedData, "bgm", name);
     const ogg = await loadScenarioAudio(player, catalog, core, name);
     const volume = Math.max(0, Math.min(event.intArgs[1] ?? 128, 128)) / 128;
-    const result = await player.audioMixer.playTrack(ogg, { loop: true, volume });
+    const fadeInMs = positiveDuration(event.intArgs[0]);
+    const result = await player.audioMixer.playTrack(ogg, { loop: true, volume, fadeInMs });
+    player.audioState.bgm = result.ok ? { name, volume, positionSeconds: 0, fadeInMs } : null;
     player.safeState.bgmAssetReady = Number(ogg !== null);
     player.safeState.bgmPlayResult = Number(result.ok);
     player.safeState.bgmNameLength = name.length;
+    player.safeState.bgmFadeMs = fadeInMs;
     return 0;
   }
   if (event.opcode === SOUND_BGM_STOP) {
     player.audioMixer?.stopTrack();
+    player.audioState.bgm = null;
     return 0;
   }
   if (event.opcode === SOUND_BGM_FADE_OUT) {
     const durationMs = positiveDuration(event.intArgs[1] ?? event.intArgs[0]);
     player.audioMixer?.fadeOut(durationMs);
+    player.audioState.bgm = null;
     player.safeState.bgmFadeMs = durationMs;
     return 0;
   }
@@ -2072,6 +2321,9 @@ async function applySoundEvent(player, catalog, core, event) {
     const durationMs = positiveDuration(event.intArgs[0]);
     const volume = Math.max(0, Math.min(event.intArgs[1] ?? 128, 128)) / 128;
     player.audioMixer?.changeTrackVolume(volume, durationMs);
+    if (player.audioState.bgm) {
+      player.audioState.bgm.volume = volume;
+    }
     player.safeState.bgmFadeMs = durationMs;
     return 0;
   }
@@ -2080,19 +2332,29 @@ async function applySoundEvent(player, catalog, core, event) {
     if (name.length === 0 || player.audioMixer === null) {
       return 0;
     }
-    const ogg = await loadScenarioAudio(player, catalog, core, name);
     const volume = event.opcode === SOUND_VOICE_PLAY_EX
       ? Math.max(0, Math.min(event.intArgs[0] ?? 128, 128)) / 128
       : 1;
     const channel = event.opcode === SOUND_VOICE_PLAY_EX
       ? soundChannel(event.intArgs[1])
       : 0;
-    player.pendingBacklogVoice = { name, volume };
+    const characterIndex = scenarioVoiceCharacterIndex(name);
+    player.pendingBacklogVoice = { name, volume, characterIndex };
+    player.safeState.voiceCharacterIndex = characterIndex;
+    player.safeState.voiceNameLength = name.length;
+    if (!scenarioVoiceEnabled(player.configState.settings, name)) {
+      player.safeState.voiceAssetReady = 0;
+      player.safeState.voicePlayResult = 0;
+      player.safeState.voiceChannel = channel;
+      player.safeState.voiceSuppressedByConfig = 1;
+      return 0;
+    }
+    const ogg = await loadScenarioAudio(player, catalog, core, name);
     const result = await player.audioMixer.playVoice(ogg, { volume, channel });
     player.safeState.voiceAssetReady = Number(ogg !== null);
     player.safeState.voicePlayResult = Number(result.ok);
-    player.safeState.voiceNameLength = name.length;
     player.safeState.voiceChannel = channel;
+    player.safeState.voiceSuppressedByConfig = 0;
     return 0;
   }
   if (event.opcode === SOUND_VOICE_STOP) {
@@ -2121,6 +2383,7 @@ async function applySoundEvent(player, catalog, core, event) {
     const ogg = await loadScenarioAudio(player, catalog, core, name);
     const volume = Math.max(0, Math.min(event.intArgs[1] ?? 128, 128)) / 128;
     const result = await player.audioMixer.playLoopingSfx(ogg, { volume });
+    player.audioState.loopSfx = result.ok ? { name, volume, positionSeconds: 0 } : null;
     player.safeState.sfxAssetReady = Number(ogg !== null);
     player.safeState.sfxPlayResult = Number(result.ok);
     player.safeState.sfxNameLength = name.length;
@@ -2128,12 +2391,14 @@ async function applySoundEvent(player, catalog, core, event) {
   }
   if (event.opcode === SOUND_LOOPING_SE_STOP) {
     player.audioMixer?.stopLoopingSfx();
+    player.audioState.loopSfx = null;
     recordLoopSfxControl(player, event, 0, 0);
     return 0;
   }
   if (event.opcode === SOUND_LOOPING_SE_FADE_OUT) {
     const durationMs = positiveDuration(event.intArgs[1] ?? event.intArgs[0]);
     player.audioMixer?.fadeOutLoopingSfx(durationMs);
+    player.audioState.loopSfx = null;
     recordLoopSfxControl(player, event, durationMs, 0);
     return 0;
   }
@@ -2141,6 +2406,9 @@ async function applySoundEvent(player, catalog, core, event) {
     const durationMs = positiveDuration(event.intArgs[0]);
     const volume = Math.max(0, Math.min(event.intArgs[1] ?? 128, 128)) / 128;
     player.audioMixer?.changeLoopingSfxVolume(volume, durationMs);
+    if (player.audioState.loopSfx) {
+      player.audioState.loopSfx.volume = volume;
+    }
     recordLoopSfxControl(player, event, durationMs, volume);
     return 0;
   }
@@ -2469,6 +2737,7 @@ async function applyGraphEvent(player, catalog, core, event) {
         priority: event.intArgs[2] ?? 0,
         ...transform,
       });
+      recordViewed(player.viewedData, "cg", name);
       if (duration > 0) {
         moveScenarioSceneObject(
           player.scene.sprites,
@@ -2520,6 +2789,7 @@ async function applyGraphEvent(player, catalog, core, event) {
         x: event.intArgs[12] ?? 0,
         animation: { frameCount, frameIntervalMs, sequenceStyle },
       });
+      recordViewed(player.viewedData, "cg", name);
       startVisualAnimation(player);
     }
     recordSceneObjectEvent(player, event, animationReady);
@@ -2754,6 +3024,11 @@ async function applyOpeningMovieEvent(player, catalog, event) {
     ? 0
     : Math.round(player.scene.movies.objects.get(id)?.frameRate ?? 0);
   recordSceneObjectEvent(player, event, image !== null);
+  // The opening movie is forced on first view and skippable on replay: it is
+  // click-skippable only once it has already been seen. It is recorded as seen
+  // when its playback completes (which, on a forced first view, is the natural
+  // end since the click-skip is suppressed).
+  const movieSeen = viewedDataHas(player.viewedData, "movie", name);
   return image === null
     ? 0
     : {
@@ -2762,8 +3037,9 @@ async function applyOpeningMovieEvent(player, catalog, event) {
       afterWait: () => {
         clearScenarioMovieObject(player.scene.movies, id);
         removeScenarioSceneObject(player.scene.sprites, id);
+        recordViewed(player.viewedData, "movie", name);
       },
-      skippable: true,
+      skippable: movieSeen,
     };
 }
 
@@ -3087,19 +3363,19 @@ function recordRainEvent(player) {
 }
 
 function beginScreenShake(player, event) {
-  const durationMs = positiveDuration(event.intArgs.at(-1)) || 240;
-  const amplitudeX = Math.max(0, Math.min(Math.abs(event.intArgs[3] ?? event.intArgs[1] ?? 8), 64));
-  const amplitudeY = Math.max(0, Math.min(Math.abs(event.intArgs[4] ?? event.intArgs[2] ?? amplitudeX), 64));
-  player.scene.shake = {
-    startedAt: performance.now(),
-    durationMs,
-    amplitudeX,
-    amplitudeY,
-    phase: (event.offset % 97) / 97,
-  };
-  player.safeState.sceneShakeMs = durationMs;
-  player.safeState.sceneShakeAmplitudeX = amplitudeX;
-  player.safeState.sceneShakeAmplitudeY = amplitudeY;
+  player.scene.shake = createScenarioScreenShake(event.intArgs, performance.now());
+  const shake = player.scene.shake;
+  player.safeState.sceneShakeMs = shake.durationMs;
+  player.safeState.sceneShakeDirection = shake.mode;
+  player.safeState.sceneShakePeriodMs = Math.round(shake.durationMs / shake.cycles);
+  player.safeState.sceneShakeCycles = shake.cycles;
+  player.safeState.sceneShakeDecayPercent = shake.decayPercent;
+  player.safeState.sceneShakeAmplitudeX = shake.mode === 1 || shake.mode === 2
+    ? shake.peakPixels
+    : 0;
+  player.safeState.sceneShakeAmplitudeY = shake.mode === 0 || shake.mode === 2
+    ? shake.peakPixels
+    : 0;
 }
 
 function beginPresetScreenShake(player, event) {
@@ -3187,6 +3463,9 @@ function solidColorImage(width, height, red, green, blue, alpha) {
 function setSceneBaseImage(player, image, name) {
   player.scene.current = image;
   player.scene.currentName = image === null ? null : name;
+  if (image !== null) {
+    recordViewed(player.viewedData, "cg", name);
+  }
   player.scene.target = null;
   player.scene.targetName = null;
   player.scene.progress = 1;
@@ -3213,6 +3492,9 @@ function beginSceneTransition(
       durationMs,
       { fade: fadeSceneObjects },
     );
+  }
+  if (target !== null) {
+    recordViewed(player.viewedData, "cg", targetName);
   }
   if (durationMs === 0) {
     player.scene.current = target;
@@ -3345,12 +3627,21 @@ function startMessageAutoAdvance(player) {
     }
     if (player.event.kind === EVENT_CHOICE) {
       // Never auto-pick a choice; stop playback and leave the decision to input.
+      markChoiceAutoSkipResume(player);
       player.cancelAutoSkip();
       player.autoAdvanceUpdate?.();
       player.messageAdvanceFrame = 0;
       return;
     }
     if (player.skipMode) {
+      if (!scenarioCanSkipCurrent(player)) {
+        player.automaticSkip = false;
+        player.safeState.skipSuppressedByReadMode = 1;
+        player.autoAdvanceAt = 0;
+        player.messageAdvanceFrame = requestAnimationFrame(frame);
+        return;
+      }
+      player.safeState.skipSuppressedByReadMode = 0;
       // Skip: collapse reveal, accelerate auto-events, advance messages ASAP.
       if (isScenarioMessageRevealing(player.messageVisual)) {
         completeScenarioMessageReveal(player.messageVisual);
@@ -3371,6 +3662,124 @@ function startMessageAutoAdvance(player) {
     player.messageAdvanceFrame = requestAnimationFrame(frame);
   };
   player.messageAdvanceFrame = requestAnimationFrame(frame);
+}
+
+export function scenarioCanSkipCurrent(player) {
+  if (!player?.skipMode) {
+    return false;
+  }
+  const settings = player.configState?.settings ?? {};
+  if (settings.skipMode === "all") {
+    return true;
+  }
+  return scenarioCurrentEventIsRead(player);
+}
+
+function scenarioCurrentEventIsRead(_player) {
+  const key = scenarioReadEventKey(_player, _player?.event);
+  return key !== "" && _player.readEventKeys?.has?.(key) === true;
+}
+
+export function scenarioReadEventKey(player, event) {
+  if (event?.kind !== EVENT_MESSAGE) {
+    return "";
+  }
+  const scenarioName = player?.safeState?.scenarioName;
+  if (typeof scenarioName !== "string" || scenarioName.length === 0) {
+    return "";
+  }
+  const eventCount = event.eventCount;
+  if (!Number.isInteger(eventCount) || eventCount <= 0) {
+    return "";
+  }
+  return [
+    scenarioName.toLowerCase(),
+    eventCount,
+    event.opcode ?? 0,
+    event.name?.length ?? 0,
+    event.textLength ?? event.text?.length ?? 0,
+  ].join(":");
+}
+
+function markScenarioEventRead(player, event) {
+  const key = scenarioReadEventKey(player, event);
+  if (key === "") {
+    return;
+  }
+  const keys = player.readEventKeys;
+  if (keys.has(key)) {
+    return;
+  }
+  if (keys.size >= READ_EVENT_LIMIT) {
+    const first = keys.values().next();
+    if (!first.done) {
+      keys.delete(first.value);
+    }
+  }
+  keys.add(key);
+  player.safeState.readEventCount = keys.size;
+  storeScenarioReadEventKeys(keys);
+}
+
+function loadScenarioReadEventKeys(storage = scenarioStorage()) {
+  if (!storage) {
+    return new Set();
+  }
+  try {
+    const encoded = storage.getItem(READ_EVENT_STORAGE_KEY);
+    if (!encoded) {
+      return new Set();
+    }
+    const parsed = JSON.parse(encoded);
+    if (parsed?.version !== 1 || !Array.isArray(parsed.keys)) {
+      return new Set();
+    }
+    return new Set(parsed.keys.filter(isValidReadEventKey).slice(-READ_EVENT_LIMIT));
+  } catch {
+    return new Set();
+  }
+}
+
+function storeScenarioReadEventKeys(keys, storage = scenarioStorage()) {
+  if (!storage) {
+    return false;
+  }
+  try {
+    storage.setItem(READ_EVENT_STORAGE_KEY, JSON.stringify({
+      version: 1,
+      keys: Array.from(keys).slice(-READ_EVENT_LIMIT),
+    }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isValidReadEventKey(value) {
+  return typeof value === "string"
+    && value.length >= 5
+    && value.length <= 160
+    && /^[a-z0-9_.]+:\d+:\d+:\d+:\d+$/.test(value);
+}
+
+function markChoiceAutoSkipResume(player) {
+  if (player.event.kind !== EVENT_CHOICE) {
+    return;
+  }
+  const mode = scenarioChoiceAutoSkipResumeMode(player);
+  player.choiceResumeMode = mode;
+  player.safeState.choiceResumeMode = mode;
+}
+
+export function scenarioChoiceAutoSkipResumeMode(player) {
+  const settings = player?.configState?.settings ?? {};
+  if (player?.skipMode && settings.continueSkipAfterChoice === true) {
+    return "skip";
+  }
+  if (player?.autoMode && settings.continueAutoAfterChoice === true) {
+    return "auto";
+  }
+  return "";
 }
 
 // Auto-mode delay for the current message; extends to cover an active voice clip.
@@ -3491,6 +3900,7 @@ function parseSaveRecord(encoded, fallbackSequence, fallbackRoute) {
     || !isValidSavedEvent(value.event)
     || !isValidSavedBacklog(value.backlog)
     || !isValidSavedVisual(value.visual, value.version)
+    || (value.version >= 15 && !isValidSavedAudio(value.audio))
   ) {
     return { ok: false, reason: "invalid_snapshot" };
   }
@@ -3514,8 +3924,96 @@ function parseSaveRecord(encoded, fallbackSequence, fallbackRoute) {
       event: value.event,
       backlog: value.backlog,
       visual: value.visual,
+      audio: value.version >= 15 ? value.audio : createScenarioAudioState(),
     },
   };
+}
+
+function createScenarioAudioState() {
+  return {
+    bgm: null,
+    loopSfx: null,
+  };
+}
+
+function snapshotScenarioAudioState(state, mixerState = null) {
+  return {
+    bgm: state?.bgm
+      ? {
+          ...state.bgm,
+          positionSeconds: Number.isFinite(mixerState?.trackCurrentTime)
+            ? Math.max(0, mixerState.trackCurrentTime)
+            : 0,
+        }
+      : null,
+    loopSfx: state?.loopSfx
+      ? {
+          ...state.loopSfx,
+          positionSeconds: Number.isFinite(mixerState?.loopSfxCurrentTime)
+            ? Math.max(0, mixerState.loopSfxCurrentTime)
+            : 0,
+        }
+      : null,
+  };
+}
+
+function cloneScenarioAudioState(audio) {
+  return {
+    bgm: audio?.bgm ? { ...audio.bgm } : null,
+    loopSfx: audio?.loopSfx ? { ...audio.loopSfx } : null,
+  };
+}
+
+function isValidSavedAudio(audio) {
+  return audio
+    && isValidSavedAudioEntry(audio.bgm)
+    && isValidSavedAudioEntry(audio.loopSfx);
+}
+
+function isValidSavedAudioEntry(entry) {
+  return entry === null || (
+    entry
+    && validAssetName(entry.name)
+    && Number.isFinite(entry.volume)
+    && entry.volume >= 0
+    && entry.volume <= 1
+    && (
+      entry.positionSeconds === undefined
+      || (
+        Number.isFinite(entry.positionSeconds)
+        && entry.positionSeconds >= 0
+        && entry.positionSeconds <= 24 * 60 * 60
+      )
+    )
+  );
+}
+
+async function restoreSceneAudio(player, catalog, core, audio) {
+  const restored = cloneScenarioAudioState(audio);
+  player.audioState = restored;
+  player.audioMixer?.stopTrack?.();
+  player.audioMixer?.stopLoopingSfx?.();
+  if (restored.bgm && player.audioMixer !== null) {
+    const ogg = await loadScenarioAudio(player, catalog, core, restored.bgm.name);
+    const result = await player.audioMixer.playTrack(ogg, {
+      loop: true,
+      volume: restored.bgm.volume,
+    });
+    player.audioMixer.setTrackCurrentTime?.(restored.bgm.positionSeconds ?? 0);
+    player.safeState.bgmAssetReady = Number(ogg !== null);
+    player.safeState.bgmPlayResult = Number(result.ok);
+    player.safeState.bgmNameLength = restored.bgm.name.length;
+  }
+  if (restored.loopSfx && player.audioMixer !== null) {
+    const ogg = await loadScenarioAudio(player, catalog, core, restored.loopSfx.name);
+    const result = await player.audioMixer.playLoopingSfx(ogg, {
+      volume: restored.loopSfx.volume,
+    });
+    player.audioMixer.setLoopingSfxCurrentTime?.(restored.loopSfx.positionSeconds ?? 0);
+    player.safeState.sfxAssetReady = Number(ogg !== null);
+    player.safeState.sfxPlayResult = Number(result.ok);
+    player.safeState.sfxNameLength = restored.loopSfx.name.length;
+  }
 }
 
 function isValidSavedScenarioSequence(sequence) {
@@ -4339,7 +4837,7 @@ function handleMessageControlClick(player, controlIndex, onUpdate) {
       return true;
     case MESSAGE_CONTROL_QUICK_SAVE: {
       player.cancelAutoSkip();
-      const result = player.saveToStorage();
+      const result = player.quickSaveToStorage();
       player.safeState.messageControlClickResult = result.reason;
       player.safeState.messageControlClickOk = Number(result.ok);
       if (result.ok) {
@@ -4355,11 +4853,11 @@ function handleMessageControlClick(player, controlIndex, onUpdate) {
     }
     case MESSAGE_CONTROL_QUICK_LOAD:
       player.cancelAutoSkip();
-      if (!player.saveSlotSummary(0).exists) {
+      if (!player.quickSaveSummary().exists) {
         player.safeState.messageControlClickResult = "missing_snapshot";
         player.safeState.messageControlClickOk = 0;
       } else {
-        player.requestDialogAction("userDataLoad", 0, "load", "scenarioQuickLoad");
+        player.requestDialogAction("quickLoad", 0, "load", "scenarioQuickLoad");
         player.safeState.messageControlClickResult = "load_confirm";
         player.safeState.messageControlClickOk = 1;
       }
@@ -4426,6 +4924,7 @@ function safeSessionState(active, event) {
     backlogFirstIndex: 0,
     autoMode: 0,
     skipMode: 0,
+    choiceResumeMode: "",
     textLength: event?.textLength ?? 0,
     optionCount: event?.options?.length ?? 0,
     sceneAssetReady: 0,
@@ -4520,10 +5019,17 @@ function safeSessionState(active, event) {
     configBgmVolume: 0,
     configSfxVolume: 0,
     configVoiceVolume: 0,
+    configScreenModeFullscreen: 0,
+    configScreenModeApplied: 0,
+    configScreenModeReasonLength: 0,
+    readEventCount: 0,
+    currentEventRead: 0,
     voiceAssetReady: 0,
     voicePlayResult: 0,
     voiceNameLength: 0,
     voiceChannel: 0,
+    voiceCharacterIndex: -1,
+    voiceSuppressedByConfig: 0,
     voiceControlOpcode: 0,
     voiceControlCount: 0,
     voiceWaitInterruptible: 0,

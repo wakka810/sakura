@@ -4,6 +4,8 @@ const PRESET_CYCLES = Object.freeze([12, 12, 12, 28]);
 const PRESET_DECAY_PERCENT = Object.freeze([30, 30, 30, 12]);
 const DIRECTION_DEGREES = Object.freeze([0, 45, 90, 135, 90]);
 const ENGINE_REFRESH_RATE = 62;
+const SHAKE_AXIS_X = Object.freeze([0, 1, 1, 0]);
+const SHAKE_AXIS_Y = Object.freeze([1, 0, 1, 0]);
 
 export function createPresetScenarioShake(direction, strengthIndex, startedAt) {
   const preset = clampInteger(strengthIndex, 0, PRESET_STRENGTH.length - 1);
@@ -29,6 +31,23 @@ export function createPresetScenarioShake(direction, strengthIndex, startedAt) {
   };
 }
 
+export function createScenarioScreenShake(intArgs, startedAt) {
+  const mode = clampInteger(intArgs[0] ?? 0, 0, 3);
+  const engineAmplitude = Math.max(0, Math.abs(intArgs[1] ?? 0));
+  const cycles = Math.max(1, Math.abs(intArgs[2] ?? 1));
+  const decayPercent = clampInteger(intArgs[3] ?? 0, 0, 100);
+  const durationMs = positiveDuration(intArgs.at(-1)) || 240;
+  return {
+    kind: "screen",
+    startedAt,
+    durationMs,
+    mode,
+    cycles,
+    decayPercent,
+    peakPixels: Math.max(1, Math.round(engineAmplitude / 2)),
+  };
+}
+
 export function scenarioShakeOffset(shake, now) {
   if (!shake) {
     return { x: 0, y: 0, active: false };
@@ -37,12 +56,20 @@ export function scenarioShakeOffset(shake, now) {
   if (elapsed < 0 || elapsed >= shake.durationMs) {
     return { x: 0, y: 0, active: false };
   }
-  if (shake.kind !== "preset") {
-    const decay = 1 - elapsed / shake.durationMs;
-    const t = elapsed / 16.6667;
+  if (shake.kind === "screen") {
+    const cycle = Math.min(
+      shake.cycles - 1,
+      Math.floor((elapsed * shake.cycles) / shake.durationMs),
+    );
+    const cycleProgress = ((elapsed * shake.cycles) / shake.durationMs) - cycle;
+    const triangular = cycleProgress < 0.5
+      ? cycleProgress * 4 - 1
+      : 3 - cycleProgress * 4;
+    const attenuation = Math.pow(1 - shake.decayPercent / 100, cycle);
+    const displacement = Math.round(triangular * shake.peakPixels * attenuation);
     return {
-      x: Math.round(Math.sin(t * 2.17 + shake.phase) * shake.amplitudeX * decay),
-      y: Math.round(Math.cos(t * 2.63 + shake.phase) * shake.amplitudeY * decay),
+      x: SHAKE_AXIS_X[shake.mode] ? displacement : 0,
+      y: SHAKE_AXIS_Y[shake.mode] ? displacement : 0,
       active: true,
     };
   }
@@ -62,4 +89,8 @@ function clampInteger(value, minimum, maximum) {
     return minimum;
   }
   return Math.max(minimum, Math.min(value, maximum));
+}
+
+function positiveDuration(value) {
+  return Number.isInteger(value) && value > 0 ? Math.min(value, 600_000) : 0;
 }

@@ -103,7 +103,7 @@ assert.deepEqual(TITLE_GRAPHIC_SCRIPT_THUMBNAIL_NAMES.slice(30, 35), [
 assert.equal(TITLE_GRAPHIC_SCRIPT_THUMBNAIL_NAMES.includes("ev_thum_45b"), true);
 assert.equal(TITLE_GRAPHIC_SCRIPT_THUMBNAIL_NAMES.includes("ev_thum_141"), false);
 
-const thumbnailAssets = titleGraphicAssets(fakeThumbnailCatalog());
+const thumbnailAssets = titleGraphicAssets(fakeThumbnailCatalog(), { forceUnlock: true });
 assert.equal(thumbnailAssets.length, 3);
 assert.equal(thumbnailAssets[0].assetName, "ev_thum_0");
 assert.equal(thumbnailAssets[0].fullAssetName, "evb000b");
@@ -121,7 +121,11 @@ assert.equal(lockedThumbnailAssets[0].locked, true);
 assert.equal(lockedThumbnailAssets[1].unlocked, true);
 assert.equal(lockedThumbnailAssets[2].locked, true);
 
-const scriptOrderAssets = titleGraphicAssets(fakeScriptOrderThumbnailCatalog());
+const failClosedAssets = titleGraphicAssets(fakeThumbnailCatalog());
+assert.equal(failClosedAssets.length, 3);
+assert.equal(failClosedAssets.every((asset) => asset.locked === true), true);
+
+const scriptOrderAssets = titleGraphicAssets(fakeScriptOrderThumbnailCatalog(), { forceUnlock: true });
 assert.deepEqual(scriptOrderAssets.map((asset) => asset.assetName), [
   "ev_thum_31",
   "ev_thum_136",
@@ -131,7 +135,7 @@ assert.deepEqual(scriptOrderAssets.map((asset) => asset.assetName), [
 ]);
 assert.equal(scriptOrderAssets[4].fullAssetName, "ev4010a");
 
-const assets = titleGraphicAssets(fakeCatalog());
+const assets = titleGraphicAssets(fakeCatalog(), { forceUnlock: true });
 assert.equal(assets.length, 16);
 assert.equal(assets[0].assetName, "evb000a");
 assert.equal(assets[1].assetName, "evtest00");

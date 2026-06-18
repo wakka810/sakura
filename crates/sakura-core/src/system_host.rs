@@ -733,7 +733,7 @@ impl<'a> SystemHost<'a> {
             Graph1fCall::ReadyQuery | Graph1fCall::ReadyChain | Graph1fCall::ReadyTable => {
                 SystemHostResult::Integer(GRAPH_1F_READY_VALUE)
             }
-            Graph1fCall::Unknown => SystemHostResult::Integer(GRAPH_1F_READY_VALUE),
+            Graph1fCall::Unknown => SystemHostResult::Unknown,
         }
     }
 
@@ -803,7 +803,7 @@ impl<'a> SystemHost<'a> {
             0x8b => Some(self.cflag_getbit(args)),
             0xe9 => Some(self.archive_descriptor_result(args)),
             0x6a => Some(self.scrmain_init.service_6a(args)),
-            0x5f => Some(SystemHostResult::Void),
+            0x5f => Some(SystemHostResult::Integer(1)),
             0x11 => Some(self.scrmain_init.service_11(args)),
             0x16 => Some(self.scrmain_init.service_16(args)),
             _ => None,
@@ -1511,6 +1511,21 @@ mod tests {
     }
 
     #[test]
+    fn system_5f_returns_observed_ready_value() {
+        let scripts = ScriptLibrary::new();
+        let mut host = SystemHost::new(&scripts);
+
+        assert_eq!(
+            host.event_result(&SystemVmEvent::ServiceCall {
+                family: SystemCallFamily::System,
+                service_id: 0x5f,
+                args: Vec::new(),
+            }),
+            Some(SystemHostResult::Integer(1))
+        );
+    }
+
+    #[test]
     fn runs_vm_until_event_limit_with_default_host() -> crate::Result<()> {
         let mut script = vec![0u8; 0x10];
         script.extend_from_slice(&[0xff, 0x00, 0xff, 0x00, 0xff, 0x00, 0x17]);
@@ -1974,6 +1989,21 @@ mod tests {
                 ],
             }),
             Some(SystemHostResult::Integer(GRAPH_1F_READY_VALUE))
+        );
+    }
+
+    #[test]
+    fn graph_1f_unknown_shape_does_not_claim_ready() {
+        let scripts = ScriptLibrary::new();
+        let mut host = SystemHost::new(&scripts);
+
+        assert_eq!(
+            host.event_result(&SystemVmEvent::ServiceCall {
+                family: SystemCallFamily::Graph,
+                service_id: 0x1f,
+                args: vec![SystemValue::Integer(1)],
+            }),
+            Some(SystemHostResult::Unknown)
         );
     }
 

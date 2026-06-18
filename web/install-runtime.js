@@ -1527,8 +1527,14 @@ async function loadUserDataWindow(catalog, core) {
     loadSlot,
     previous,
     next,
+    top,
+    last,
     load,
     back,
+    exit,
+    deleteButton,
+    move,
+    copy,
     save,
     ...digits
   ] = await Promise.all([
@@ -1536,11 +1542,17 @@ async function loadUserDataWindow(catalog, core) {
     loadNamedImage(catalog, core, "SGUsDtWnd990100"),
     loadNamedImage(catalog, core, "SGUsDtWnd900000"),
     loadNamedImage(catalog, core, "SGUsDtWnd900100"),
-    loadNamedImage(catalog, core, "SGUsDtWnd100000"),
-    loadNamedImage(catalog, core, "SGUsDtWnd100100"),
-    loadNamedImage(catalog, core, "SGUsDtWnd200000"),
-    loadNamedImage(catalog, core, "SGUsDtWnd200100"),
-    loadNamedImage(catalog, core, "SGUsDtWnd200600"),
+    loadNamedImage(catalog, core, "SGUsDtWnd100000"), // Previous
+    loadNamedImage(catalog, core, "SGUsDtWnd100100"), // Next
+    loadNamedImage(catalog, core, "SGUsDtWnd100200"), // Top
+    loadNamedImage(catalog, core, "SGUsDtWnd100300"), // Last
+    loadNamedImage(catalog, core, "SGUsDtWnd200000"), // Load
+    loadNamedImage(catalog, core, "SGUsDtWnd200100"), // Back
+    loadNamedImage(catalog, core, "SGUsDtWnd200200"), // Exit
+    loadNamedImage(catalog, core, "SGUsDtWnd200300"), // Delete
+    loadNamedImage(catalog, core, "SGUsDtWnd200400"), // Move
+    loadNamedImage(catalog, core, "SGUsDtWnd200500"), // Copy
+    loadNamedImage(catalog, core, "SGUsDtWnd200600"), // Save
     ...Array.from(
       { length: 10 },
       (_, index) => loadNamedImage(catalog, core, `SGUsDtWnd00000${index}`),
@@ -1551,7 +1563,19 @@ async function loadUserDataWindow(catalog, core) {
     loadBase,
     saveSlot,
     loadSlot,
-    buttons: { previous, next, load, back, save },
+    buttons: {
+      previous,
+      next,
+      top,
+      last,
+      load,
+      back,
+      exit,
+      delete: deleteButton,
+      move,
+      copy,
+      save,
+    },
     digits,
   };
 }

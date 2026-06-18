@@ -10,9 +10,9 @@ use crate::sdc::{decompress_sdc, is_sdc};
 
 pub const GDB_MAGIC: &[u8; 15] = b"BURIKO GDB 3.00";
 
-const VIEWED_IMAGE_PREFIX: &[u8] = b"white\0makuralogo\0att01\0att02\0";
 const VIEWED_IMAGE_MAX_COUNT: usize = 4096;
 const VIEWED_IMAGE_MAX_NAME_LEN: usize = 96;
+const GDB_SECTION_SCAN_START: usize = GDB_MAGIC.len() + 1;
 
 /// Returns true when the payload starts with the decompressed GDB magic.
 pub fn is_gdb(data: &[u8]) -> bool {
@@ -76,14 +76,32 @@ pub fn gdb_write_viewed_image_names(data: &[u8], out: &mut [u8]) -> Result<usize
 }
 
 fn viewed_image_names_from_decoded_gdb(data: &[u8]) -> Result<Vec<Vec<u8>>> {
-    let Some(prefix_offset) = find_subslice(data, VIEWED_IMAGE_PREFIX) else {
+    let Some(section) = find_viewed_image_section(data)? else {
         // A pristine or externally reset GDB can have no viewed-image entries.
         // Treat absence as an empty list rather than corrupting the mount.
         return Ok(Vec::new());
     };
-    let Some(count_offset) = prefix_offset.checked_sub(4) else {
-        return Ok(Vec::new());
-    };
+    parse_viewed_image_section(data, section)
+}
+
+fn find_viewed_image_section(data: &[u8]) -> Result<Option<usize>> {
+    let mut found = None;
+    let mut offset = GDB_SECTION_SCAN_START;
+    while offset + 8 <= data.len() {
+        if parse_viewed_image_section(data, offset).is_ok() {
+            if found.is_some() {
+                return Err(SakuraError::InvalidRuntime(
+                    "multiple plausible GDB viewed-image sections".to_owned(),
+                ));
+            }
+            found = Some(offset);
+        }
+        offset += 4;
+    }
+    Ok(found)
+}
+
+fn parse_viewed_image_section(data: &[u8], count_offset: usize) -> Result<Vec<Vec<u8>>> {
     let count = read_u32_le(data, count_offset)? as usize;
     if count == 0 || count > VIEWED_IMAGE_MAX_COUNT {
         return Err(SakuraError::InvalidRuntime(format!(
@@ -92,7 +110,9 @@ fn viewed_image_names_from_decoded_gdb(data: &[u8]) -> Result<Vec<Vec<u8>>> {
     }
 
     let mut names = Vec::with_capacity(count);
-    let mut cursor = prefix_offset;
+    let mut cursor = count_offset.checked_add(4).ok_or_else(|| {
+        SakuraError::InvalidRuntime("GDB viewed-image cursor overflows".to_owned())
+    })?;
     for _ in 0..count {
         let name = read_nul_terminated_asset_name(data, cursor)?;
         cursor = cursor.checked_add(name.len() + 1).ok_or_else(|| {
@@ -103,7 +123,12 @@ fn viewed_image_names_from_decoded_gdb(data: &[u8]) -> Result<Vec<Vec<u8>>> {
 
     // The next section begins with a little-endian flag-array count. Requiring
     // four following bytes catches accidental matches inside unrelated strings.
-    let _flag_count = read_u32_le(data, cursor)?;
+    let flag_count = read_u32_le(data, cursor)?;
+    if flag_count > VIEWED_IMAGE_MAX_COUNT as u32 {
+        return Err(SakuraError::InvalidRuntime(format!(
+            "invalid GDB following-section count {flag_count}"
+        )));
+    }
     Ok(names)
 }
 
@@ -148,15 +173,6 @@ fn read_u32_le(data: &[u8], offset: usize) -> Result<u32> {
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return None;
-    }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +211,22 @@ mod tests {
         data.resize(128, 0);
         assert_eq!(gdb_viewed_image_names(&data)?, Vec::<Vec<u8>>::new());
         assert_eq!(gdb_viewed_image_names_nul_len(&data)?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_viewed_image_section_without_boot_prefix() -> Result<()> {
+        let data = synthetic_gdb(&["ev0001a", "bg1016a", "sp0044b"]);
+
+        let names = gdb_viewed_image_names(&data)?;
+        assert_eq!(
+            names,
+            vec![
+                b"ev0001a".to_vec(),
+                b"bg1016a".to_vec(),
+                b"sp0044b".to_vec(),
+            ]
+        );
         Ok(())
     }
 

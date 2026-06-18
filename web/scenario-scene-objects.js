@@ -291,7 +291,11 @@ export function paintScenarioSceneObjects(context, canvas, state, now = performa
   const objects = [...state.sceneObjects.values()].map((object) => (
     presentedSceneObject(state, object, now)
   ));
-  objects.sort((left, right) => right.z - left.z || right.id - left.id);
+  objects.sort((left, right) => (
+    left.priority - right.priority
+    || right.z - left.z
+    || left.id - right.id
+  ));
   for (const object of objects) {
     if (object.alpha <= 0) {
       continue;

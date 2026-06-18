@@ -173,7 +173,7 @@ export function applyScenarioFilter(context, canvas, state) {
 
 export function filterScenarioPixels(pixels, filter) {
   const strength = filterStrength(filter.strength);
-  if (filter.mode === 0) {
+  if (strength === 0) {
     return;
   }
   const inverse = 256 - strength;
@@ -181,6 +181,12 @@ export function filterScenarioPixels(pixels, filter) {
     const r = pixels[offset];
     const g = pixels[offset + 1];
     const b = pixels[offset + 2];
+    if (filter.mode === 0) {
+      pixels[offset] = ((r * inverse) + (filter.r * strength)) >> 8;
+      pixels[offset + 1] = ((g * inverse) + (filter.g * strength)) >> 8;
+      pixels[offset + 2] = ((b * inverse) + (filter.b * strength)) >> 8;
+      continue;
+    }
     if (filter.mode === 1) {
       pixels[offset] = Math.min(255, r + ((filter.r * strength) >> 8));
       pixels[offset + 1] = Math.min(255, g + ((filter.g * strength) >> 8));

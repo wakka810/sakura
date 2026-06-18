@@ -1,5 +1,5 @@
 // Boot the browser runtime against the local install server and dump state + screenshot.
-// Usage: node tools/boot-runtime.mjs [--png out.png] [--json out.json] [--route pi|an|rn|ze] [--scenario-name NAME] [--start-route pi|an|rn|ze] [--start-scenario-name NAME] [--smoke-routes] [--smoke-route-chapters] [--smoke-full-routes] [--smoke-full-route ROUTE] [--timeout-ms N] [--post-ready-ms N] [--wait-after-target-ms N] [--advance-delay-ms N] [--wait-title] [--click-title-menu Start|Load|Config|Extra|Graphic|Scene|Music|IV|V|VI|Exit]... [--open-title-scene] [--click-title-scene INDEX] [--click-title-graphic INDEX] [--click-title-graphic-button previous|next|top|last|back]... [--click-title-graphic-viewer] [--click-title-music INDEX] [--click-dialog-control yes|no] [--seed-save-slot N] [--seed-dummy-save-slot N] [--save-load-advance N] [--open-log-after-backlog N] [--click-message-control INDEX] [--click-userdata-control previous|next|save|load|back] [--click-config-control reset|title|back] [--advance-until-event N] [--advance-until-message-control N] [--message-control-count N] [--message-control-opcode N] [--advance-until-sprite-transition N] [--sprite-transition-scenario NAME] [--advance-until-sprite-motion N] [--advance-until-control-motion N] [--advance-until-scene-object N] [--advance-after-scene-object N] [--advance-after-scene-object-delay-ms N] [--advance-until-scene-object-transition N] [--scene-object-transition-event N] [--advance-after-scene-object-transition N] [--advance-until-filter N] [--advance-after-filter N] [--advance-until-filter-clear N] [--advance-after-filter-clear N] [--advance-until-preset-shake N] [--advance-until-sfx-control N] [--advance-until-voice-channels N] [--voice-channel-count N] [--advance-until-scenario N] [--target-scenario NAME] [--advance-until-choice N]
+// Usage: node tools/boot-runtime.mjs [--png out.png] [--json out.json] [--route pi|an|rn|ze] [--scenario-name NAME] [--start-route pi|an|rn|ze] [--start-scenario-name NAME] [--smoke-routes] [--smoke-route-chapters] [--smoke-full-routes] [--smoke-full-route ROUTE] [--quick-save-load-smoke] [--quick-save-storage-failure-smoke] [--timeout-ms N] [--post-ready-ms N] [--wait-after-target-ms N] [--advance-delay-ms N] [--wait-title] [--click-title-menu Start|Load|Config|Extra|Graphic|Scene|Music|IV|V|VI|Exit]... [--open-title-scene] [--click-title-scene INDEX] [--click-title-graphic INDEX] [--click-title-graphic-button previous|next|top|last|back]... [--click-title-graphic-viewer] [--click-title-music INDEX] [--click-dialog-control yes|no|ack] [--seed-save-slot N] [--seed-dummy-save-slot N] [--seed-config-voice-off INDEX] [--save-load-advance N] [--open-log-after-backlog N] [--click-message-control INDEX] [--open-userdata save|load] [--click-userdata-control top|previous|next|last|load|save|back|exit|delete|move|copy] [--click-config-control reset|title|back] [--advance-until-event N] [--advance-until-message-control N] [--message-control-count N] [--message-control-opcode N] [--advance-until-sprite-transition N] [--sprite-transition-scenario NAME] [--advance-until-sprite-motion N] [--advance-until-control-motion N] [--advance-until-scene-object N] [--advance-after-scene-object N] [--advance-after-scene-object-delay-ms N] [--advance-until-scene-object-transition N] [--scene-object-transition-event N] [--advance-after-scene-object-transition N] [--advance-until-filter N] [--advance-after-filter N] [--advance-until-filter-clear N] [--advance-after-filter-clear N] [--advance-until-preset-shake N] [--advance-until-sfx-control N] [--advance-until-voice-channels N] [--voice-channel-count N] [--advance-until-scenario N] [--target-scenario NAME] [--advance-until-choice N]
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { chromium } from "playwright";
@@ -7,6 +7,11 @@ import {
   scenarioChapterChoices,
   scenarioRouteChoices,
 } from "../web/scenario-routes.js";
+import {
+  defaultScenarioConfigSettings,
+  normalizedScenarioConfigSettings,
+  SCENARIO_CONFIG_STORAGE_KEY,
+} from "../web/scenario-config-window.js";
 
 function parseArgs(argv) {
   const o = {
@@ -26,6 +31,8 @@ function parseArgs(argv) {
     smokeRouteChapters: false,
     smokeFullRoutes: false,
     smokeFullRoute: "",
+    quickSaveLoadSmoke: false,
+    quickSaveStorageFailureSmoke: false,
     advanceDelayMs: 250,
     waitTitle: false,
     clickTitleMenu: "",
@@ -39,12 +46,15 @@ function parseArgs(argv) {
     clickDialogControl: "",
     seedSaveSlot: -1,
     seedDummySaveSlot: -1,
+    seedTitleClear: "",
+    seedConfigVoiceOff: -1,
     saveLoadAdvance: 0,
     openLogAfterBacklog: 0,
     clickMessageControl: -1,
     clickMessageControls: [],
     clickUserDataSlot: -1,
     clickUserDataControl: "",
+    openUserData: "",
     clickConfigControl: "",
     logWheel: 0,
     advanceUntilEvent: 0,
@@ -99,6 +109,10 @@ function parseArgs(argv) {
     else if (a === "--smoke-route-chapters") { o.smokeRouteChapters = true; }
     else if (a === "--smoke-full-routes") { o.smokeFullRoutes = true; }
     else if (a === "--smoke-full-route") { o.smokeFullRoute = argv[++i] ?? ""; }
+    else if (a === "--quick-save-load-smoke") { o.quickSaveLoadSmoke = true; }
+    else if (a === "--quick-save-storage-failure-smoke") {
+      o.quickSaveStorageFailureSmoke = true;
+    }
     else if (a === "--advance") { o.advance = Number.parseInt(argv[++i], 10); }
     else if (a === "--advance-delay-ms") { o.advanceDelayMs = Number.parseInt(argv[++i], 10); }
     else if (a === "--wait-title") { o.waitTitle = true; }
@@ -127,6 +141,10 @@ function parseArgs(argv) {
     else if (a === "--seed-dummy-save-slot") {
       o.seedDummySaveSlot = Number.parseInt(argv[++i], 10);
     }
+    else if (a === "--seed-title-clear") { o.seedTitleClear = argv[++i] ?? "iv"; }
+    else if (a === "--seed-config-voice-off") {
+      o.seedConfigVoiceOff = Number.parseInt(argv[++i], 10);
+    }
     else if (a === "--save-load-advance") { o.saveLoadAdvance = Number.parseInt(argv[++i], 10); }
     else if (a === "--open-log-after-backlog") {
       o.openLogAfterBacklog = Number.parseInt(argv[++i], 10);
@@ -141,6 +159,9 @@ function parseArgs(argv) {
     }
     else if (a === "--click-userdata-control") {
       o.clickUserDataControl = argv[++i] ?? "";
+    }
+    else if (a === "--open-userdata") {
+      o.openUserData = argv[++i] ?? "";
     }
     else if (a === "--click-config-control") {
       o.clickConfigControl = argv[++i] ?? "";
@@ -306,6 +327,14 @@ try {
   let seededDummySave = null;
   if (opts.seedDummySaveSlot >= 0) {
     seededDummySave = await seedDummySaveSlot(page, opts.seedDummySaveSlot);
+  }
+  let seededTitleClear = null;
+  if (opts.seedTitleClear) {
+    seededTitleClear = await seedTitleClear(page, opts.seedTitleClear);
+  }
+  let seededConfigVoiceOffResult = null;
+  if (opts.seedConfigVoiceOff >= 0) {
+    seededConfigVoiceOffResult = await seedConfigVoiceOff(page, opts.seedConfigVoiceOff);
   }
 
   let startedRoute = null;
@@ -499,6 +528,9 @@ try {
     await waitForStableScenario(page, opts.timeoutMs);
     await clickMessageControl(page, controlIndex);
   }
+  if (opts.openUserData) {
+    await openUserDataWindow(page, opts.openUserData);
+  }
   if (opts.clickUserDataSlot >= 0) {
     await clickUserDataSlot(page, opts.clickUserDataSlot);
   }
@@ -539,6 +571,14 @@ try {
       restoredExactly: JSON.stringify(before) === JSON.stringify(restored),
       resumedForward: resumed?.event?.eventCount > restored?.event?.eventCount,
     };
+  }
+  let quickSaveLoad = null;
+  if (opts.quickSaveLoadSmoke) {
+    quickSaveLoad = await runQuickSaveLoadSmoke(page, opts);
+  }
+  let quickSaveStorageFailure = null;
+  if (opts.quickSaveStorageFailureSmoke) {
+    quickSaveStorageFailure = await runQuickSaveStorageFailureSmoke(page, opts);
   }
 
   const state = await page.evaluate(() => {
@@ -586,6 +626,8 @@ try {
         voicePlayResult: inst.player.safeState?.voicePlayResult ?? 0,
         voiceNameLength: inst.player.safeState?.voiceNameLength ?? 0,
         voiceChannel: inst.player.safeState?.voiceChannel ?? 0,
+        voiceCharacterIndex: inst.player.safeState?.voiceCharacterIndex ?? -1,
+        voiceSuppressedByConfig: inst.player.safeState?.voiceSuppressedByConfig ?? 0,
         voiceControlOpcode: inst.player.safeState?.voiceControlOpcode ?? 0,
         voiceControlCount: inst.player.safeState?.voiceControlCount ?? 0,
         voiceWaitInterruptible: inst.player.safeState?.voiceWaitInterruptible ?? 0,
@@ -977,6 +1019,9 @@ try {
         bgmVolume: Math.round((inst.titleConfigState?.settings?.bgmVolume ?? 0) * 100),
         sfxVolume: Math.round((inst.titleConfigState?.settings?.sfxVolume ?? 0) * 100),
         voiceVolume: Math.round((inst.titleConfigState?.settings?.voiceVolume ?? 0) * 100),
+        screenMode: inst.titleConfigState?.settings?.screenMode ?? "",
+        screenModeOk: inst.titleConfigScreenModeOk ?? 0,
+        screenModeResult: inst.titleConfigScreenModeResult ?? "",
       } : null,
       titleClear: (() => {
         try {
@@ -1112,6 +1157,12 @@ try {
         bgmVolume: inst.player.safeState?.configBgmVolume ?? 0,
         sfxVolume: inst.player.safeState?.configSfxVolume ?? 0,
         voiceVolume: inst.player.safeState?.configVoiceVolume ?? 0,
+        screenModeFullscreen: inst.player.safeState?.configScreenModeFullscreen ?? 0,
+        screenModeApplied: inst.player.safeState?.configScreenModeApplied ?? 0,
+        screenModeReasonLength: inst.player.safeState?.configScreenModeReasonLength ?? 0,
+        characterVoices: Array.isArray(inst.player.configState?.settings?.characterVoices)
+          ? inst.player.configState.settings.characterVoices.slice(0, 8)
+          : [],
       } : null,
       graphHistory: hq ? { ready: hq.ready, recorded: hq.recorded, count: (hq.events ?? []).length, events: (hq.events ?? []).map(slim) } : null,
       canvas: canvas ? {
@@ -1142,8 +1193,12 @@ try {
     asyncErrorStage: stage,
     state,
     saveLoad,
+    quickSaveLoad,
+    quickSaveStorageFailure,
     seededSave,
     seededDummySave,
+    seededTitleClear,
+    seededConfigVoiceOff: seededConfigVoiceOffResult,
     startedRoute,
     openedTitleScene,
     clickedTitleScene,
@@ -1870,6 +1925,65 @@ async function seedSaveSlot(page, slot, timeoutMs) {
   return result;
 }
 
+async function seedTitleClear(page, routeId) {
+  const result = await page.evaluate((route) => {
+    const normalized = /^(an|pi|rn|ze|iv|v|vi)$/.test(String(route ?? ""))
+      ? String(route)
+      : "iv";
+    const storage = window.localStorage;
+    if (!storage) {
+      return { ok: false, reason: "storage_unavailable" };
+    }
+    const record = {
+      version: 1,
+      routes: {
+        [normalized]: {
+          endingScenario: "ed05",
+          clearedAt: "2026-06-18 00:00:00",
+        },
+      },
+    };
+    storage.setItem("sakura.title.clear.v1", JSON.stringify(record));
+    window.__sakuraActiveInstall?.refreshTitleMenu?.();
+    return { ok: true, routeId: normalized, record };
+  }, routeId);
+  if (!result?.ok) {
+    throw new Error(`title clear seed failed: ${result?.reason ?? "unknown"}`);
+  }
+  return result;
+}
+
+async function seedConfigVoiceOff(page, index) {
+  const settings = normalizedScenarioConfigSettings(defaultScenarioConfigSettings());
+  if (Number.isInteger(index) && index >= 0 && index < settings.characterVoices.length) {
+    settings.characterVoices[index] = false;
+  }
+  const result = await page.evaluate(({ key, seededSettings, faceIndex }) => {
+    const storage = window.localStorage;
+    if (!storage) {
+      return { ok: false, reason: "storage_unavailable" };
+    }
+    storage.setItem(key, JSON.stringify({
+      version: 1,
+      settings: seededSettings,
+    }));
+    window.__sakuraActiveInstall?.player?.loadConfigSettings?.();
+    return {
+      ok: true,
+      faceIndex,
+      characterVoices: seededSettings.characterVoices,
+    };
+  }, {
+    key: SCENARIO_CONFIG_STORAGE_KEY,
+    seededSettings: settings,
+    faceIndex: index,
+  });
+  if (!result?.ok) {
+    throw new Error(`config voice seed failed: ${result?.reason ?? "unknown"}`);
+  }
+  return result;
+}
+
 async function seedDummySaveSlot(page, slot) {
   const result = await page.evaluate((slotIndex) => {
     const storage = window.localStorage;
@@ -2430,6 +2544,24 @@ async function clickMessageControl(page, controlIndex) {
   await page.waitForTimeout(100);
 }
 
+async function openUserDataWindow(page, mode) {
+  const normalized = String(mode).toLowerCase() === "load" ? "load" : "save";
+  const ok = await page.evaluate((m) => {
+    const player = window.__sakuraActiveInstall?.player ?? null;
+    if (!player?.openUserDataWindow) {
+      return false;
+    }
+    player.openUserDataWindow(m);
+    player.onOverlayRepaint?.();
+    return player.userDataState?.open === true;
+  }, normalized);
+  if (!ok) {
+    throw new Error(`could not open userdata window (${normalized})`);
+  }
+  // Allow the saved-scene thumbnails to decode and repaint.
+  await page.waitForTimeout(700);
+}
+
 async function clickUserDataSlot(page, slotIndex) {
   const point = await page.evaluate((slot) => {
     const canvas = document.getElementById("stage");
@@ -2447,8 +2579,8 @@ async function clickUserDataSlot(page, slotIndex) {
     }
     const column = local % 3;
     const row = Math.floor(local / 3);
-    const x = 28 + column * (392 + 24) + 196;
-    const y = 112 + row * (160 + 12) + 80;
+    const x = [44, 444, 844][column] + 196;
+    const y = [110, 284, 458][row] + 80;
     const rect = canvas.getBoundingClientRect();
     return {
       clientX: rect.left + x * rect.width / canvas.width,
@@ -2473,32 +2605,45 @@ async function clickUserDataControl(page, controlName) {
     const skin = scenarioState?.open === true
       ? inst?.player?.userDataSkin
       : inst?.userDataWindow;
-    const button = {
-      previous: { x: 448, key: "previous" },
-      next: { x: 596, key: "next" },
-      save: { x: 744, key: "save" },
-      load: { x: 744, key: "load" },
-      back: { x: 892, key: "back" },
-    }[String(name).toLowerCase()];
-    if (!canvas || !state?.open || !skin?.buttons || !button) {
+    if (!canvas || !state?.open || !skin?.buttons) {
       return null;
     }
-    const actionKey = button.key === "save" || button.key === "load" ? state.mode : button.key;
-    if (
-      (button.key === "save" || button.key === "load")
-      && actionKey !== button.key
-    ) {
+    const key = String(name).toLowerCase();
+    const top = { top: 44, previous: 196, next: 940, last: 1092 };
+    const bottom = { back: 200, exit: 356, delete: 512, move: 668, copy: 824 };
+    let x;
+    let y;
+    let imageKey;
+    if (key in top) {
+      x = top[key];
+      y = 40;
+      imageKey = key;
+    } else if (key === "load" || key === "save") {
+      // The left bottom button is the mode toggle: "load" on the Save screen,
+      // "save" on the Load screen.
+      const want = state.mode === "save" ? "load" : "save";
+      if (key !== want) {
+        return null;
+      }
+      x = 44;
+      y = 650;
+      imageKey = key;
+    } else if (key in bottom) {
+      x = bottom[key];
+      y = 650;
+      imageKey = key;
+    } else {
       return null;
     }
-    const image = skin.buttons[actionKey] ?? null;
+    const image = skin.buttons[imageKey] ?? null;
     if (!image) {
       return null;
     }
     const stateWidth = Math.floor(image.width / 4);
     const rect = canvas.getBoundingClientRect();
     return {
-      clientX: rect.left + (button.x + stateWidth / 2) * rect.width / canvas.width,
-      clientY: rect.top + (650 + image.height / 2) * rect.height / canvas.height,
+      clientX: rect.left + (x + stateWidth / 2) * rect.width / canvas.width,
+      clientY: rect.top + (y + image.height / 2) * rect.height / canvas.height,
     };
   }, controlName);
   if (!point) {
@@ -2519,6 +2664,17 @@ async function clickConfigControl(page, controlName) {
     const skin = scenarioState?.open === true
       ? inst?.player?.configSkin
       : inst?.configWindow;
+    const namedPoint = {
+      "screen-fullscreen": [400, 320],
+      "screen-window": [540, 320],
+    }[name];
+    if (canvas && state?.open && namedPoint) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        clientX: rect.left + namedPoint[0] * rect.width / canvas.width,
+        clientY: rect.top + namedPoint[1] * rect.height / canvas.height,
+      };
+    }
     const buttonX = { reset: 396, title: 570, back: 744 }[name];
     if (!canvas || !state?.open || !skin?.buttons || buttonX === undefined) {
       return null;
@@ -2548,6 +2704,19 @@ async function clickDialogControl(page, controlName) {
     const state = inst?.dialogState ?? null;
     const skin = inst?.dialogWindow ?? null;
     const action = String(name).toLowerCase();
+    if (
+      canvas
+      && state?.open === true
+      && action === "ack"
+      && skin?.panels?.[state.kind]
+    ) {
+      const panel = skin.panels[state.kind];
+      const rect = canvas.getBoundingClientRect();
+      return {
+        clientX: rect.left + (279 + panel.width / 2) * rect.width / canvas.width,
+        clientY: rect.top + (239 + panel.height / 2) * rect.height / canvas.height,
+      };
+    }
     if (
       !canvas
       || state?.open !== true
@@ -2579,6 +2748,129 @@ async function clickDialogControl(page, controlName) {
   }
   await page.mouse.click(point.clientX, point.clientY);
   await page.waitForTimeout(150);
+}
+
+async function runQuickSaveLoadSmoke(page, opts) {
+  await waitForStableScenario(page, opts.timeoutMs);
+  const before = await captureQuickSaveLoadState(page);
+  await clickMessageControl(page, 5);
+  const afterQuickSave = await captureQuickSaveLoadState(page);
+  if (!afterQuickSave.dialogOpen || afterQuickSave.dialogKind !== "quickSave") {
+    throw new Error(`quick-save notice did not open: ${JSON.stringify(afterQuickSave)}`);
+  }
+  await clickDialogControl(page, "ack");
+  await waitForStableScenario(page, opts.timeoutMs);
+  const afterAck = await captureQuickSaveLoadState(page);
+  if (afterAck.dialogOpen) {
+    throw new Error(`quick-save notice did not close: ${JSON.stringify(afterAck)}`);
+  }
+  await advanceRuntime(page, 1, opts.advanceDelayMs);
+  await waitForStableScenario(page, opts.timeoutMs);
+  const advanced = await captureQuickSaveLoadState(page);
+  await clickMessageControl(page, 6);
+  const afterQuickLoadRequest = await captureQuickSaveLoadState(page);
+  if (!afterQuickLoadRequest.dialogOpen || afterQuickLoadRequest.dialogKind !== "load") {
+    throw new Error(`quick-load confirmation did not open: ${JSON.stringify(afterQuickLoadRequest)}`);
+  }
+  await clickDialogControl(page, "yes");
+  await waitForStableScenario(page, opts.timeoutMs);
+  const restored = await captureQuickSaveLoadState(page);
+  return {
+    before,
+    afterQuickSave,
+    afterAck,
+    advanced,
+    afterQuickLoadRequest,
+    restored,
+    quickKeyCreated: afterQuickSave.quickSaveExists === true,
+    normalSlot0Untouched: afterQuickSave.normalSlot0Exists === false,
+    restoredEventCount: restored.eventCount === afterQuickSave.eventCount,
+    loadOk: restored.userDataLastResult === "ok" && restored.userDataLastOk === 1,
+  };
+}
+
+async function runQuickSaveStorageFailureSmoke(page, opts) {
+  await waitForStableScenario(page, opts.timeoutMs);
+  await page.evaluate(() => {
+    window.localStorage.removeItem("sakura.session.quick");
+    window.localStorage.removeItem("sakura.session.slot.0");
+    window.localStorage.removeItem("sakura.session.slot");
+  });
+  const before = await captureQuickSaveLoadState(page);
+  await page.evaluate(() => {
+    const original = Storage.prototype.setItem;
+    Object.defineProperty(window, "__sakuraBootRuntimeOriginalSetItem", {
+      value: original,
+      configurable: true,
+    });
+    Storage.prototype.setItem = function setItemFailure(key, value) {
+      if (String(key).startsWith("sakura.session")) {
+        throw new DOMException("Injected storage failure", "QuotaExceededError");
+      }
+      return original.call(this, key, value);
+    };
+  });
+  let afterFailure;
+  try {
+    await clickMessageControl(page, 5);
+    afterFailure = await captureQuickSaveLoadState(page);
+  } finally {
+    await page.evaluate(() => {
+      const original = window.__sakuraBootRuntimeOriginalSetItem;
+      if (typeof original === "function") {
+        Storage.prototype.setItem = original;
+      }
+      delete window.__sakuraBootRuntimeOriginalSetItem;
+    });
+  }
+  return {
+    before,
+    afterFailure,
+    failedWithStorageReason: afterFailure.messageControlClickResult === "storage_write_failed",
+    noQuickKeyCreated: afterFailure.quickSaveExists === false,
+    normalSlot0Untouched: afterFailure.normalSlot0Exists === false,
+    noNoticeDialog: afterFailure.dialogOpen === false,
+  };
+}
+
+async function captureQuickSaveLoadState(page) {
+  return page.evaluate(() => {
+    const player = window.__sakuraActiveInstall?.player ?? null;
+    const dialog = window.__sakuraActiveInstall?.dialogState ?? null;
+    const mixer = window.__sakuraActiveInstall?.audioMixer?.state?.() ?? null;
+    const storage = window.localStorage;
+    const decode = (key) => {
+      try {
+        const encoded = storage.getItem(key);
+        return encoded ? JSON.parse(encoded) : null;
+      } catch {
+        return null;
+      }
+    };
+    const quick = decode("sakura.session.quick");
+    const slot0 = decode("sakura.session.slot.0");
+    return {
+      eventCount: player?.event?.eventCount ?? -1,
+      scenarioName: player?.safeState?.scenarioName ?? "",
+      dialogOpen: dialog?.open === true,
+      dialogKind: dialog?.kind ?? "",
+      messageControlClickResult: player?.safeState?.messageControlClickResult ?? "",
+      messageControlClickOk: player?.safeState?.messageControlClickOk ?? 0,
+      userDataLastResult: player?.safeState?.userDataLastResult ?? "",
+      userDataLastOk: player?.safeState?.userDataLastOk ?? 0,
+      quickSaveExists: quick !== null,
+      quickSaveVersion: quick?.version ?? 0,
+      quickSaveEventCount: quick?.event?.eventCount ?? -1,
+      quickSaveHasAudio: !!quick?.audio,
+      quickSaveBgmName: quick?.audio?.bgm?.name ?? "",
+      quickSaveLoopSfxName: quick?.audio?.loopSfx?.name ?? "",
+      mixerTrackReady: mixer?.trackReady ?? 0,
+      mixerTrackPaused: mixer?.trackPaused === null ? null : mixer?.trackPaused === true,
+      mixerTrackLoop: mixer?.trackLoop === null ? null : mixer?.trackLoop === true,
+      mixerTrackVolume: Number.isFinite(mixer?.trackVolume) ? mixer.trackVolume : 0,
+      normalSlot0Exists: slot0 !== null,
+    };
+  });
 }
 
 async function waitForStableScenario(page, timeoutMs) {

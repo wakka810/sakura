@@ -18,6 +18,7 @@ import { publishSafeRuntimeState } from "./runtime-state-export.js";
 import { safeInstallSummary } from "./safe-summary.js";
 import {
   applyScenarioConfigControl,
+  applyScenarioScreenMode,
   closeScenarioConfigWindow,
   createScenarioConfigState,
   openScenarioConfigWindow,
@@ -55,6 +56,7 @@ import {
   titleSceneChoices,
   titleSceneControlAt,
   titleSceneHoverKey,
+  titleSceneRowUnlocked,
 } from "./title-scene-select.js";
 import {
   applyTitleMusicControl,
@@ -84,6 +86,7 @@ import {
   titleGraphicVisibleChoices,
 } from "./title-graphic.js";
 import { scenarioSequenceForRoute } from "./scenario-routes.js";
+import { loadViewedData } from "./viewed-data.js";
 import {
   normalizeTitleMenuMode,
   titleExtraUnlocked,
@@ -108,6 +111,8 @@ const runtimeQuery = new URLSearchParams(window.location.search);
 const titleExtraForced = runtimeQuery.get("unlockExtra") === "1" || runtimeQuery.get("showExtra") === "1";
 const titleGraphicForceUnlock = runtimeQuery.get("unlockExtra") === "1"
   || runtimeQuery.get("unlockGraphic") === "1";
+const titleSceneForceUnlock = runtimeQuery.get("unlockExtra") === "1"
+  || runtimeQuery.get("unlockScene") === "1";
 const assetNameEncoder = new TextEncoder();
 const SUMMARY_RENDER_INTERVAL_MS = 250;
 const RUNTIME_DOM_PUBLISH_INTERVAL_MS = 250;
@@ -262,6 +267,9 @@ function bindRuntimeSessionControls() {
       return { ok: false, reason: "scene_not_found" };
     }
     openTitleSceneSelectHost(mounted);
+    if (titleSceneRowLocked(choice.scenarioName)) {
+      return { ok: false, reason: "scene_locked" };
+    }
     return handleTitleSceneResult(
       mounted,
       applyTitleSceneControl(ensureTitleSceneState(mounted), { kind: "scene", choice }),
@@ -1704,6 +1712,11 @@ function applyTitleConfigClick(mounted, clientX, clientY) {
   const result = applyScenarioConfigControl(state, control);
   if (result.handled && result.reason !== "title_pending") {
     applyTitleConfigVolumes(mounted);
+    if (result.reason === "screenMode") {
+      const screenMode = applyScenarioScreenMode(state.settings);
+      mounted.titleConfigScreenModeResult = screenMode.reason;
+      mounted.titleConfigScreenModeOk = Number(screenMode.ok);
+    }
     storeScenarioConfigSettings(state.settings);
   } else if (result.reason === "title_pending") {
     storeScenarioConfigSettings(state.settings);
@@ -1774,8 +1787,48 @@ function titleUserDataSlotRecords(mounted) {
   const start = state.page * USER_DATA_SLOTS_PER_PAGE;
   return Array.from(
     { length: USER_DATA_SLOTS_PER_PAGE },
-    (_, index) => readScenarioSaveSlotSummary(start + index),
+    (_, index) => {
+      const summary = readScenarioSaveSlotSummary(start + index);
+      if (summary.exists && summary.backgroundName) {
+        summary.thumbnail = resolveTitleUserDataThumbnail(mounted, summary.backgroundName);
+      }
+      return summary;
+    },
   );
+}
+
+// Decode the saved scene CG into a thumbnail for the title-screen Load window,
+// async + cached, repainting when ready (mirrors loadTitleSceneImage).
+function resolveTitleUserDataThumbnail(mounted, assetName) {
+  if (!/^[A-Za-z0-9_]+$/.test(String(assetName))) {
+    return null;
+  }
+  if (!mounted.userDataThumbnailCache) {
+    mounted.userDataThumbnailCache = new Map();
+  }
+  const cache = mounted.userDataThumbnailCache;
+  const cached = cache.get(assetName);
+  if (cached) {
+    return cached.image ?? null;
+  }
+  cache.set(assetName, { status: "loading", image: null });
+  void (async () => {
+    let image = null;
+    try {
+      const payload = await mounted.catalog?.readPayloadByNameBytes?.(
+        assetNameEncoder.encode(assetName),
+      );
+      image = payload ? mounted.core?.imageRgba?.(payload) ?? null : null;
+    } catch {
+      image = null;
+    }
+    cache.set(assetName, { status: image ? "ready" : "missing", image });
+    if (isCurrentInstall(mounted) && titleUserDataIsOpen(mounted)) {
+      paintMountedFrame(mounted);
+      publishRuntimeState();
+    }
+  })();
+  return null;
 }
 
 function ensureTitleGraphicState(mounted) {
@@ -1793,11 +1846,20 @@ function mountedTitleGraphicAssets(mounted) {
   if (!mounted) {
     return [];
   }
-  const viewedImages = mounted.gdbViewedImages instanceof Set ? mounted.gdbViewedImages : new Set();
+  const sidecar = mounted.gdbViewedImages instanceof Set ? mounted.gdbViewedImages : new Set();
+  // The original unlocks gallery CGs from the BGI.gdb viewed-image table, which
+  // the engine appends to as the player sees each CG. We union the shipped
+  // sidecar set with the CGs recorded at runtime (sakura.viewed.v1) so CGs seen
+  // in play unlock their gallery thumbnails.
+  const runtimeViewed = loadViewedData().cg;
+  const viewedImages = runtimeViewed.size === 0
+    ? sidecar
+    : new Set([...sidecar, ...runtimeViewed]);
   const forceUnlock = titleGraphicForceUnlock;
+  const viewedSignature = viewedImages.size;
   if (
     mounted.titleGraphicAssetsCache?.catalog === mounted.catalog
-    && mounted.titleGraphicAssetsCache?.viewedImages === viewedImages
+    && mounted.titleGraphicAssetsCache?.viewedSignature === viewedSignature
     && mounted.titleGraphicAssetsCache?.forceUnlock === forceUnlock
   ) {
     return mounted.titleGraphicAssetsCache.assets;
@@ -1805,7 +1867,7 @@ function mountedTitleGraphicAssets(mounted) {
   const assets = titleGraphicAssets(mounted.catalog, { viewedImages, forceUnlock });
   mounted.titleGraphicAssetsCache = {
     catalog: mounted.catalog,
-    viewedImages,
+    viewedSignature,
     forceUnlock,
     assets,
   };
@@ -2039,6 +2101,31 @@ function ensureTitleSceneState(mounted) {
   return mounted.titleSceneState;
 }
 
+// Scene-recollection per-row lock (faithful omakescene viewed-image-table rule):
+// a row is locked until one of its scene's CGs is in the runtime viewed-image
+// record (sakura.viewed.v1 .cg). `?unlockScene=1` / `?unlockExtra=1` force it
+// open for automation.
+function titleSceneRowLocked(scenarioName) {
+  if (titleSceneForceUnlock) {
+    return false;
+  }
+  return !titleSceneRowUnlocked(scenarioName, loadViewedData().cg);
+}
+
+function titleSceneLockedIndexSet() {
+  const locked = new Set();
+  if (titleSceneForceUnlock) {
+    return locked;
+  }
+  const viewedCg = loadViewedData().cg;
+  for (const choice of titleSceneChoices()) {
+    if (!titleSceneRowUnlocked(choice.scenarioName, viewedCg)) {
+      locked.add(choice.index);
+    }
+  }
+  return locked;
+}
+
 function titleSceneIsOpen(mounted) {
   return mounted?.titleSceneState?.open === true;
 }
@@ -2056,6 +2143,7 @@ function openTitleSceneSelectHost(mounted) {
   closeTitleMusic(ensureTitleMusicState(mounted));
   const state = ensureTitleSceneState(mounted);
   openTitleSceneSelect(state);
+  mounted.titleSceneLockedSet = titleSceneLockedIndexSet();
   prepareTitleSceneThumbnails(mounted);
   mounted.hoverIndex = -1;
   mounted.titleLastAction = "scene_open";
@@ -2065,6 +2153,7 @@ function openTitleSceneSelectHost(mounted) {
     ok: true,
     reason: "ok",
     choiceCount: titleSceneChoices().length,
+    lockedCount: mounted.titleSceneLockedSet.size,
   };
 }
 
@@ -2130,6 +2219,10 @@ async function applyTitleSceneClick(mounted, clientX, clientY) {
   const state = ensureTitleSceneState(mounted);
   const point = canvasPointFromClient(clientX, clientY);
   const control = titleSceneControlAt(point.x, point.y, state, mounted.titleButtonSprites);
+  if (control?.kind === "scene" && titleSceneRowLocked(control.choice.scenarioName)) {
+    mounted.titleLastAction = "scene_locked";
+    return { ok: false, reason: "scene_locked" };
+  }
   return await handleTitleSceneResult(mounted, applyTitleSceneControl(state, control));
 }
 
@@ -2478,6 +2571,7 @@ function paintTitleScreen(mounted) {
     mounted.titleSceneState,
     mounted.titleButtonSprites,
     mounted.titleSceneImageCache,
+    mounted.titleSceneLockedSet,
   );
   paintTitleMusic(context, canvas, mounted.titleMusicState, mounted.titleButtonSprites, mounted.titleMusicSprites);
   paintScenarioDialogWindow(context, canvas, mounted.dialogWindow, mounted.dialogState);
@@ -2603,6 +2697,14 @@ function paintMountedFrame(mounted) {
     return;
   }
   if (mounted.stage === "scenario" && mounted.player) {
+    if (!mounted.player.onOverlayRepaint) {
+      mounted.player.onOverlayRepaint = () => {
+        if (isCurrentInstall(mounted)) {
+          paintMountedFrame(mounted);
+          publishRuntimeState();
+        }
+      };
+    }
     const offset = scenarioScreenOffset(mounted.player);
     context.fillStyle = "#000";
     context.fillRect(0, 0, canvas.width, canvas.height);

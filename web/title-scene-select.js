@@ -31,6 +31,61 @@ export const TITLE_SCENE_REPLAY_ENTRIES = Object.freeze([
   { index: 13, replayId: 114, routeId: DEFAULT_SCENARIO_ROUTE, scenarioName: "h_ai_01", thumbnailAssetName: "h_thum_ai_01", scriptSlot: 5, scriptPage: 1 },
 ]);
 
+// Per-row unlock keys for the scene-recollection room (おまけ→シーン回想).
+//
+// The original `omakescene._bp` locks each row via the BGI.gdb viewed-image
+// table (the same mechanism the CG gallery uses), NOT a CFlag/read flag: each
+// row shows a locked `_off` / unlocked `_on` thumbnail. A row's recollection
+// scene (`h_rn_01`, …) is replay-only, but the SAME event-CGs are shown in the
+// route during normal play (verified by `sakura-cli scenario-image-audit`:
+// every CG below appears in a route scenario such as `03_olympia_05`, never
+// only in the `h_*` replay). So a row unlocks once any of its scene's CGs is in
+// the viewed-image record. Prefixes are 6-char `evNNNN` stems; the viewed set
+// stores full lowercased basenames (`ev0101a`), matched with `startsWith`.
+export const SCENE_REPLAY_UNLOCK_CGS = Object.freeze({
+  h_rn_01: Object.freeze(["ev0101", "ev0102"]), // 03_olympia_05
+  h_rn_02: Object.freeze(["ev0102", "ev0103"]), // 03_olympia_05
+  h_rn_03: Object.freeze(["ev0104", "ev0105", "ev0106"]), // 03_olympia_06
+  h_rn_04: Object.freeze(["ev0107"]), // 03_olympia_09
+  h_mk_01: Object.freeze(["ev4100", "ev4104"]), // 03_picapica_09
+  h_mk_02: Object.freeze(["ev4101", "ev4102"]), // 03_picapica_13
+  h_hr_01: Object.freeze(["ev2103", "ev2104", "ev2105"]), // 03_zypressen_12
+  h_hr_02: Object.freeze(["ev2106", "ev2107"]), // 03_zypressen_13
+  h_ym_01: Object.freeze(["ev2100", "ev2101", "ev2102"]), // 03_marchen_01
+  h_sz_01: Object.freeze(["ev1100", "ev1101"]), // 03_andoe_03
+  h_sz_02: Object.freeze(["ev1102", "ev1103", "ev1104"]), // 03_andoe_04
+  h_sz_03: Object.freeze(["ev1105", "ev1106"]), // 03_andoe_05
+  h_sz_04: Object.freeze(["ev1107"]), // 03_andoe_05
+  h_ai_01: Object.freeze(["ev5100", "ev5101", "ev5102"]), // 05_the_happy_prince_08b
+});
+
+/**
+ * True when a scene-recollection row is unlocked, i.e. any of its scene's
+ * event-CGs is present in the viewed-image record. Pure: the host supplies the
+ * viewed CG set (lowercased basenames) and handles any automation force-unlock.
+ * Unmapped rows fail open (treated as unlocked) so a data gap never hides a row.
+ */
+export function titleSceneRowUnlocked(scenarioName, viewedCgSet) {
+  const prefixes = SCENE_REPLAY_UNLOCK_CGS[scenarioName];
+  if (!prefixes) {
+    return true;
+  }
+  if (!(viewedCgSet instanceof Set) || viewedCgSet.size === 0) {
+    return false;
+  }
+  for (const name of viewedCgSet) {
+    if (typeof name !== "string") {
+      continue;
+    }
+    for (const prefix of prefixes) {
+      if (name.startsWith(prefix)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function createTitleSceneSelectState() {
   return {
     open: false,
@@ -135,7 +190,7 @@ export function applyTitleSceneControl(state, control) {
   return { handled: false, action: "" };
 }
 
-export function paintTitleSceneSelect(context, canvas, state, buttons = {}, imageCache = null) {
+export function paintTitleSceneSelect(context, canvas, state, buttons = {}, imageCache = null, lockedSet = null) {
   if (!state?.open) {
     return false;
   }
@@ -143,7 +198,13 @@ export function paintTitleSceneSelect(context, canvas, state, buttons = {}, imag
   context.font = "17px 'Noto Serif CJK JP', 'Yu Mincho', 'MS Mincho', serif";
   context.textBaseline = "top";
   for (const choice of titleSceneChoices()) {
-    paintSceneCell(context, choice, state.hoverIndex === choice.index, imageCache);
+    paintSceneCell(
+      context,
+      choice,
+      state.hoverIndex === choice.index,
+      imageCache,
+      lockedSet?.has?.(choice.index) ?? false,
+    );
   }
   paintBackButton(context, buttons.back, state.hoverIndex === -2);
   context.restore();
@@ -161,7 +222,7 @@ export function titleSceneCellRect(index) {
   };
 }
 
-function paintSceneCell(context, choice, hovered, imageCache) {
+function paintSceneCell(context, choice, hovered, imageCache, locked = false) {
   const rect = titleSceneCellRect(choice.index);
   const image = imageForAsset(imageCache, choice.thumbnailAssetName);
   if (image) {
@@ -169,9 +230,30 @@ function paintSceneCell(context, choice, hovered, imageCache) {
   } else {
     paintFallbackSceneCell(context, rect, choice, hovered);
   }
+  if (locked) {
+    paintSceneLockOverlay(context, rect);
+  }
   context.lineWidth = hovered ? 3 : 1;
   context.strokeStyle = hovered ? "rgba(108, 174, 255, 0.95)" : "rgba(255, 255, 255, 0.54)";
   context.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.width - 1, rect.height - 1);
+}
+
+// Locked rows: the original swaps in the `H_thum_*_off` sprite. We approximate
+// with a darkening overlay and a small padlock so unseen scenes read as locked.
+function paintSceneLockOverlay(context, rect) {
+  context.fillStyle = "rgba(0, 0, 0, 0.66)";
+  context.fillRect(rect.x, rect.y, rect.width, rect.height);
+  const cx = rect.x + rect.width / 2;
+  const cy = rect.y + rect.height / 2;
+  context.save();
+  context.strokeStyle = "rgba(232, 232, 236, 0.9)";
+  context.fillStyle = "rgba(232, 232, 236, 0.9)";
+  context.lineWidth = 3;
+  context.beginPath();
+  context.arc(cx, cy - 6, 8, Math.PI, 2 * Math.PI); // shackle
+  context.stroke();
+  context.fillRect(cx - 11, cy - 6, 22, 16); // body
+  context.restore();
 }
 
 function paintFallbackSceneCell(context, rect, choice, hovered) {

@@ -221,6 +221,35 @@ for (const placement of [
   }
 }
 
+const priorityState = createScenarioSpriteState();
+const priorityDrawOrder = [];
+setScenarioSceneObject(priorityState, 0, { ...sceneObjectImage, canvas: { tag: "background" } }, {
+  assetName: "sp0044a_bg",
+  x: -640,
+  y: -360,
+  priority: 0,
+});
+setScenarioSceneObject(priorityState, 1, { ...sceneObjectImage, canvas: { tag: "foreground" } }, {
+  assetName: "sp0044a_maku",
+  x: -640,
+  y: -360,
+  z: -389,
+  priority: 30,
+});
+paintScenarioSceneObjects(
+  {
+    save() {},
+    restore() {},
+    drawImage: (source) => priorityDrawOrder.push(source.tag),
+  },
+  { width: 1280, height: 720 },
+  priorityState,
+  1000,
+);
+if (priorityDrawOrder.join(",") !== "background,foreground") {
+  throw new Error(`scene object priority draw order drifted ${JSON.stringify(priorityDrawOrder)}`);
+}
+
 const realDocumentForCompositor = globalThis.document;
 globalThis.document = {
   createElement() {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   applyScenarioConfigControl,
+  applyScenarioScreenMode,
   closeScenarioConfigWindow,
   createScenarioConfigState,
   normalizedScenarioConfigSettings,
@@ -143,6 +144,34 @@ assert.equal(loaded.textSpeed, 0.25);
 assert.equal(loaded.masterVolume, 1);
 assert.equal(loaded.characterVoices[0], false);
 assert.equal(loaded.characterVoices[1], true);
+
+let requestedFullscreen = 0;
+let exitedFullscreen = 0;
+const fakeDocument = {
+  fullscreenElement: null,
+  documentElement: {
+    requestFullscreen() {
+      requestedFullscreen += 1;
+      fakeDocument.fullscreenElement = fakeDocument.documentElement;
+      return Promise.resolve();
+    },
+  },
+  exitFullscreen() {
+    exitedFullscreen += 1;
+    fakeDocument.fullscreenElement = null;
+    return Promise.resolve();
+  },
+};
+assert.deepEqual(
+  applyScenarioScreenMode({ screenMode: "fullscreen" }, fakeDocument),
+  { ok: true, reason: "fullscreen_requested" },
+);
+assert.equal(requestedFullscreen, 1);
+assert.deepEqual(
+  applyScenarioScreenMode({ screenMode: "window" }, fakeDocument),
+  { ok: true, reason: "exit_fullscreen_requested" },
+);
+assert.equal(exitedFullscreen, 1);
 
 console.log("scenario_config_window=ok");
 
