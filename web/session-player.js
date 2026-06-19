@@ -278,14 +278,13 @@ const GRAPH_FADE_TO_BLACK = 0x0288;
 const GRAPH_FADE_TO_BLACK_WITH_MAP = 0x0289;
 const OPENING_PROLOGUE_SCENARIO = "00_op_01";
 const OPENING_PROLOGUE_FINAL_ASSET = "sp0065f";
-const OPENING_PROLOGUE_BACKLOG_TEXT = [
+const OPENING_PROLOGUE_BACKLOG_LINES = Object.freeze([
   "それが虚無ならば虚無自身がこのとほりで",
   "ある程度まではみんなに共通いたします",
-  "",
   "すべてがわたくしの中のみんなであるやうに",
   "みんなのおのおののなかのすべてですから",
   "『春と修羅』序",
-].join("\n");
+]);
 const GRAPH_BANK_SPRITE = 0x02c0;
 const GRAPH_UPDATE_SPRITE = 0x02c2;
 const GRAPH_UPDATE_SPRITE_EX = 0x02c3;
@@ -1569,19 +1568,19 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         sceneMovieCount: previous.sceneMovieCount ?? 0,
         sceneMovieArchiveNameLength: previous.sceneMovieArchiveNameLength ?? 0,
         sceneMovieFrameRate: previous.sceneMovieFrameRate ?? 0,
-          sceneFilterCount: previous.sceneFilterCount ?? 0,
-          sceneFilterDurationMs: previous.sceneFilterDurationMs ?? 0,
-          sceneFilterMode: previous.sceneFilterMode ?? 0,
-          sceneFilterStrength: previous.sceneFilterStrength ?? 0,
-          sceneApertureCount: previous.sceneApertureCount ?? 0,
-          sceneApertureDurationMs: previous.sceneApertureDurationMs ?? 0,
-          sceneRainCount: previous.sceneRainCount ?? 0,
-          sceneRainActive: previous.sceneRainActive ?? 0,
-          sceneRainDensity: previous.sceneRainDensity ?? 0,
-          sceneRainSpeed: previous.sceneRainSpeed ?? 0,
-          sceneRainAngle: previous.sceneRainAngle ?? 0,
-          sceneRainAlpha: previous.sceneRainAlpha ?? 0,
-          scenarioUserFunctionCount: previous.scenarioUserFunctionCount ?? 0,
+        sceneFilterCount: previous.sceneFilterCount ?? 0,
+        sceneFilterDurationMs: previous.sceneFilterDurationMs ?? 0,
+        sceneFilterMode: previous.sceneFilterMode ?? 0,
+        sceneFilterStrength: previous.sceneFilterStrength ?? 0,
+        sceneApertureCount: previous.sceneApertureCount ?? 0,
+        sceneApertureDurationMs: previous.sceneApertureDurationMs ?? 0,
+        sceneRainCount: previous.sceneRainCount ?? 0,
+        sceneRainActive: previous.sceneRainActive ?? 0,
+        sceneRainDensity: previous.sceneRainDensity ?? 0,
+        sceneRainSpeed: previous.sceneRainSpeed ?? 0,
+        sceneRainAngle: previous.sceneRainAngle ?? 0,
+        sceneRainAlpha: previous.sceneRainAlpha ?? 0,
+        scenarioUserFunctionCount: previous.scenarioUserFunctionCount ?? 0,
         scenarioUserFunctionNameLength: previous.scenarioUserFunctionNameLength ?? 0,
         messageControlOpcode: previous.messageControlOpcode ?? 0,
         messageControlDurationMs: previous.messageControlDurationMs ?? 0,
@@ -2185,13 +2184,13 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
           sceneObjects: snapshotScenarioSceneObjects(this.scene.sprites, visualNow)
             .map((object) => object.isMovie
               ? {
-                  ...object,
-                  movieElapsedMs: scenarioMovieElapsedMs(
-                    this.scene.movies,
-                    object.id,
-                    visualNow,
-                  ),
-                }
+                ...object,
+                movieElapsedMs: scenarioMovieElapsedMs(
+                  this.scene.movies,
+                  object.id,
+                  visualNow,
+                ),
+              }
               : object),
           filter: snapshotScenarioFilter(this.scene.filter),
           aperture: snapshotScenarioAperture(this.scene.aperture),
@@ -2250,7 +2249,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
       const encoded = quick
         ? storage?.getItem(QUICK_SAVE_SLOT_KEY)
         : storage?.getItem(saveSlotKey(slot))
-          ?? (slot === 0 ? storage?.getItem(SAVE_SLOT_KEY) : null);
+        ?? (slot === 0 ? storage?.getItem(SAVE_SLOT_KEY) : null);
       if (encoded === null) {
         return { ok: false, bytes: 0, reason: "missing_snapshot" };
       }
@@ -3273,12 +3272,15 @@ function appendOpeningPrologueBacklog(player, event, assetName) {
     player.safeState.openingPrologueBacklog = 1;
     return false;
   }
-  appendScenarioBacklog(player, {
-    eventCount: event.eventCount,
-    name: "",
-    text: OPENING_PROLOGUE_BACKLOG_TEXT,
-    source: "opening-prologue",
-  });
+  for (const [index, text] of OPENING_PROLOGUE_BACKLOG_LINES.entries()) {
+    appendScenarioBacklog(player, {
+      eventCount: event.eventCount,
+      name: "",
+      text,
+      source: "opening-prologue",
+      sourceIndex: index,
+    });
+  }
   player.safeState.openingPrologueBacklog = 1;
   return true;
 }
@@ -4424,8 +4426,8 @@ function parseSaveRecord(encoded, fallbackSequence, fallbackRoute) {
   const scenarioSequence = hasSavedSequence
     ? value.scenarioSequence
     : hasSavedRoute
-    ? scenarioSequenceForRoute(routeId)
-    : fallbackSequence;
+      ? scenarioSequenceForRoute(routeId)
+      : fallbackSequence;
   if (
     !value
     || !SUPPORTED_SAVE_RECORD_VERSIONS.has(value.version)
@@ -4479,19 +4481,19 @@ function snapshotScenarioAudioState(state, mixerState = null) {
   return {
     bgm: state?.bgm
       ? {
-          ...state.bgm,
-          positionSeconds: Number.isFinite(mixerState?.trackCurrentTime)
-            ? Math.max(0, mixerState.trackCurrentTime)
-            : 0,
-        }
+        ...state.bgm,
+        positionSeconds: Number.isFinite(mixerState?.trackCurrentTime)
+          ? Math.max(0, mixerState.trackCurrentTime)
+          : 0,
+      }
       : null,
     loopSfx: state?.loopSfx
       ? {
-          ...state.loopSfx,
-          positionSeconds: Number.isFinite(mixerState?.loopSfxCurrentTime)
-            ? Math.max(0, mixerState.loopSfxCurrentTime)
-            : 0,
-        }
+        ...state.loopSfx,
+        positionSeconds: Number.isFinite(mixerState?.loopSfxCurrentTime)
+          ? Math.max(0, mixerState.loopSfxCurrentTime)
+          : 0,
+      }
       : null,
   };
 }

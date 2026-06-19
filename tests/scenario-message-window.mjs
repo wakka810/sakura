@@ -55,6 +55,7 @@ const { parseScenarioText, stripScenarioTags } = await import(
   "../web/scenario-text.js"
 );
 const { drawScenarioRichText } = await import("../web/scenario-text.js");
+const { drawBgiText } = await import("../web/bgi-text-renderer.js");
 const { bindScenarioPlayerInput, paintScenarioEvent } = await import("../web/session-player.js");
 
 assert.deepEqual(parseScenarioText("AB<r yomi>kanji</r>CD"), [
@@ -111,6 +112,50 @@ assert.equal(stripScenarioTags("pre<r dangling"), "pre<r dangling");
     ["D", "#111"],
   ]);
   assert.equal(context.fillStyle, "#111");
+}
+
+{
+  const previousDocument = globalThis.document;
+  const previousImageData = globalThis.ImageData;
+  globalThis.document = {
+    createElement() {
+      throw new Error("drawBgiText must not rasterize text through a mask canvas");
+    },
+  };
+  globalThis.ImageData = class {};
+  const calls = [];
+  const context = {
+    font: "29px 'Sakura MS Gothic'",
+    fillStyle: "#111",
+    textBaseline: "top",
+    fillText(text, x, y) {
+      calls.push({ text, x, y, font: this.font, fillStyle: this.fillStyle });
+    },
+    drawImage() {
+      throw new Error("drawBgiText must keep native canvas text antialiasing");
+    },
+  };
+  try {
+    drawBgiText(context, "本文", 75, 545);
+  } finally {
+    if (previousDocument === undefined) {
+      delete globalThis.document;
+    } else {
+      globalThis.document = previousDocument;
+    }
+    if (previousImageData === undefined) {
+      delete globalThis.ImageData;
+    } else {
+      globalThis.ImageData = previousImageData;
+    }
+  }
+  assert.deepEqual(calls, [{
+    text: "本文",
+    x: 75,
+    y: 545,
+    font: "29px 'Sakura MS Gothic'",
+    fillStyle: "#111",
+  }]);
 }
 
 {

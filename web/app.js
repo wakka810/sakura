@@ -2815,6 +2815,8 @@ function playTitleSfx(mounted, name) {
 const TITLE_NOAUTO = typeof location !== "undefined" && (location.search || "").includes("noauto");
 let stageFadeAlpha = 1;
 let stageAnimRunning = false;
+let stageAnimTimer = 0;
+let stageAnimGeneration = 0;
 
 
 const BOOT_FADE_MS = 450;
@@ -2822,6 +2824,9 @@ const BOOT_HOLD_MS = [2600, 6000, 6000];  // logo, warning1, warning2 auto-advan
 
 function stageEnter(mounted) {
   mounted.stageEnteredAt = performance.now();
+  stageAnimGeneration += 1;
+  clearStageAnimTimer();
+  stageAnimRunning = false;
   startStageAnim(mounted);
   if (mounted.stage === "title") {
     applyTitleConfigVolumes(mounted);
@@ -2831,23 +2836,65 @@ function stageEnter(mounted) {
   }
 }
 
+function clearStageAnimTimer() {
+  if (stageAnimTimer !== 0) {
+    window.clearTimeout(stageAnimTimer);
+    stageAnimTimer = 0;
+  }
+}
+
+function scheduleStageAnimStep(step, delayMs = 0) {
+  clearStageAnimTimer();
+  if (delayMs > 17) {
+    stageAnimTimer = window.setTimeout(() => {
+      stageAnimTimer = 0;
+      requestAnimationFrame(step);
+    }, delayMs);
+    return;
+  }
+  requestAnimationFrame(step);
+}
+
 function startStageAnim(mounted) {
   if (stageAnimRunning) return;
   stageAnimRunning = true;
+  const generation = stageAnimGeneration;
   const step = () => {
+    if (generation !== stageAnimGeneration) {
+      return;
+    }
     const m = activeInstall;
     if (!m || (m.stage !== "boot" && m.stage !== "title")) { stageAnimRunning = false; return; }
+    const stage = m.stage;
     const t = performance.now() - (m.stageEnteredAt ?? 0);
     stageFadeAlpha = Math.min(1, t / BOOT_FADE_MS);
-    if (m.stage === "boot" && !TITLE_NOAUTO) {
+    if (stage === "boot" && !TITLE_NOAUTO) {
       const phases = bootPhaseList(m);
       const cur = phases[Math.min(m.bootPhase, phases.length - 1)];
-      if (t >= cur.dur) advanceBootPhase(m);
+      if (t >= cur.dur) {
+        advanceBootPhase(m);
+        return;
+      }
+      paintMountedFrame(m);
+      if (t >= BOOT_FADE_MS) {
+        scheduleStageAnimStep(step, Math.max(0, cur.dur - t));
+        return;
+      }
+      scheduleStageAnimStep(step);
+      return;
     }
     paintMountedFrame(m);
-    requestAnimationFrame(step);
+    if (stage === "title" && t >= BOOT_FADE_MS) {
+      stageAnimRunning = false;
+      return;
+    }
+    if (stage === "boot" && TITLE_NOAUTO && t >= BOOT_FADE_MS) {
+      stageAnimRunning = false;
+      return;
+    }
+    scheduleStageAnimStep(step);
   };
-  requestAnimationFrame(step);
+  scheduleStageAnimStep(step);
 }
 
 function imageScratch(image) {
