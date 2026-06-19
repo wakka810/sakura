@@ -1,0 +1,73 @@
+name: Local Oracle
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-oracle-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.86.0"
+  NODE_VERSION: "24"
+
+jobs:
+  oracle:
+    name: Self-hosted install oracle
+    runs-on: self-hosted
+    timeout-minutes: 180
+    env:
+      SAKURA_INSTALL_DIR: ${{ vars.SAKURA_INSTALL_DIR || secrets.SAKURA_INSTALL_DIR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Set up Rust
+        run: |
+          if command -v rustup >/dev/null 2>&1; then
+            rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --target wasm32-unknown-unknown
+            rustup default "$RUST_VERSION"
+          fi
+          rustc --version
+          cargo --version
+
+      - name: Check local install
+        run: |
+          test -n "$SAKURA_INSTALL_DIR"
+          test -d "$SAKURA_INSTALL_DIR"
+          test -f "$SAKURA_INSTALL_DIR/BGI.exe"
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install chromium
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run portable tests
+        run: npm test
+
+      - name: Run local install probe
+        run: cargo test -p sakura-core --test local_install -- --ignored --nocapture
+
+      - name: Run runtime host probes
+        run: cargo test -p sakura-core --test local_runtime_host_state -- --ignored --nocapture
+
+      - name: Run system VM probes
+        run: cargo test -p sakura-core --test local_system_vm -- --ignored --nocapture
+
+      - name: Run full route smoke
+        run: npm run smoke:full-routes
