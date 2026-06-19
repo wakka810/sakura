@@ -609,8 +609,26 @@ fn experiments_scrmain_sys5f_pending_clear_override() -> TestResult<()> {
         .ok_or("scrmain sys5f override target is not a system script")?;
 
     println!("local_scrmain_sys5f_override_probe_version=1");
+    let mut observed_31c_failure = false;
     for step in 0..16usize {
-        let event = vm.next_event()?;
+        let event = match vm.next_event() {
+            Ok(event) => event,
+            Err(error) => {
+                let text = error.to_string();
+                println!(
+                    "local_scrmain_sys5f_override_error step={} error={} cursor={} last=0x{:x}",
+                    step,
+                    text,
+                    vm.cursor(),
+                    vm.last_instruction_offset().unwrap_or(0),
+                );
+                if text.contains("0x31c") {
+                    observed_31c_failure = true;
+                    break;
+                }
+                return Err(error.into());
+            }
+        };
         println!(
             "local_scrmain_sys5f_override_event step={} kind={} cursor={} last=0x{:x} mem_ptr=0x{:x} l4={} l12={} l16={} l20={} l1076={} l1140={} l1264={} l1268={} l1272={} l1276={} raw603624={} raw603628={} raw603632={}",
             step,
@@ -665,6 +683,9 @@ fn experiments_scrmain_sys5f_pending_clear_override() -> TestResult<()> {
         if let Some(value) = result.into_value() {
             vm.resume_with(value)?;
         }
+    }
+    if !observed_31c_failure {
+        return Err("sys5f override did not reproduce the scrmain 0x31c failure".into());
     }
     Ok(())
 }
@@ -742,9 +763,28 @@ fn experiments_scrmain_sys8b_gate_behavior() -> TestResult<()> {
         let mut vm = scripts
             .system_vm(entry)?
             .ok_or("scrmain sys8b experiment raw vm is missing")?;
+        let mut observed_31c_failure = false;
         println!("local_scrmain_sys8b_experiment_injected={injected}");
         for event_index in 0..4usize {
-            let event = vm.next_event()?;
+            let event = match vm.next_event() {
+                Ok(event) => event,
+                Err(error) => {
+                    let text = error.to_string();
+                    println!(
+                        "local_scrmain_sys8b_raw_error injected={} index={} error={} cursor={} last=0x{:x}",
+                        injected,
+                        event_index,
+                        text,
+                        vm.cursor(),
+                        vm.last_instruction_offset().unwrap_or(0),
+                    );
+                    if text.contains("0x31c") {
+                        observed_31c_failure = true;
+                        break;
+                    }
+                    return Err(error.into());
+                }
+            };
             println!(
                 "local_scrmain_sys8b_raw_event index={} event={} local12_before={} local16_before={} local20_before={} table_0x1f62c_before={} table_0x1f630_before={} table_0x1f634_before={}",
                 event_index,
@@ -795,6 +835,12 @@ fn experiments_scrmain_sys8b_gate_behavior() -> TestResult<()> {
                 vm.host_local_integer(0x1f630, 2).unwrap_or(0),
                 vm.host_local_integer(0x1f634, 2).unwrap_or(0),
             );
+        }
+        if !observed_31c_failure {
+            return Err(format!(
+                "raw sys8b resume value {injected:08x} did not reproduce the scrmain 0x31c failure"
+            )
+            .into());
         }
     }
     Ok(())

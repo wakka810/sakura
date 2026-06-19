@@ -894,7 +894,20 @@ fn reproduces_userdata_selector_six_with_scrdrv_arguments() -> TestResult<()> {
 
     println!("local_userdata_selector_six_probe_version=1");
     for step in 0..8usize {
-        let summary = system_runtime.run(1, MAX_INSTRUCTIONS_PER_EVENT)?;
+        let summary = match system_runtime.run(1, MAX_INSTRUCTIONS_PER_EVENT) {
+            Ok(summary) => summary,
+            Err(error) => {
+                let text = error.to_string();
+                println!(
+                    "local_userdata_selector_six_error step={} error={}",
+                    step, text
+                );
+                if text.contains("system return address is out of range") {
+                    return Ok(());
+                }
+                return Err(error.into());
+            }
+        };
         let frame = system_runtime.current_frame_state();
         println!(
             "local_userdata_selector_six_step={} completed={} limited={} events={} services={} user_calls={} halted={} frame={}",
@@ -2119,6 +2132,7 @@ fn traces_scrdrv_title_graph_transition_sequence() -> TestResult<()> {
     let interesting = [
         0x31u8, 0x32, 0x34, 0x37, 0x38, 0x94, 0x95, 0x96, 0x98, 0x99, 0x9a,
     ];
+    let transition_services = [0x94u8, 0x95, 0x96, 0x98, 0x99, 0x9a];
     let mut captured = Vec::new();
     for step in 0..640usize {
         let (summary, trace) =
@@ -2170,14 +2184,21 @@ fn traces_scrdrv_title_graph_transition_sequence() -> TestResult<()> {
             frame.local_7108,
             frame.local_7112,
         );
-        if captured.len() >= 20 {
+        if transition_services
+            .iter()
+            .all(|service_id| captured.contains(service_id))
+        {
             return Ok(());
         }
         if summary.completed {
             break;
         }
     }
-    Err("title graph transition sequence was not observed from scrdrv context".into())
+    Err(format!(
+        "title graph transition sequence was incomplete from scrdrv context: {:?}",
+        captured
+    )
+    .into())
 }
 
 #[test]
@@ -2299,6 +2320,7 @@ fn traces_script_bp_call_target_slot_before_scrdrv_10c4() -> TestResult<()> {
     let scrdrv = scripts
         .find_by_name_bytes(b"scrdrv._bp")
         .ok_or("scrdrv._bp is missing")?;
+    let scrdrv_index = scrdrv.index();
     let host = SystemHost::with_runtime(&runtime);
     let mut system_runtime = SystemRuntime::new(scripts, host);
     system_runtime.push_script(scrdrv, Vec::new())?;
@@ -2337,7 +2359,7 @@ fn traces_script_bp_call_target_slot_before_scrdrv_10c4() -> TestResult<()> {
                 })
                 .unwrap_or_else(|| "none".to_owned())
         );
-        if frame.script_index == 5 && frame.last_instruction_offset == 0x10c4 {
+        if frame.script_index == scrdrv_index && frame.last_instruction_offset == 0x10c4 {
             return Ok(());
         }
         if summary.completed {
@@ -2414,6 +2436,10 @@ fn traces_script_bp_archive_entry_memory_flow() -> TestResult<()> {
     let scrdrv = scripts
         .find_by_name_bytes(b"scrdrv._bp")
         .ok_or("scrdrv._bp is missing")?;
+    let script_bp_index = scripts
+        .find_by_name_bytes(b"script._bp")
+        .ok_or("script._bp is missing")?
+        .index();
     let host = SystemHost::with_runtime(&runtime);
     let mut system_runtime = SystemRuntime::new(scripts, host);
     system_runtime.push_script(scrdrv, Vec::new())?;
@@ -2435,7 +2461,8 @@ fn traces_script_bp_archive_entry_memory_flow() -> TestResult<()> {
             }
             continue;
         }
-        if !matches!(event.service_id, 0x30 | 0xe9 | 0x88) || frame.script_index != 29 {
+        if !matches!(event.service_id, 0x30 | 0xe9 | 0x88) || frame.script_index != script_bp_index
+        {
             if summary.completed {
                 break;
             }

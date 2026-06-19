@@ -799,8 +799,8 @@ impl<'a> SystemHost<'a> {
             0x21 => Some(self.archive_query_result(args)),
             0x33 => Some(SystemHostResult::Void),
             0x88 => Some(self.cflag_ensure(args)),
-            0x8a => Some(self.cflag_setrange(args)),
-            0x8b => Some(self.cflag_getbit(args)),
+            0x8a => Some(self.system_8a_result(args)),
+            0x8b => Some(self.system_8b_result(args)),
             0xe9 => Some(self.archive_descriptor_result(args)),
             0x6a => Some(self.scrmain_init.service_6a(args)),
             0x5f => Some(SystemHostResult::Integer(1)),
@@ -808,6 +808,26 @@ impl<'a> SystemHost<'a> {
             0x16 => Some(self.scrmain_init.service_16(args)),
             _ => None,
         }
+    }
+
+    fn system_8a_result(&mut self, args: &[SystemValue<'_>]) -> SystemHostResult {
+        if flag_name_arg(args).is_some() {
+            return self.cflag_setrange(args);
+        }
+        if self.scrmain_init.system_8b_seen && scrmain_event_ack_args(args) {
+            return self.scrmain_init.service_8a(args);
+        }
+        self.cflag_setrange(args)
+    }
+
+    fn system_8b_result(&mut self, args: &[SystemValue<'_>]) -> SystemHostResult {
+        if flag_name_arg(args).is_some() {
+            return self.cflag_getbit(args);
+        }
+        if scrmain_event_poll_args(args) {
+            return self.scrmain_init.service_8b(args);
+        }
+        self.cflag_getbit(args)
     }
 
     /// CFlag ensure (System 0x88, BGI sub_483A30 -> sub_4662A0 -> sub_444F10):
@@ -1075,7 +1095,6 @@ impl ScrmainInitState {
         }
     }
 
-    #[allow(dead_code)]
     fn service_8b(&mut self, args: &[SystemValue<'_>]) -> SystemHostResult {
         self.system_8b_seen = true;
         let Some(buffer) = nth_integer_arg(args, 5) else {
@@ -1109,7 +1128,6 @@ impl ScrmainInitState {
         }
     }
 
-    #[allow(dead_code)]
     fn service_8a(&mut self, args: &[SystemValue<'_>]) -> SystemHostResult {
         let Some(buffer) = nth_integer_arg(args, 1) else {
             return SystemHostResult::Integer(0);
@@ -1167,6 +1185,14 @@ fn flag_name_arg<'b>(args: &'b [SystemValue<'_>]) -> Option<(usize, &'b [u8])> {
         .enumerate()
         .rev()
         .find_map(|(i, value)| value.string_bytes().map(|bytes| (i, bytes)))
+}
+
+fn scrmain_event_poll_args(args: &[SystemValue<'_>]) -> bool {
+    args.len() >= 7 && flag_name_arg(args).is_none() && integer_arg_bounds(args).count >= 7
+}
+
+fn scrmain_event_ack_args(args: &[SystemValue<'_>]) -> bool {
+    args.len() >= 3 && flag_name_arg(args).is_none() && integer_arg_bounds(args).count >= 3
 }
 
 fn nth_integer_arg(args: &[SystemValue<'_>], index: usize) -> Option<u64> {
@@ -1522,6 +1548,147 @@ mod tests {
                 args: Vec::new(),
             }),
             Some(SystemHostResult::Integer(1))
+        );
+    }
+
+    #[test]
+    fn system_8b_preserves_cflag_getbit_for_string_shape() {
+        let scripts = ScriptLibrary::new();
+        let mut host = SystemHost::new(&scripts);
+
+        assert_eq!(
+            host.event_result(&SystemVmEvent::ServiceCall {
+                family: SystemCallFamily::System,
+                service_id: 0x88,
+                args: vec![SystemValue::String(b"flag"), SystemValue::Integer(8)],
+            }),
+            Some(SystemHostResult::Integer(1))
+        );
+        assert_eq!(
+            host.event_result(&SystemVmEvent::ServiceCall {
+                family: SystemCallFamily::System,
+                service_id: 0x8a,
+                args: vec![
+                    SystemValue::String(b"flag"),
+                    SystemValue::Integer(2),
+                    SystemValue::Integer(1),
+                    SystemValue::Integer(1),
+                ],
+            }),
+            Some(SystemHostResult::Integer(0))
+        );
+
+        assert_eq!(
+            host.event_result(&SystemVmEvent::ServiceCall {
+                family: SystemCallFamily::System,
+                service_id: 0x8b,
+                args: vec![
+                    SystemValue::VariablePointer(0x20),
+                    SystemValue::String(b"flag"),
+                    SystemValue::Integer(2),
+                ],
+            }),
+            Some(SystemHostResult::ValueAndEffect {
+                value: SystemHostValue::Integer(0),
+                effect: SystemHostEffect {
+                    writes: vec![SystemHostWrite::LocalInteger(SystemHostLocalWrite {
+                        address: 0x20,
+                        width: 2,
+                        value: 1,
+                    })],
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn system_8b_routes_integer_scrmain_shape_to_event_init() {
+        let scripts = ScriptLibrary::new();
+        let mut host = SystemHost::new(&scripts);
+        let record = vec![8, 0, 0, 0, 1, 0, 0, 0];
+
+        assert_eq!(
+            host.event_result(&SystemVmEvent::ServiceCall {
+                family: SystemCallFamily::System,
+                service_id: 0x8b,
+                args: vec![
+                    SystemValue::Integer(1),
+                    SystemValue::Integer(4),
+                    SystemValue::Integer(0),
+                    SystemValue::Integer(0),
+                    SystemValue::Integer(0),
+                    SystemValue::Integer(0x584),
+                    SystemValue::Integer(8),
+                ],
+            }),
+            Some(SystemHostResult::ValueAndEffect {
+                value: SystemHostValue::Integer(1),
+                effect: SystemHostEffect {
+                    writes: vec![
+                        SystemHostWrite::Integer(SystemHostIntegerWrite {
+                            address: SCRMAIN_EVENT_READY_FLAG_ADDR,
+                            width: 2,
+                            value: 1,
+                        }),
+                        SystemHostWrite::Integer(SystemHostIntegerWrite {
+                            address: SCRMAIN_EVENT_PENDING_OFFSET_ADDR,
+                            width: 2,
+                            value: 4,
+                        }),
+                        SystemHostWrite::Integer(SystemHostIntegerWrite {
+                            address: SCRMAIN_EVENT_PENDING_SEQ_ADDR,
+                            width: 2,
+                            value: 1,
+                        }),
+                        SystemHostWrite::Bytes(SystemHostBytesWrite {
+                            address: 0x584,
+                            bytes: record.clone(),
+                        }),
+                        SystemHostWrite::Bytes(SystemHostBytesWrite {
+                            address: 0x588,
+                            bytes: record.clone(),
+                        }),
+                        SystemHostWrite::Bytes(SystemHostBytesWrite {
+                            address: 0x2000_0004,
+                            bytes: record,
+                        }),
+                    ],
+                },
+            })
+        );
+
+        assert_eq!(
+            host.event_result(&SystemVmEvent::ServiceCall {
+                family: SystemCallFamily::System,
+                service_id: 0x8a,
+                args: vec![
+                    SystemValue::Integer(0),
+                    SystemValue::Integer(0x584),
+                    SystemValue::Integer(4),
+                ],
+            }),
+            Some(SystemHostResult::ValueAndEffect {
+                value: SystemHostValue::Integer(0),
+                effect: SystemHostEffect {
+                    writes: vec![
+                        SystemHostWrite::Integer(SystemHostIntegerWrite {
+                            address: SCRMAIN_EVENT_READY_FLAG_ADDR,
+                            width: 2,
+                            value: 0,
+                        }),
+                        SystemHostWrite::Integer(SystemHostIntegerWrite {
+                            address: SCRMAIN_EVENT_PENDING_OFFSET_ADDR,
+                            width: 2,
+                            value: 0,
+                        }),
+                        SystemHostWrite::Integer(SystemHostIntegerWrite {
+                            address: SCRMAIN_EVENT_PENDING_SEQ_ADDR,
+                            width: 2,
+                            value: 0,
+                        }),
+                    ],
+                },
+            })
         );
     }
 

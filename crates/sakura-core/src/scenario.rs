@@ -1464,7 +1464,7 @@ mod tests {
         append_push_int(&mut script, 2); // value to store
         append_opcode(&mut script, 0x0168); // mid-statement select op
         append_push_address(&mut script, 0x94); // target address operand
-        // 0x000a = store(address_first): pop address, then pop the value.
+                                                // 0x000a = store(address_first): pop address, then pop the value.
         append_opcode(&mut script, 0x000a);
         script.extend_from_slice(&2i32.to_le_bytes()); // memory width selector (2 => 4 bytes)
         append_opcode(&mut script, 0x001b);
