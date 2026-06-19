@@ -4,6 +4,7 @@ const createdUrls = [];
 const revokedUrls = [];
 const audioInstances = [];
 let playShouldReject = false;
+let playShouldHang = false;
 
 globalThis.Blob = class FakeBlob {
   constructor(parts, options) {
@@ -42,6 +43,9 @@ globalThis.Audio = class FakeAudio {
   }
 
   async play() {
+    if (playShouldHang) {
+      return new Promise(() => {});
+    }
     if (playShouldReject) {
       throw new Error("blocked");
     }
@@ -117,6 +121,31 @@ const notReady = await emptyMixer.playFirstQueued();
 if (notReady.ok || notReady.reason !== "not_ready" || emptyMixer.state().playBlocked !== 1) {
   throw new Error("not-ready play did not report blocked state");
 }
+
+playShouldHang = true;
+const hangingMixer = createAudioMixer();
+const hangingStartedAt = Date.now();
+const hangingTrack = await hangingMixer.playTrack(new Uint8Array([0x4f, 0x67]), {
+  loop: true,
+  volume: 0.5,
+});
+const hangingElapsedMs = Date.now() - hangingStartedAt;
+state = hangingMixer.state();
+if (
+  hangingTrack.ok
+  || hangingTrack.reason !== "timeout"
+  || hangingTrack.pending !== true
+  || hangingElapsedMs > 2000
+  || state.playBlocked !== 1
+  || state.playTimeout !== 1
+  || state.trackPlayBlocked !== 1
+  || state.trackPlayTimeout !== 1
+  || state.trackReady !== 1
+) {
+  throw new Error(`hanging track play did not time out cleanly ${JSON.stringify({ hangingTrack, hangingElapsedMs, state })}`);
+}
+hangingMixer.destroy();
+playShouldHang = false;
 
 playShouldReject = false;
 const trackMixer = createAudioMixer();

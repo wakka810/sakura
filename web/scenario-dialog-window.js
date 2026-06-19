@@ -73,11 +73,11 @@ export function scenarioDialogControlAt(x, y, state, skin) {
   };
   const stateWidth = imageStateWidth(yes, BUTTON_STATE_COUNT);
   const totalWidth = stateWidth * 2 + BUTTON_GAP;
-  const yesX = PANEL_X + Math.round((panel.width - totalWidth) / 2);
+  const yesX = PANEL_X + Math.round((imageLogicalWidth(panel) - totalWidth) / 2);
   const noX = yesX + stateWidth + BUTTON_GAP;
   if (
     scaled.y >= BUTTON_Y
-    && scaled.y < BUTTON_Y + yes.height
+    && scaled.y < BUTTON_Y + imageLogicalHeight(yes)
     && scaled.x >= yesX
     && scaled.x < yesX + stateWidth
   ) {
@@ -85,7 +85,7 @@ export function scenarioDialogControlAt(x, y, state, skin) {
   }
   if (
     scaled.y >= BUTTON_Y
-    && scaled.y < BUTTON_Y + no.height
+    && scaled.y < BUTTON_Y + imageLogicalHeight(no)
     && scaled.x >= noX
     && scaled.x < noX + stateWidth
   ) {
@@ -141,7 +141,7 @@ export function paintScenarioDialogWindow(context, canvas, skin, state) {
   }
   const stateWidth = imageStateWidth(yes, BUTTON_STATE_COUNT);
   const totalWidth = stateWidth * 2 + BUTTON_GAP;
-  const yesX = PANEL_X + Math.round((panel.width - totalWidth) / 2);
+  const yesX = PANEL_X + Math.round((imageLogicalWidth(panel) - totalWidth) / 2);
   const noX = yesX + stateWidth + BUTTON_GAP;
   drawStateImage(context, yes, yesX, BUTTON_Y, state.hover === "yes" ? 1 : 0);
   drawStateImage(context, no, noX, BUTTON_Y, state.hover === "no" ? 1 : 0);
@@ -155,25 +155,42 @@ function dialogPanelImage(state, skin) {
 
 function drawStateImage(context, image, x, y, sourceIndex) {
   const stateWidth = imageStateWidth(image, BUTTON_STATE_COUNT);
+  const sourceStateWidth = imageSourceStateWidth(image, BUTTON_STATE_COUNT);
   context.drawImage(
     rgbaCanvas(image),
-    Math.max(0, Math.min(sourceIndex, BUTTON_STATE_COUNT - 1)) * stateWidth,
+    Math.max(0, Math.min(sourceIndex, BUTTON_STATE_COUNT - 1)) * sourceStateWidth,
     0,
-    stateWidth,
+    sourceStateWidth,
     image.height,
     x,
     y,
     stateWidth,
-    image.height,
+    imageLogicalHeight(image),
   );
 }
 
 function imageStateWidth(image, stateCount) {
+  return image ? Math.floor(imageLogicalWidth(image) / stateCount) : 0;
+}
+
+function imageSourceStateWidth(image, stateCount) {
   return image ? Math.floor(image.width / stateCount) : 0;
 }
 
 function drawRgbaImage(context, image, x, y) {
-  context.drawImage(rgbaCanvas(image), x, y, image.width, image.height);
+  context.drawImage(rgbaCanvas(image), x, y, imageLogicalWidth(image), imageLogicalHeight(image));
+}
+
+function imageLogicalWidth(image) {
+  return Number.isFinite(image?.logicalWidth) && image.logicalWidth > 0
+    ? image.logicalWidth
+    : image?.width ?? 0;
+}
+
+function imageLogicalHeight(image) {
+  return Number.isFinite(image?.logicalHeight) && image.logicalHeight > 0
+    ? image.logicalHeight
+    : image?.height ?? 0;
 }
 
 function rgbaCanvas(image) {

@@ -6,11 +6,16 @@ import { tmpdir } from "node:os";
 
 const port = 9787 + Math.floor(Math.random() * 1000);
 const installDir = await mkdtemp(join(tmpdir(), "sakura-install-"));
+const upscaleCacheDir = await mkdtemp(join(tmpdir(), "sakura-upscale-cache-"));
+const cloudStateDir = await mkdtemp(join(tmpdir(), "sakura-cloud-state-"));
+const fontDir = await mkdtemp(join(tmpdir(), "sakura-fonts-"));
 await writeFile(join(installDir, "BGI.exe"), new Uint8Array([0x4d, 0x5a]));
 await writeFile(join(installDir, "BGI.gdb"), bytes("BURIKO GDB 3.00\0fixture"));
 await writeFile(join(installDir, "synthetic.arc"), buildArc20([
   ["fixture.bin", new Uint8Array([1, 2, 3, 4, 5])],
 ]).data);
+await writeFile(join(fontDir, "msgothic.ttc"), new Uint8Array([0, 1, 2, 3]));
+await writeFile(join(fontDir, "msmincho.ttc"), new Uint8Array([4, 5, 6, 7]));
 
 const server = spawn(process.execPath, ["tools/local-server.mjs"], {
   cwd: resolve("."),
@@ -19,6 +24,10 @@ const server = spawn(process.execPath, ["tools/local-server.mjs"], {
     SAKURA_PORT: String(port),
     SAKURA_HOST: "127.0.0.1",
     SAKURA_INSTALL_DIR: installDir,
+    SAKURA_UPSCALE_CACHE_DIR: upscaleCacheDir,
+    SAKURA_CLOUD_STATE_DIR: cloudStateDir,
+    SAKURA_MS_GOTHIC_FONT: join(fontDir, "msgothic.ttc"),
+    SAKURA_MS_MINCHO_FONT: join(fontDir, "msmincho.ttc"),
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -93,6 +102,73 @@ try {
   if (!html.includes("Sakura BGI Browser Runtime")) {
     throw new Error("static runtime page missing");
   }
+  const fontStatus = await (await fetch(`http://127.0.0.1:${port}/api/fonts/status`)).json();
+  if (
+    fontStatus.faces?.["ms-gothic"]?.found !== true
+    || fontStatus.faces?.["ms-mincho"]?.found !== true
+    || fontStatus.faces?.["ms-gothic"]?.basename !== "msgothic.ttc"
+    || fontStatus.faces?.["ms-mincho"]?.basename !== "msmincho.ttc"
+  ) {
+    throw new Error(`unexpected font status ${JSON.stringify(fontStatus)}`);
+  }
+  const gothicFont = new Uint8Array(
+    await (await fetch(`http://127.0.0.1:${port}/api/fonts/ms-gothic`)).arrayBuffer(),
+  );
+  if (gothicFont.byteLength !== 4 || gothicFont[1] !== 1) {
+    throw new Error("gothic font endpoint returned wrong bytes");
+  }
+  const missingCloud = await fetch(`http://127.0.0.1:${port}/api/cloud-state`);
+  if (missingCloud.status !== 404) {
+    throw new Error(`missing cloud state returned ${missingCloud.status}`);
+  }
+  const cloudPayload = {
+    version: 1,
+    savedAt: "2026-06-18 12:00:00",
+    origin: `http://127.0.0.1:${port}`,
+    localStorage: {
+      "sakura.session.slot.0": "slot-data",
+      "sakura.config.v1": JSON.stringify({ version: 1 }),
+      "external.key": "mirrored",
+    },
+  };
+  const cloudSave = await fetch(`http://127.0.0.1:${port}/api/cloud-state`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(cloudPayload),
+  });
+  if (!cloudSave.ok) {
+    throw new Error(`cloud save failed ${cloudSave.status}: ${await cloudSave.text()}`);
+  }
+  const cloudSaveBody = await cloudSave.json();
+  if (cloudSaveBody.metadata?.keyCount !== 3 || cloudSaveBody.metadata?.byteLength <= 0) {
+    throw new Error(`unexpected cloud save metadata ${JSON.stringify(cloudSaveBody)}`);
+  }
+  const cloudLoad = await (await fetch(`http://127.0.0.1:${port}/api/cloud-state`)).json();
+  if (
+    cloudLoad.version !== 1
+    || cloudLoad.localStorage?.["sakura.session.slot.0"] !== "slot-data"
+    || cloudLoad.localStorage?.["external.key"] !== "mirrored"
+    || cloudLoad.metadata?.keyCount !== 3
+  ) {
+    throw new Error(`unexpected cloud load ${JSON.stringify(cloudLoad)}`);
+  }
+  const invalidCloud = await fetch(`http://127.0.0.1:${port}/api/cloud-state`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ version: 1, localStorage: { bad: 1 } }),
+  });
+  if (invalidCloud.status !== 400) {
+    throw new Error(`invalid cloud state returned ${invalidCloud.status}`);
+  }
+  const upscaleCapabilities = await (await fetch(`http://127.0.0.1:${port}/api/upscale/capabilities`)).json();
+  if (
+    upscaleCapabilities.defaultScale !== 2
+    || upscaleCapabilities.cache?.kind !== "ram+disk"
+    || upscaleCapabilities.cache?.diskPath !== upscaleCacheDir
+    || !upscaleCapabilities.supportedScales.includes(2)
+  ) {
+    throw new Error(`unexpected upscale capabilities ${JSON.stringify(upscaleCapabilities)}`);
+  }
   const safeRuntime = await import("../web/safe-summary.js");
   const safeSummary = safeRuntime.safeInstallSummary({
     arcCount: 1,
@@ -134,6 +210,9 @@ try {
   server.kill("SIGTERM");
   await once(server, "exit").catch(() => {});
   await rm(installDir, { recursive: true, force: true });
+  await rm(upscaleCacheDir, { recursive: true, force: true });
+  await rm(cloudStateDir, { recursive: true, force: true });
+  await rm(fontDir, { recursive: true, force: true });
 }
 
 async function waitFor(predicate, timeoutMs) {

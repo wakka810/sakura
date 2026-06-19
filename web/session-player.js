@@ -81,6 +81,8 @@ import {
   createPresetScenarioShake,
   scenarioShakeOffset,
 } from "./scenario-shake.js";
+import { bgiFontByNumber, bgiGothicFont } from "./bgi-fonts.js";
+import { drawBgiText } from "./bgi-text-renderer.js";
 import { paintMappedTransition } from "./scenario-transition-mask.js";
 import {
   advanceScenarioMovies,
@@ -127,10 +129,14 @@ import {
   applyScenarioUserDataControl,
   closeScenarioUserDataWindow,
   createScenarioUserDataState,
+  normalizeUserDataPreviewDataUrl,
   openScenarioUserDataWindow,
   paintScenarioUserDataWindow,
+  resolveUserDataPreviewImage,
   scenarioUserDataControlAt,
   userDataHoverKey,
+  USER_DATA_PREVIEW_HEIGHT,
+  USER_DATA_PREVIEW_WIDTH,
   USER_DATA_SLOTS_PER_PAGE,
 } from "./scenario-userdata-window.js";
 import {
@@ -155,6 +161,11 @@ import {
   drawScenarioRichText,
   stripScenarioTags,
 } from "./scenario-text.js";
+import {
+  cancelUpscalePollsForCache,
+  loadImageAsset,
+  normalizeUpscaleSettings,
+} from "./upscale-client.js";
 
 const PAYLOAD_KIND_DSC = 1;
 const SCENARIO_KIND = 1;
@@ -183,7 +194,7 @@ const MESSAGE_STYLE_POSITION = 0x0147; // (x, y, flag)
 const MESSAGE_STYLE_SPEED_POS = 0x0145; // text speed + output X/Y origin
 const MESSAGE_STYLE_MONOLOGUE_COLOR = 0x014e; // (r, g, b)
 const MESSAGE_STYLE_WORD_COLOR = 0x014f; // (r, g, b)
-const DEFAULT_MESSAGE_FONT_PX = 29;
+const DEFAULT_MESSAGE_FONT_PX = 28;
 const DEFAULT_MESSAGE_TEXT_X = 75;
 const DEFAULT_MESSAGE_TEXT_Y = 34;
 const DEFAULT_MESSAGE_TEXT_RIGHT_MARGIN = 60;
@@ -211,6 +222,10 @@ const MESSAGE_CONTROL_NAMES = Object.freeze([
   "voice",
   "hide",
 ]);
+const MESSAGE_CONTROL_STATE_NORMAL = 0;
+const MESSAGE_CONTROL_STATE_HOVER = 1;
+const MESSAGE_CONTROL_STATE_ACTIVE = 2;
+const MESSAGE_CONTROL_STATE_DISABLED = 3;
 const EMPTY_MESSAGE_WINDOW_EVENT = Object.freeze({
   kind: EVENT_MESSAGE,
   name: "",
@@ -261,6 +276,16 @@ const GRAPH_SHOW = 0x0280;
 const GRAPH_SHOW_WITH_MAP = 0x0281;
 const GRAPH_FADE_TO_BLACK = 0x0288;
 const GRAPH_FADE_TO_BLACK_WITH_MAP = 0x0289;
+const OPENING_PROLOGUE_SCENARIO = "00_op_01";
+const OPENING_PROLOGUE_FINAL_ASSET = "sp0065f";
+const OPENING_PROLOGUE_BACKLOG_TEXT = [
+  "それが虚無ならば虚無自身がこのとほりで",
+  "ある程度まではみんなに共通いたします",
+  "",
+  "すべてがわたくしの中のみんなであるやうに",
+  "みんなのおのおののなかのすべてですから",
+  "『春と修羅』序",
+].join("\n");
 const GRAPH_BANK_SPRITE = 0x02c0;
 const GRAPH_UPDATE_SPRITE = 0x02c2;
 const GRAPH_UPDATE_SPRITE_EX = 0x02c3;
@@ -297,8 +322,8 @@ const SAVE_SLOT_KEY_PREFIX = "sakura.session.slot.";
 const QUICK_SAVE_SLOT_KEY = "sakura.session.quick";
 const READ_EVENT_STORAGE_KEY = "sakura.read.events.v1";
 const READ_EVENT_LIMIT = 50_000;
-const SAVE_RECORD_VERSION = 15;
-const SUPPORTED_SAVE_RECORD_VERSIONS = new Set([4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, SAVE_RECORD_VERSION]);
+const SAVE_RECORD_VERSION = 16;
+const SUPPORTED_SAVE_RECORD_VERSIONS = new Set([4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, SAVE_RECORD_VERSION]);
 const SCENARIO_BACKLOG_LIMIT = 512;
 const INITIAL_SCENARIO_MAX_BYTES = 256 * 1024;
 const SCENARIO_IMAGE_CACHE_LIMIT = 32;
@@ -423,6 +448,10 @@ function readScenarioSaveSummaryFromEncoded(encoded, slot) {
       savedAt: typeof value.savedAt === "string" ? value.savedAt : "",
       text: typeof value.event?.text === "string" ? value.event.text : "",
       backgroundName: typeof value.visual?.backgroundName === "string" ? value.visual.backgroundName : "",
+      ...(() => {
+        const previewDataUrl = normalizeUserDataPreviewDataUrl(value.preview?.dataUrl);
+        return previewDataUrl ? { previewDataUrl } : {};
+      })(),
     };
   } catch {
     return { slot, exists: false };
@@ -641,7 +670,7 @@ export function bindScenarioPlayerInput(canvas, getMounted, onUpdate) {
   keyboard.addEventListener("keydown", (event) => {
     const player = getMounted()?.player;
     if (
-      event.key !== "Control"
+      event.code !== "ControlRight"
       || event.repeat
       || !player
       || player.configState.open
@@ -658,7 +687,7 @@ export function bindScenarioPlayerInput(canvas, getMounted, onUpdate) {
   });
   keyboard.addEventListener("keyup", (event) => {
     const player = getMounted()?.player;
-    if (event.key === "Control") {
+    if (event.code === "ControlRight" || (event.key === "Control" && player?.skipMode)) {
       if (player?.skipMode) {
         player.autoAdvanceUpdate = onUpdate;
         player.setSkipMode(false);
@@ -878,8 +907,81 @@ export function paintScenarioOverlay(context, canvas, player, skin = null) {
     player?.messageControlHover ?? -1,
     maxChars,
     player?.messageWindowOpacity ?? 0.6,
+    player ?? null,
   );
   context.restore();
+}
+
+function captureScenarioUserDataPreview(player) {
+  if (
+    !player
+    || typeof document === "undefined"
+    || typeof document.createElement !== "function"
+  ) {
+    return null;
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = USER_DATA_PREVIEW_WIDTH;
+  canvas.height = USER_DATA_PREVIEW_HEIGHT;
+  const context = canvas.getContext?.("2d", { alpha: false });
+  if (!context) {
+    return null;
+  }
+  const logicalCanvas = { width: 1280, height: 720 };
+  try {
+    context.save();
+    context.scale(
+      USER_DATA_PREVIEW_WIDTH / logicalCanvas.width,
+      USER_DATA_PREVIEW_HEIGHT / logicalCanvas.height,
+    );
+    paintScenarioScene(context, logicalCanvas, player, { clear: true });
+    if (!player.messageWindowHidden) {
+      const visual = resolvedScenarioMessageVisual(player.messageVisual ?? null);
+      if (visual !== null && visual.opacity > 0) {
+        context.save();
+        context.globalAlpha *= visual.opacity;
+        paintScenarioEvent(
+          context,
+          logicalCanvas,
+          player.event,
+          player.skin,
+          -1,
+          Infinity,
+          player.messageWindowOpacity,
+          player,
+        );
+        context.restore();
+      }
+    }
+    context.restore();
+    const dataUrl = canvas.toDataURL("image/png");
+    const normalized = normalizeUserDataPreviewDataUrl(dataUrl);
+    if (!normalized) {
+      return null;
+    }
+    return {
+      record: {
+        mime: "image/png",
+        width: USER_DATA_PREVIEW_WIDTH,
+        height: USER_DATA_PREVIEW_HEIGHT,
+        dataUrl: normalized,
+      },
+      image: {
+        source: canvas,
+        width: USER_DATA_PREVIEW_WIDTH,
+        height: USER_DATA_PREVIEW_HEIGHT,
+        logicalWidth: USER_DATA_PREVIEW_WIDTH,
+        logicalHeight: USER_DATA_PREVIEW_HEIGHT,
+      },
+    };
+  } catch {
+    try {
+      context.restore();
+    } catch {
+      // ignore restore mismatches after a failed offscreen capture
+    }
+    return null;
+  }
 }
 
 export function paintScenarioEvent(
@@ -890,6 +992,7 @@ export function paintScenarioEvent(
   hoverControl = -1,
   maxChars = Infinity,
   messageWindowOpacity = 0.6,
+  player = null,
 ) {
   if (event === null || event.kind === EVENT_HALTED) {
     return;
@@ -901,7 +1004,7 @@ export function paintScenarioEvent(
     return;
   }
   if (skin?.panel) {
-    paintMessageWindow(context, canvas, event, skin, hoverControl, maxChars, messageWindowOpacity);
+    paintMessageWindow(context, canvas, event, skin, hoverControl, maxChars, messageWindowOpacity, player);
     return;
   }
   const boxHeight = 146;
@@ -912,7 +1015,7 @@ export function paintScenarioEvent(
   context.strokeStyle = "rgba(255, 255, 255, 0.45)";
   context.strokeRect(x, y, canvas.width - x * 2, boxHeight);
   context.fillStyle = "#f7f3e8";
-  context.font = "24px 'Noto Sans CJK JP', 'Yu Gothic', 'MS Gothic', sans-serif";
+  context.font = bgiGothicFont(24);
   if (event.kind === EVENT_MESSAGE) {
     drawScenarioRichText(context, event.text, x + 24, y + 48, canvas.width - x * 2 - 48, 30, 3, maxChars);
   } else if (event.kind === EVENT_CHOICE) {
@@ -932,15 +1035,21 @@ function paintMessageWindow(
   hoverControl,
   maxChars = Infinity,
   messageWindowOpacity = 0.6,
+  player = null,
 ) {
-  const panelX = Math.round((canvas.width - skin.panel.width) / 2);
-  const panelY = canvas.height - skin.panel.height;
+  const panelWidth = imageLogicalWidth(skin.panel);
+  const panelHeight = imageLogicalHeight(skin.panel);
+  const panelX = Math.round((canvas.width - panelWidth) / 2);
+  const panelY = canvas.height - panelHeight;
   const style = event.style ?? null;
   const fontPx = style?.fontSize ?? DEFAULT_MESSAGE_FONT_PX;
-  const fontWeight = style?.fontWeight === 1 ? "bold " : "";
-  const bodyFont = `${fontWeight}${fontPx}px 'Noto Serif CJK JP', 'Yu Mincho', 'MS Mincho', serif`;
+  const bodyFont = bgiFontByNumber(
+    style?.fontNumber ?? 0,
+    fontPx,
+    style?.fontWeight === 1 ? "bold" : "",
+  );
   // Line pitch tracks font size so larger emphasis lines do not overlap; the
-  // shipped default (29px) keeps the original 38px pitch.
+  // shipped default (28px) keeps the original 38px pitch.
   const linePitch = Math.round(fontPx * (38 / DEFAULT_MESSAGE_FONT_PX));
   const textLayout = resolveScenarioMessageTextLayout(canvas, skin, style, linePitch);
 
@@ -956,17 +1065,20 @@ function paintMessageWindow(
     (sum, control) => sum + control.stateWidth * controlScale,
     0,
   );
-  let controlX = panelX + skin.panel.width - controlsWidth - 30;
+  let controlX = panelX + panelWidth - controlsWidth - 30;
   const controlY = panelY - 23;
   if (textLayout.drawPanel) {
     skin.controls.forEach((control, index) => {
       const controlWidth = control.stateWidth * controlScale;
+      const sourceStateWidth = control.sourceStateWidth ?? control.stateWidth;
+      const sourceStateHeight = control.sourceStateHeight ?? control.image.height;
+      const sourceState = messageControlSourceState(player, index, hoverControl);
       context.drawImage(
         rgbaCanvas(control.image),
-        index === hoverControl ? control.stateWidth : 0,
+        sourceState * sourceStateWidth,
         0,
-        control.stateWidth,
-        control.stateHeight,
+        sourceStateWidth,
+        sourceStateHeight,
         controlX,
         controlY,
         controlWidth,
@@ -983,8 +1095,8 @@ function paintMessageWindow(
   if (event.kind === EVENT_MESSAGE) {
     if (textLayout.drawPanel && event.name && skin.nameplate) {
       drawRgbaImage(context, skin.nameplate, panelX + 38, panelY - 30);
-      context.font = "21px 'Noto Serif CJK JP', 'Yu Mincho', 'MS Mincho', serif";
-      context.fillText(stripScenarioTags(event.name), panelX + 64, panelY - 16);
+      context.font = bgiFontByNumber(style?.fontNumber ?? 0, 21, style?.fontWeight === 1 ? "bold" : "");
+      drawBgiText(context, stripScenarioTags(event.name), panelX + 64, panelY - 16);
       context.font = bodyFont;
     }
     drawScenarioRichText(
@@ -1003,7 +1115,83 @@ function paintMessageWindow(
       context.fillText(`${index + 1}. ${stripScenarioTags(option)}`, panelX + 75, panelY + 42 + index * 38);
     });
   }
+  drawMessageControlHelp(context, skin, panelX, panelY, panelWidth, player, hoverControl);
   context.restore();
+}
+
+function drawMessageControlHelp(context, skin, panelX, panelY, panelWidth, player, hoverControl) {
+  if (!player || !Number.isInteger(hoverControl) || hoverControl < 0) {
+    return;
+  }
+  if (!messageControlShowsHelp(player, hoverControl)) {
+    return;
+  }
+  const helpImage = skin?.help?.[hoverControl] ?? null;
+  if (!helpImage) {
+    return;
+  }
+  const helpWidth = imageLogicalWidth(helpImage);
+  const helpHeight = imageLogicalHeight(helpImage);
+  const helpX = panelX + panelWidth - helpWidth + 23;
+  const helpY = panelY + 9;
+  context.drawImage(rgbaCanvas(helpImage), helpX, helpY, helpWidth, helpHeight);
+}
+
+function messageControlSourceState(player, index, hoverControl) {
+  if (messageControlVisuallyDisabled(player, index)) {
+    return MESSAGE_CONTROL_STATE_DISABLED;
+  }
+  if (index === MESSAGE_CONTROL_AUTO && player?.autoMode) {
+    return MESSAGE_CONTROL_STATE_ACTIVE;
+  }
+  if (index === MESSAGE_CONTROL_SKIP && player?.skipMode) {
+    return MESSAGE_CONTROL_STATE_ACTIVE;
+  }
+  return index === hoverControl && messageControlHoverable(player, index)
+    ? MESSAGE_CONTROL_STATE_HOVER
+    : MESSAGE_CONTROL_STATE_NORMAL;
+}
+
+function messageControlVisuallyDisabled(player, index) {
+  if (!player) {
+    return false;
+  }
+  switch (index) {
+    case MESSAGE_CONTROL_SKIP:
+      return !scenarioCanStartSkipCurrent(player);
+    case MESSAGE_CONTROL_VOICE:
+      return currentMessageVoiceEntry(player) === null;
+    default:
+      return false;
+  }
+}
+
+function messageControlShowsHelp(player, index) {
+  return messageControlHoverable(player, index);
+}
+
+function messageControlHoverable(player, index) {
+  if (messageControlVisuallyDisabled(player, index)) {
+    return false;
+  }
+  switch (index) {
+    case MESSAGE_CONTROL_QUICK_LOAD:
+      return player?.quickSaveSummary?.().exists === true;
+    default:
+      return true;
+  }
+}
+
+function currentMessageVoiceEntry(player) {
+  const eventCount = player?.event?.eventCount ?? -1;
+  if (!Number.isInteger(eventCount) || eventCount <= 0) {
+    return null;
+  }
+  const entryIndex = player.backlog.findLastIndex((entry) => (
+    entry.eventCount === eventCount
+    && entry.voiceName
+  ));
+  return entryIndex >= 0 ? player.backlog[entryIndex] : null;
 }
 
 function hasExplicitMessageTextPosition(style) {
@@ -1025,12 +1213,14 @@ export function resolveScenarioMessageTextLayout(canvas, skin, style = null, lin
       drawPanel: false,
     };
   }
-  const panelX = Math.round((canvas.width - skin.panel.width) / 2);
-  const panelY = canvas.height - skin.panel.height;
+  const panelWidth = imageLogicalWidth(skin.panel);
+  const panelHeight = imageLogicalHeight(skin.panel);
+  const panelX = Math.round((canvas.width - panelWidth) / 2);
+  const panelY = canvas.height - panelHeight;
   return {
     x: panelX + DEFAULT_MESSAGE_TEXT_X,
     y: panelY + DEFAULT_MESSAGE_TEXT_Y,
-    maxWidth: skin.panel.width - DEFAULT_MESSAGE_TEXT_X - DEFAULT_MESSAGE_TEXT_RIGHT_MARGIN,
+    maxWidth: panelWidth - DEFAULT_MESSAGE_TEXT_X - DEFAULT_MESSAGE_TEXT_RIGHT_MARGIN,
     maxLines: 3,
     drawPanel: true,
   };
@@ -1046,6 +1236,7 @@ function visibleMessageText(text) {
 // the engine: there is no implicit decay, the script restores defaults itself.
 export function createScenarioMessageStyleState() {
   return {
+    fontNumber: null,
     fontSize: null,
     fontWeight: null,
     fontHeight: null,
@@ -1065,6 +1256,7 @@ export function createScenarioMessageStyleState() {
 
 function snapshotScenarioMessageStyle(state) {
   return {
+    fontNumber: state.fontNumber,
     fontSize: state.fontSize,
     fontWeight: state.fontWeight,
     fontHeight: state.fontHeight,
@@ -1117,11 +1309,13 @@ export function applyScenarioMessageStylePatch(style, opcode, intArgs = []) {
       break;
     case MESSAGE_STYLE_FONT:
       // (font_number, font_size, font_weight)
+      style.fontNumber = boundedStyleInt(args[0], 0, 255);
       style.fontSize = boundedStyleInt(args[1], 1, 200);
       style.fontWeight = boundedStyleInt(args[2], 0, 1);
       break;
     case MESSAGE_STYLE_FONT_EXT:
       // (font_number, height, width, weight)
+      style.fontNumber = boundedStyleInt(args[0], 0, 255);
       style.fontHeight = boundedStyleInt(args[1], 1, 200);
       style.fontWidth = boundedStyleInt(args[2], 1, 200);
       style.fontWeight = boundedStyleInt(args[3], 0, 1);
@@ -1158,6 +1352,7 @@ function applyMessageStyleEvent(player, event) {
     event.intArgs,
   );
   player.safeState.messageStyleOpcode = event.opcode;
+  player.safeState.messageStyleFontNumber = style.fontNumber ?? -1;
   player.safeState.messageStyleFontSize = style.fontSize ?? 0;
   player.safeState.messageStyleTextX = style.textX ?? -1;
   player.safeState.messageStyleTextY = style.textY ?? -1;
@@ -1253,6 +1448,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
     userDataSkin: null,
     configSkin: null,
     imageCache: new Map(),
+    upscaleSettings: normalizeUpscaleSettings(),
     audioCache: new Map(),
     audioMixer: null,
     audioState: createScenarioAudioState(),
@@ -1262,6 +1458,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
     backlogState: createScenarioBacklogState(),
     userDataState: createScenarioUserDataState(),
     userDataThumbnails: new Map(),
+    userDataPreviewImages: new Map(),
     onOverlayRepaint: null,
     configState: createScenarioConfigState(),
     messageVisual: createScenarioMessageVisualState(),
@@ -1320,19 +1517,17 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
       }
       if (this.event.kind === EVENT_MESSAGE) {
         const voice = this.pendingBacklogVoice;
-        this.backlog.push({
+        appendScenarioBacklog(this, {
           eventCount: this.event.eventCount,
           name: this.event.name,
           text: this.event.text,
+          style: this.event.style,
           ...(voice === null ? {} : {
             voiceName: voice.name,
             voiceVolume: voice.volume,
           }),
         });
         this.pendingBacklogVoice = null;
-        if (this.backlog.length > SCENARIO_BACKLOG_LIMIT) {
-          this.backlog.splice(0, this.backlog.length - SCENARIO_BACKLOG_LIMIT);
-        }
       }
       this.event.backlogLength = this.backlog.length;
       const previous = this.safeState;
@@ -1393,6 +1588,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         messageControlVisible: previous.messageControlVisible ?? 0,
         messageControlCount: previous.messageControlCount ?? 0,
         messageStyleOpcode: previous.messageStyleOpcode ?? 0,
+        messageStyleFontNumber: previous.messageStyleFontNumber ?? -1,
         messageStyleFontSize: previous.messageStyleFontSize ?? 0,
         messageStyleTextX: previous.messageStyleTextX ?? -1,
         messageStyleTextY: previous.messageStyleTextY ?? -1,
@@ -1427,12 +1623,17 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         configSfxVolume: previous.configSfxVolume ?? 0,
         configVoiceVolume: previous.configVoiceVolume ?? 0,
         configScreenModeFullscreen: previous.configScreenModeFullscreen ?? 0,
+        upscaleEnabled: previous.upscaleEnabled ?? 0,
+        upscaleScale: previous.upscaleScale ?? 2,
+        upscaleModel: previous.upscaleModel ?? "waifu2x",
+        upscaleQualityMode: previous.upscaleQualityMode ?? "fast",
         configScreenModeApplied: previous.configScreenModeApplied ?? 0,
         configScreenModeReasonLength: previous.configScreenModeReasonLength ?? 0,
         readEventCount: this.readEventKeys.size,
         currentEventRead: Number(scenarioCurrentEventIsRead(this)),
         bgmAssetReady: previous.bgmAssetReady ?? 0,
         bgmPlayResult: previous.bgmPlayResult ?? 0,
+        bgmPlayPending: previous.bgmPlayPending ?? 0,
         bgmNameLength: previous.bgmNameLength ?? 0,
         bgmFadeMs: previous.bgmFadeMs ?? 0,
         voiceAssetReady: previous.voiceAssetReady ?? 0,
@@ -1447,6 +1648,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         voiceStoppedOnClick: previous.voiceStoppedOnClick ?? 0,
         sfxAssetReady: previous.sfxAssetReady ?? 0,
         sfxPlayResult: previous.sfxPlayResult ?? 0,
+        sfxPlayPending: previous.sfxPlayPending ?? 0,
         sfxNameLength: previous.sfxNameLength ?? 0,
         sfxPlayOpcode: previous.sfxPlayOpcode ?? 0,
         sfxPan: previous.sfxPan ?? 64,
@@ -1530,6 +1732,8 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
     applyConfigControl(control) {
       const result = applyScenarioConfigControl(this.configState, control);
       if (result.handled) {
+        const refreshImages = typeof result.reason === "string"
+          && result.reason.startsWith("upscale");
         this.applyConfigSettings();
         if (result.reason === "screenMode") {
           const screenMode = applyScenarioScreenMode(this.configState.settings);
@@ -1538,6 +1742,12 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         }
         if (result.reason !== "title_pending") {
           this.storeConfigSettings();
+        }
+        if (refreshImages) {
+          this.imageCache.clear();
+          void refreshScenarioImageReferences(this, catalog, core).then(() => {
+            this.onOverlayRepaint?.();
+          });
         }
       }
       this.syncConfigState();
@@ -1566,6 +1776,18 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         voice: settings.voiceVolume,
       });
     },
+    applyUpscaleSettings(settings, options = {}) {
+      const previous = JSON.stringify(this.upscaleSettings);
+      this.upscaleSettings = normalizeUpscaleSettings(settings);
+      this.syncUpscaleState();
+      if (options.refresh === true && previous !== JSON.stringify(this.upscaleSettings)) {
+        cancelUpscalePollsForCache(this.imageCache);
+        this.imageCache.clear();
+        void refreshScenarioImageReferences(this, catalog, core).then(() => {
+          this.onOverlayRepaint?.();
+        });
+      }
+    },
     syncConfigState() {
       const settings = this.configState.settings;
       this.safeState.configOpen = Number(this.configState.open);
@@ -1579,6 +1801,13 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
       this.safeState.configSfxVolume = Math.round(settings.sfxVolume * 100);
       this.safeState.configVoiceVolume = Math.round(settings.voiceVolume * 100);
       this.safeState.configScreenModeFullscreen = Number(settings.screenMode === "fullscreen");
+    },
+    syncUpscaleState() {
+      const settings = this.upscaleSettings;
+      this.safeState.upscaleEnabled = Number(settings.upscaleEnabled === true);
+      this.safeState.upscaleScale = settings.upscaleScale ?? 2;
+      this.safeState.upscaleModel = settings.upscaleModel ?? "waifu2x";
+      this.safeState.upscaleQualityMode = settings.upscaleQualityMode ?? "fast";
     },
     applyUserDataControl(control, onUpdate = null) {
       const result = applyScenarioUserDataControl(this.userDataState, control, {
@@ -1677,7 +1906,9 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         { length: USER_DATA_SLOTS_PER_PAGE },
         (_, index) => {
           const summary = this.saveSlotSummary(start + index);
-          if (summary.exists && summary.backgroundName) {
+          if (summary.exists && summary.previewDataUrl) {
+            summary.thumbnail = this.resolveUserDataPreviewThumbnail(summary.previewDataUrl);
+          } else if (summary.exists && summary.backgroundName) {
             summary.thumbnail = this.resolveUserDataThumbnail(summary.backgroundName);
           }
           return summary;
@@ -1696,18 +1927,43 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         return cached.image ?? null;
       }
       this.userDataThumbnails.set(name, { status: "loading", image: null });
+      const player = this;
+      const settings = player.upscaleSettings;
+      const settingsKey = JSON.stringify(settings);
+      const updateThumbnail = (image) => {
+        player.userDataThumbnails.set(name, { status: image ? "ready" : "missing", image });
+        player.onOverlayRepaint?.();
+      };
       void (async () => {
         let image = null;
         try {
-          const payload = await catalog.readPayloadByNameBytes(encoder.encode(name));
-          image = payload ? core.imageRgba(payload) ?? null : null;
+          image = await loadImageAsset(catalog, core, encoder.encode(name), {
+            cache: player.imageCache,
+            cacheLimit: SCENARIO_IMAGE_CACHE_LIMIT,
+            role: "visible",
+            settings,
+            isStillWanted: () => !player.destroyed
+              && JSON.stringify(player.upscaleSettings) === settingsKey,
+            onReady: (_cacheKey, readyImage) => {
+              if (
+                !player.destroyed
+                && JSON.stringify(player.upscaleSettings) === settingsKey
+              ) {
+                updateThumbnail(readyImage);
+              }
+            },
+          });
         } catch {
           image = null;
         }
-        this.userDataThumbnails.set(name, { status: image ? "ready" : "missing", image });
-        this.onOverlayRepaint?.();
+        updateThumbnail(image);
       })();
       return null;
+    },
+    resolveUserDataPreviewThumbnail(dataUrl) {
+      return resolveUserDataPreviewImage(dataUrl, this.userDataPreviewImages, () => {
+        this.onOverlayRepaint?.();
+      });
     },
     saveSlotSummary(slotIndex) {
       return readScenarioSaveSlotSummary(slotIndex);
@@ -1905,6 +2161,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         return { ok: false, bytes: saved.byteLength, reason: "storage_unavailable" };
       }
       const visualNow = performance.now();
+      const preview = captureScenarioUserDataPreview(this);
       const record = {
         version: SAVE_RECORD_VERSION,
         savedAt: new Date().toISOString().replace("T", " ").replace(/\.\d{3}Z$/, ""),
@@ -1941,8 +2198,10 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
           rain: snapshotScenarioRain(this.scene.rain),
         },
         audio: snapshotScenarioAudioState(this.audioState, this.audioMixer?.state?.()),
+        preview: preview?.record ?? null,
       };
-      const encoded = JSON.stringify(record);
+      let encoded = JSON.stringify(record);
+      let storedPreviewDataUrl = preview?.record?.dataUrl ?? "";
       try {
         if (quick) {
           storage.setItem(QUICK_SAVE_SLOT_KEY, encoded);
@@ -1953,7 +2212,27 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
           storage.setItem(SAVE_SLOT_KEY, encoded);
         }
       } catch {
-        return { ok: false, bytes: saved.byteLength, reason: "storage_write_failed" };
+        if (!record.preview) {
+          return { ok: false, bytes: saved.byteLength, reason: "storage_write_failed" };
+        }
+        record.preview = null;
+        storedPreviewDataUrl = "";
+        encoded = JSON.stringify(record);
+        try {
+          if (quick) {
+            storage.setItem(QUICK_SAVE_SLOT_KEY, encoded);
+          } else {
+            storage.setItem(saveSlotKey(slot), encoded);
+          }
+          if (slot === 0 && !quick) {
+            storage.setItem(SAVE_SLOT_KEY, encoded);
+          }
+        } catch {
+          return { ok: false, bytes: saved.byteLength, reason: "storage_write_failed" };
+        }
+      }
+      if (storedPreviewDataUrl && preview?.image) {
+        this.userDataPreviewImages.set(storedPreviewDataUrl, { status: "ready", image: preview.image });
       }
       this.safeState.lastSaveBytes = saved.byteLength;
       this.safeState.lastSaveSlot = slot;
@@ -2087,12 +2366,17 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         configSfxVolume: previous.configSfxVolume ?? 0,
         configVoiceVolume: previous.configVoiceVolume ?? 0,
         configScreenModeFullscreen: previous.configScreenModeFullscreen ?? 0,
+        upscaleEnabled: previous.upscaleEnabled ?? 0,
+        upscaleScale: previous.upscaleScale ?? 2,
+        upscaleModel: previous.upscaleModel ?? "waifu2x",
+        upscaleQualityMode: previous.upscaleQualityMode ?? "fast",
         configScreenModeApplied: previous.configScreenModeApplied ?? 0,
         configScreenModeReasonLength: previous.configScreenModeReasonLength ?? 0,
         readEventCount: this.readEventKeys.size,
         currentEventRead: Number(scenarioCurrentEventIsRead(this)),
         bgmAssetReady: previous.bgmAssetReady ?? 0,
         bgmPlayResult: previous.bgmPlayResult ?? 0,
+        bgmPlayPending: previous.bgmPlayPending ?? 0,
         bgmNameLength: previous.bgmNameLength ?? 0,
         bgmFadeMs: previous.bgmFadeMs ?? 0,
         voiceAssetReady: previous.voiceAssetReady ?? 0,
@@ -2107,6 +2391,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
         voiceStoppedOnClick: previous.voiceStoppedOnClick ?? 0,
         sfxAssetReady: previous.sfxAssetReady ?? 0,
         sfxPlayResult: previous.sfxPlayResult ?? 0,
+        sfxPlayPending: previous.sfxPlayPending ?? 0,
         sfxNameLength: previous.sfxNameLength ?? 0,
         sfxPlayOpcode: previous.sfxPlayOpcode ?? 0,
         sfxPan: previous.sfxPan ?? 64,
@@ -2159,6 +2444,7 @@ function createPlayer(catalog, core, handle, scenarioSequence, scenarioIndex, ro
     },
     destroy() {
       this.destroyed = true;
+      cancelUpscalePollsForCache(this.imageCache);
       clearScenarioMovies(this.scene.movies);
       this.automaticWake?.();
       if (this.automaticFrame !== 0) {
@@ -2287,6 +2573,21 @@ function applyUserFunctionEvent(player, event) {
   return 0;
 }
 
+function observeAudioPlayback(player, playback, onResult) {
+  void Promise.resolve(playback).then(
+    (result) => {
+      if (!player.destroyed) {
+        onResult(result ?? { ok: false, reason: "missing_result" });
+      }
+    },
+    () => {
+      if (!player.destroyed) {
+        onResult({ ok: false, reason: "error" });
+      }
+    },
+  );
+}
+
 async function applySoundEvent(player, catalog, core, event) {
   if (event.opcode === SOUND_BGM_PLAY) {
     const name = event.stringArgs.at(-1) ?? "";
@@ -2297,12 +2598,18 @@ async function applySoundEvent(player, catalog, core, event) {
     const ogg = await loadScenarioAudio(player, catalog, core, name);
     const volume = Math.max(0, Math.min(event.intArgs[1] ?? 128, 128)) / 128;
     const fadeInMs = positiveDuration(event.intArgs[0]);
-    const result = await player.audioMixer.playTrack(ogg, { loop: true, volume, fadeInMs });
-    player.audioState.bgm = result.ok ? { name, volume, positionSeconds: 0, fadeInMs } : null;
+    const playback = player.audioMixer.playTrack(ogg, { loop: true, volume, fadeInMs });
+    player.audioState.bgm = ogg !== null ? { name, volume, positionSeconds: 0, fadeInMs } : null;
     player.safeState.bgmAssetReady = Number(ogg !== null);
-    player.safeState.bgmPlayResult = Number(result.ok);
     player.safeState.bgmNameLength = name.length;
     player.safeState.bgmFadeMs = fadeInMs;
+    observeAudioPlayback(player, playback, (result) => {
+      player.safeState.bgmPlayResult = Number(result.ok);
+      player.safeState.bgmPlayPending = Number(result.pending === true);
+      if (!result.ok && result.pending !== true && player.audioState.bgm?.name === name) {
+        player.audioState.bgm = null;
+      }
+    });
     return 0;
   }
   if (event.opcode === SOUND_BGM_STOP) {
@@ -2350,11 +2657,14 @@ async function applySoundEvent(player, catalog, core, event) {
       return 0;
     }
     const ogg = await loadScenarioAudio(player, catalog, core, name);
-    const result = await player.audioMixer.playVoice(ogg, { volume, channel });
+    const playback = player.audioMixer.playVoice(ogg, { volume, channel });
     player.safeState.voiceAssetReady = Number(ogg !== null);
-    player.safeState.voicePlayResult = Number(result.ok);
     player.safeState.voiceChannel = channel;
     player.safeState.voiceSuppressedByConfig = 0;
+    observeAudioPlayback(player, playback, (result) => {
+      player.safeState.voicePlayResult = Number(result.ok);
+      player.safeState.voicePlayPending = Number(result.pending === true);
+    });
     return 0;
   }
   if (event.opcode === SOUND_VOICE_STOP) {
@@ -2382,11 +2692,17 @@ async function applySoundEvent(player, catalog, core, event) {
     }
     const ogg = await loadScenarioAudio(player, catalog, core, name);
     const volume = Math.max(0, Math.min(event.intArgs[1] ?? 128, 128)) / 128;
-    const result = await player.audioMixer.playLoopingSfx(ogg, { volume });
-    player.audioState.loopSfx = result.ok ? { name, volume, positionSeconds: 0 } : null;
+    const playback = player.audioMixer.playLoopingSfx(ogg, { volume });
+    player.audioState.loopSfx = ogg !== null ? { name, volume, positionSeconds: 0 } : null;
     player.safeState.sfxAssetReady = Number(ogg !== null);
-    player.safeState.sfxPlayResult = Number(result.ok);
     player.safeState.sfxNameLength = name.length;
+    observeAudioPlayback(player, playback, (result) => {
+      player.safeState.sfxPlayResult = Number(result.ok);
+      player.safeState.sfxPlayPending = Number(result.pending === true);
+      if (!result.ok && result.pending !== true && player.audioState.loopSfx?.name === name) {
+        player.audioState.loopSfx = null;
+      }
+    });
     return 0;
   }
   if (event.opcode === SOUND_LOOPING_SE_STOP) {
@@ -2418,16 +2734,19 @@ async function applySoundEvent(player, catalog, core, event) {
       return 0;
     }
     const ogg = await loadScenarioAudio(player, catalog, core, sfx.name);
-    const result = await player.audioMixer.playSfx(ogg, {
+    const playback = player.audioMixer.playSfx(ogg, {
       volume: sfx.volume,
       channel: sfx.channel,
     });
     player.safeState.sfxAssetReady = Number(ogg !== null);
-    player.safeState.sfxPlayResult = Number(result.ok);
     player.safeState.sfxNameLength = sfx.name.length;
     player.safeState.sfxChannel = sfx.channel;
     player.safeState.sfxPlayOpcode = sfx.opcode;
     player.safeState.sfxPan = sfx.pan;
+    observeAudioPlayback(player, playback, (result) => {
+      player.safeState.sfxPlayResult = Number(result.ok);
+      player.safeState.sfxPlayPending = Number(result.pending === true);
+    });
     return 0;
   }
   if (event.opcode === SOUND_SE_STOP) {
@@ -2646,7 +2965,7 @@ async function applyGraphEvent(player, catalog, core, event) {
       : "";
     const [image, mapImage] = await Promise.all([
       loadScenarioImage(player, catalog, core, name),
-      mapName ? loadScenarioImage(player, catalog, core, mapName) : null,
+      mapName ? loadScenarioImage(player, catalog, core, mapName, "mask") : null,
     ]);
     beginSceneTransition(player, image, durationMs, name, {
       mapImage,
@@ -2657,6 +2976,7 @@ async function applyGraphEvent(player, catalog, core, event) {
     player.safeState.sceneTransitionMapReady = Number(mapImage !== null);
     player.safeState.sceneTransitionMapNameLength = mapName.length;
     player.safeState.sceneTransitionMs = durationMs;
+    appendOpeningPrologueBacklog(player, event, name);
     return durationMs;
   }
   if (event.opcode === GRAPH_FADE_TO_BLACK) {
@@ -2668,7 +2988,7 @@ async function applyGraphEvent(player, catalog, core, event) {
   }
   if (event.opcode === GRAPH_FADE_TO_BLACK_WITH_MAP) {
     const mapName = event.stringArgs.at(-1) ?? "";
-    const mapImage = await loadScenarioImage(player, catalog, core, mapName);
+    const mapImage = await loadScenarioImage(player, catalog, core, mapName, "mask");
     beginSceneTransition(player, null, durationMs, null, {
       mapImage,
       mapName,
@@ -2941,6 +3261,36 @@ async function applyGraphEvent(player, catalog, core, event) {
   return 0;
 }
 
+function appendOpeningPrologueBacklog(player, event, assetName) {
+  if (
+    event?.opcode !== GRAPH_SHOW_WITH_MAP
+    || assetName !== OPENING_PROLOGUE_FINAL_ASSET
+    || (player.safeState?.scenarioName ?? "").toLowerCase() !== OPENING_PROLOGUE_SCENARIO
+  ) {
+    return false;
+  }
+  if (player.backlog.some((entry) => entry.source === "opening-prologue")) {
+    player.safeState.openingPrologueBacklog = 1;
+    return false;
+  }
+  appendScenarioBacklog(player, {
+    eventCount: event.eventCount,
+    name: "",
+    text: OPENING_PROLOGUE_BACKLOG_TEXT,
+    source: "opening-prologue",
+  });
+  player.safeState.openingPrologueBacklog = 1;
+  return true;
+}
+
+function appendScenarioBacklog(player, entry) {
+  player.backlog.push(entry);
+  if (player.backlog.length > SCENARIO_BACKLOG_LIMIT) {
+    player.backlog.splice(0, player.backlog.length - SCENARIO_BACKLOG_LIMIT);
+  }
+  player.safeState.backlogLength = player.backlog.length;
+}
+
 async function applyMovieSceneObjectEvent(player, catalog, core, event) {
   const archiveName = event.stringArgs.at(-1) ?? "";
   const maskName = movieSceneObjectMaskName(event);
@@ -2948,7 +3298,7 @@ async function applyMovieSceneObjectEvent(player, catalog, core, event) {
     ? await catalog.readArchivePayloadByNameBytes(encoder.encode(archiveName))
     : null;
   const moviePayload = readFirstArc20EntryPayloadByExtension(archivePayload, ".mpg");
-  const maskImage = maskName ? await loadScenarioImage(player, catalog, core, maskName) : null;
+  const maskImage = maskName ? await loadScenarioImage(player, catalog, core, maskName, "mask") : null;
   const id = sceneObjectId(event);
   clearScenarioMovieObject(player.scene.movies, id);
   const image = moviePayload === null
@@ -3069,7 +3419,7 @@ async function applyMappedSpriteImageEvent(player, catalog, core, event) {
   const name = event.stringArgs.at(-1) ?? "";
   const [image, mapImage] = await Promise.all([
     loadScenarioImage(player, catalog, core, name),
-    loadScenarioImage(player, catalog, core, mapName),
+    loadScenarioImage(player, catalog, core, mapName, "mask"),
   ]);
   beginScenarioSpriteTransition(
     player.scene.sprites,
@@ -3396,28 +3746,40 @@ function beginPresetScreenShake(player, event) {
   player.safeState.sceneShakeAmplitudeY = Math.round(Math.abs(shake.amplitude * shake.vectorY));
 }
 
-async function loadScenarioImage(player, catalog, core, name) {
+async function loadScenarioImage(player, catalog, core, name, role = "visible") {
   if (!/^[A-Za-z0-9_]+$/.test(name)) {
     player.safeState.sceneAssetErrors += 1;
     return null;
   }
-  const pending = boundedCacheValue(
-    player.imageCache,
-    name,
-    SCENARIO_IMAGE_CACHE_LIMIT,
-    async () => {
-      if (name.toLowerCase() === "white") {
-        return solidColorImage(1280, 720, 255, 255, 255, 255);
-      }
-      if (name.toLowerCase() === "black") {
-        return solidColorImage(1280, 720, 0, 0, 0, 255);
-      }
-      const payload = await catalog.readPayloadByNameBytes(encoder.encode(name));
-      return payload ? core.imageRgba(payload) : null;
-    },
-  );
   try {
-    const image = await pending;
+    const lowerName = name.toLowerCase();
+    if (lowerName === "white" || lowerName === "black") {
+      const image = await boundedCacheValue(
+        player.imageCache,
+        `solid:${lowerName}`,
+        SCENARIO_IMAGE_CACHE_LIMIT,
+        async () => lowerName === "white"
+          ? solidColorImage(1280, 720, 255, 255, 255, 255)
+          : solidColorImage(1280, 720, 0, 0, 0, 255),
+      );
+      return image;
+    }
+    const settingsKey = JSON.stringify(player.upscaleSettings);
+    const image = await loadImageAsset(catalog, core, encoder.encode(name), {
+      cache: player.imageCache,
+      cacheLimit: SCENARIO_IMAGE_CACHE_LIMIT,
+      role,
+      settings: player.upscaleSettings,
+      isStillWanted: () => !player.destroyed
+        && JSON.stringify(player.upscaleSettings) === settingsKey
+        && scenarioImageStillReferenced(player, name, role),
+      onReady: (_cacheKey, readyImage) => {
+        if (replaceScenarioImageReferences(player, name, readyImage, role)) {
+          startVisualAnimation(player);
+        }
+        player.onOverlayRepaint?.();
+      },
+    });
     if (!image) {
       player.safeState.sceneAssetErrors += 1;
     }
@@ -3425,6 +3787,179 @@ async function loadScenarioImage(player, catalog, core, name) {
   } catch {
     player.safeState.sceneAssetErrors += 1;
     return null;
+  }
+}
+
+function replaceScenarioImageReferences(player, name, image, role) {
+  if (!player || !image) {
+    return false;
+  }
+  let changed = false;
+  if (role === "mask") {
+    if (player.scene.transitionMapName === name) {
+      player.scene.transitionMap = image;
+      changed = true;
+    }
+    for (const transition of player.scene.sprites.transitions.values()) {
+      if (transition.mapAssetName === name) {
+        transition.mapImage = image;
+        changed = true;
+      }
+    }
+    for (const object of player.scene.sprites.sceneObjects.values()) {
+      if (object.maskAssetName === name) {
+        object.maskImage = image;
+        object.maskCacheKey = {};
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  if (player.scene.currentName === name) {
+    player.scene.current = image;
+    changed = true;
+  }
+  if (player.scene.targetName === name) {
+    player.scene.target = image;
+    changed = true;
+  }
+  changed = replaceSpriteLayerImages(player.scene.sprites.layers, name, image) || changed;
+  changed = replaceSpriteLayerImages(player.scene.sprites.presentedLayers, name, image) || changed;
+  for (const transition of player.scene.sprites.transitions.values()) {
+    if (transition.from?.assetName === name) {
+      transition.from = { ...transition.from, image };
+      changed = true;
+    }
+    if (transition.to?.assetName === name) {
+      transition.to = { ...transition.to, image };
+      changed = true;
+    }
+  }
+  for (const object of player.scene.sprites.sceneObjects.values()) {
+    if (object.assetName === name && object.isMovie !== true) {
+      object.image = image;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function scenarioImageStillReferenced(player, name, role) {
+  if (!player || player.destroyed || !validAssetName(name)) {
+    return false;
+  }
+  if (role === "mask") {
+    if (player.scene.transitionMapName === name) {
+      return true;
+    }
+    for (const transition of player.scene.sprites.transitions.values()) {
+      if (transition.mapAssetName === name) {
+        return true;
+      }
+    }
+    for (const object of player.scene.sprites.sceneObjects.values()) {
+      if (object.maskAssetName === name) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (player.scene.currentName === name || player.scene.targetName === name) {
+    return true;
+  }
+  if (layersReferenceAssetName(player.scene.sprites.layers, name)) {
+    return true;
+  }
+  if (layersReferenceAssetName(player.scene.sprites.presentedLayers, name)) {
+    return true;
+  }
+  for (const transition of player.scene.sprites.transitions.values()) {
+    if (transition.from?.assetName === name || transition.to?.assetName === name) {
+      return true;
+    }
+  }
+  for (const object of player.scene.sprites.sceneObjects.values()) {
+    if (object.isMovie !== true && object.assetName === name) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function layersReferenceAssetName(layers, name) {
+  for (const layer of layers.values()) {
+    if (layer?.assetName === name) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function replaceSpriteLayerImages(layers, name, image) {
+  let changed = false;
+  for (const [slot, layer] of layers.entries()) {
+    if (layer?.assetName !== name) {
+      continue;
+    }
+    layers.set(slot, { ...layer, image });
+    changed = true;
+  }
+  return changed;
+}
+
+async function refreshScenarioImageReferences(player, catalog, core) {
+  const visible = new Set();
+  const masks = new Set();
+  if (validAssetName(player.scene.currentName)) {
+    visible.add(player.scene.currentName);
+  }
+  if (validAssetName(player.scene.targetName)) {
+    visible.add(player.scene.targetName);
+  }
+  if (validAssetName(player.scene.transitionMapName)) {
+    masks.add(player.scene.transitionMapName);
+  }
+  collectLayerAssetNames(player.scene.sprites.layers, visible);
+  collectLayerAssetNames(player.scene.sprites.presentedLayers, visible);
+  for (const transition of player.scene.sprites.transitions.values()) {
+    if (validAssetName(transition.from?.assetName)) {
+      visible.add(transition.from.assetName);
+    }
+    if (validAssetName(transition.to?.assetName)) {
+      visible.add(transition.to.assetName);
+    }
+    if (validAssetName(transition.mapAssetName)) {
+      masks.add(transition.mapAssetName);
+    }
+  }
+  for (const object of player.scene.sprites.sceneObjects.values()) {
+    if (validAssetName(object.assetName) && object.isMovie !== true) {
+      visible.add(object.assetName);
+    }
+    if (validAssetName(object.maskAssetName)) {
+      masks.add(object.maskAssetName);
+    }
+  }
+  for (const name of visible) {
+    const image = await loadScenarioImage(player, catalog, core, name, "visible");
+    if (image) {
+      replaceScenarioImageReferences(player, name, image, "visible");
+    }
+  }
+  for (const name of masks) {
+    const image = await loadScenarioImage(player, catalog, core, name, "mask");
+    if (image) {
+      replaceScenarioImageReferences(player, name, image, "mask");
+    }
+  }
+}
+
+function collectLayerAssetNames(layers, names) {
+  for (const layer of layers.values()) {
+    if (validAssetName(layer?.assetName)) {
+      names.add(layer.assetName);
+    }
   }
 }
 
@@ -3457,7 +3992,7 @@ function solidColorImage(width, height, red, green, blue, alpha) {
     pixels[offset + 2] = blue;
     pixels[offset + 3] = alpha;
   }
-  return { width, height, pixels };
+  return { width, height, logicalWidth: width, logicalHeight: height, pixels };
 }
 
 function setSceneBaseImage(player, image, name) {
@@ -3668,6 +4203,10 @@ export function scenarioCanSkipCurrent(player) {
   if (!player?.skipMode) {
     return false;
   }
+  return scenarioCanStartSkipCurrent(player);
+}
+
+function scenarioCanStartSkipCurrent(player) {
   const settings = player.configState?.settings ?? {};
   if (settings.skipMode === "all") {
     return true;
@@ -4002,6 +4541,7 @@ async function restoreSceneAudio(player, catalog, core, audio) {
     player.audioMixer.setTrackCurrentTime?.(restored.bgm.positionSeconds ?? 0);
     player.safeState.bgmAssetReady = Number(ogg !== null);
     player.safeState.bgmPlayResult = Number(result.ok);
+    player.safeState.bgmPlayPending = Number(result.pending === true);
     player.safeState.bgmNameLength = restored.bgm.name.length;
   }
   if (restored.loopSfx && player.audioMixer !== null) {
@@ -4012,6 +4552,7 @@ async function restoreSceneAudio(player, catalog, core, audio) {
     player.audioMixer.setLoopingSfxCurrentTime?.(restored.loopSfx.positionSeconds ?? 0);
     player.safeState.sfxAssetReady = Number(ogg !== null);
     player.safeState.sfxPlayResult = Number(result.ok);
+    player.safeState.sfxPlayPending = Number(result.pending === true);
     player.safeState.sfxNameLength = restored.loopSfx.name.length;
   }
 }
@@ -4430,7 +4971,7 @@ async function restoreSceneVisual(player, catalog, core, visual) {
       ? await loadScenarioImage(player, catalog, core, transition.to.assetName)
       : null;
     const mapImage = transition.mapAssetName
-      ? await loadScenarioImage(player, catalog, core, transition.mapAssetName)
+      ? await loadScenarioImage(player, catalog, core, transition.mapAssetName, "mask")
       : null;
     if (
       (transition.from && fromImage === null)
@@ -4450,7 +4991,7 @@ async function restoreSceneVisual(player, catalog, core, visual) {
   const restoredMovieObjects = [];
   for (const object of visual.sceneObjects ?? []) {
     const maskImage = object.maskAssetName
-      ? await loadScenarioImage(player, catalog, core, object.maskAssetName)
+      ? await loadScenarioImage(player, catalog, core, object.maskAssetName, "mask")
       : null;
     if (object.maskAssetName && maskImage === null) {
       return false;
@@ -4765,8 +5306,8 @@ function canvasPointFromEvent(canvas, event) {
     return null;
   }
   return {
-    x: (event.clientX - rect.left) * canvas.width / rect.width,
-    y: (event.clientY - rect.top) * canvas.height / rect.height,
+    x: (event.clientX - rect.left) * canvasLogicalWidth(canvas) / rect.width,
+    y: (event.clientY - rect.top) * canvasLogicalHeight(canvas) / rect.height,
   };
 }
 
@@ -4779,11 +5320,15 @@ function messageControlIndexAt(canvas, skin, x, y) {
     (sum, control) => sum + control.stateWidth * scale,
     0,
   );
-  let controlX = Math.round((canvas.width - skin.panel.width) / 2)
-    + skin.panel.width
+  const canvasWidth = canvasLogicalWidth(canvas);
+  const canvasHeight = canvasLogicalHeight(canvas);
+  const panelWidth = imageLogicalWidth(skin.panel);
+  const panelHeight = imageLogicalHeight(skin.panel);
+  let controlX = Math.round((canvasWidth - panelWidth) / 2)
+    + panelWidth
     - width
     - 30;
-  const controlY = canvas.height - skin.panel.height - 23;
+  const controlY = canvasHeight - panelHeight - 23;
   for (let index = 0; index < skin.controls.length; index += 1) {
     const control = skin.controls[index];
     const controlWidth = control.stateWidth * scale;
@@ -4806,6 +5351,16 @@ function handleMessageControlClick(player, controlIndex, onUpdate) {
   }
   player.safeState.messageControlClickIndex = controlIndex;
   player.safeState.messageControlClickName = MESSAGE_CONTROL_NAMES[controlIndex] ?? "";
+  if (messageControlVisuallyDisabled(player, controlIndex)) {
+    player.safeState.messageControlClickResult = "disabled";
+    player.safeState.messageControlClickOk = 0;
+    return true;
+  }
+  if (!messageControlHoverable(player, controlIndex)) {
+    player.safeState.messageControlClickResult = "inactive";
+    player.safeState.messageControlClickOk = 0;
+    return true;
+  }
   switch (controlIndex) {
     case MESSAGE_CONTROL_AUTO:
       player.autoAdvanceUpdate = onUpdate;
@@ -4853,14 +5408,9 @@ function handleMessageControlClick(player, controlIndex, onUpdate) {
     }
     case MESSAGE_CONTROL_QUICK_LOAD:
       player.cancelAutoSkip();
-      if (!player.quickSaveSummary().exists) {
-        player.safeState.messageControlClickResult = "missing_snapshot";
-        player.safeState.messageControlClickOk = 0;
-      } else {
-        player.requestDialogAction("quickLoad", 0, "load", "scenarioQuickLoad");
-        player.safeState.messageControlClickResult = "load_confirm";
-        player.safeState.messageControlClickOk = 1;
-      }
+      player.requestDialogAction("quickLoad", 0, "load", "scenarioQuickLoad");
+      player.safeState.messageControlClickResult = "load_confirm";
+      player.safeState.messageControlClickOk = 1;
       return true;
     case MESSAGE_CONTROL_VOICE:
       player.cancelAutoSkip();
@@ -4905,11 +5455,21 @@ function choiceIndexFromEvent(event, canvas, optionCount) {
     return 0;
   }
   const rect = canvas.getBoundingClientRect();
-  const scaleY = canvas.height / rect.height;
+  const scaleY = canvasLogicalHeight(canvas) / rect.height;
   const y = (event.clientY - rect.top) * scaleY;
-  const boxY = canvas.height - 146 - 34;
+  const boxY = canvasLogicalHeight(canvas) - 146 - 34;
   const index = Math.floor((y - boxY - 26) / 34);
   return Math.min(Math.max(index, 0), optionCount - 1);
+}
+
+function canvasLogicalWidth(canvas) {
+  const value = Number.parseInt(canvas?.dataset?.logicalWidth ?? "", 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : canvas.width;
+}
+
+function canvasLogicalHeight(canvas) {
+  const value = Number.parseInt(canvas?.dataset?.logicalHeight ?? "", 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : canvas.height;
 }
 
 function safeSessionState(active, event) {
@@ -4977,6 +5537,7 @@ function safeSessionState(active, event) {
     messageControlVisible: 0,
     messageControlCount: 0,
     messageStyleOpcode: 0,
+    messageStyleFontNumber: -1,
     messageStyleFontSize: 0,
     messageStyleTextX: -1,
     messageStyleTextY: -1,
@@ -5020,10 +5581,19 @@ function safeSessionState(active, event) {
     configSfxVolume: 0,
     configVoiceVolume: 0,
     configScreenModeFullscreen: 0,
+    upscaleEnabled: 0,
+    upscaleScale: 2,
+    upscaleModel: "waifu2x",
+    upscaleQualityMode: "fast",
     configScreenModeApplied: 0,
     configScreenModeReasonLength: 0,
     readEventCount: 0,
     currentEventRead: 0,
+    bgmAssetReady: 0,
+    bgmPlayResult: 0,
+    bgmPlayPending: 0,
+    bgmNameLength: 0,
+    bgmFadeMs: 0,
     voiceAssetReady: 0,
     voicePlayResult: 0,
     voiceNameLength: 0,
@@ -5036,6 +5606,7 @@ function safeSessionState(active, event) {
     voiceStoppedOnClick: 0,
     sfxAssetReady: 0,
     sfxPlayResult: 0,
+    sfxPlayPending: 0,
     sfxNameLength: 0,
     sfxPlayOpcode: 0,
     sfxPan: 64,
@@ -5086,9 +5657,11 @@ function drawSceneImage(context, canvas, image, alpha) {
   if (!image || alpha <= 0) {
     return;
   }
-  const scale = Math.max(canvas.width / image.width, canvas.height / image.height);
-  const width = Math.round(image.width * scale);
-  const height = Math.round(image.height * scale);
+  const logicalWidth = imageLogicalWidth(image);
+  const logicalHeight = imageLogicalHeight(image);
+  const scale = Math.max(canvas.width / logicalWidth, canvas.height / logicalHeight);
+  const width = Math.round(logicalWidth * scale);
+  const height = Math.round(logicalHeight * scale);
   context.save();
   context.globalAlpha = Math.max(0, Math.min(1, alpha));
   context.drawImage(
@@ -5102,9 +5675,11 @@ function drawSceneImage(context, canvas, image, alpha) {
 }
 
 function drawMappedSceneImage(context, canvas, image, mapImage, progress, cacheKey) {
-  const scale = Math.max(canvas.width / image.width, canvas.height / image.height);
-  const width = Math.round(image.width * scale);
-  const height = Math.round(image.height * scale);
+  const logicalWidth = imageLogicalWidth(image);
+  const logicalHeight = imageLogicalHeight(image);
+  const scale = Math.max(canvas.width / logicalWidth, canvas.height / logicalHeight);
+  const width = Math.round(logicalWidth * scale);
+  const height = Math.round(logicalHeight * scale);
   paintMappedTransition(
     context,
     rgbaCanvas(image),
@@ -5143,7 +5718,19 @@ function drawMappedSceneBlack(context, canvas, mapImage, progress, cacheKey) {
 }
 
 function drawRgbaImage(context, image, x, y) {
-  context.drawImage(rgbaCanvas(image), x, y, image.width, image.height);
+  context.drawImage(rgbaCanvas(image), x, y, imageLogicalWidth(image), imageLogicalHeight(image));
+}
+
+function imageLogicalWidth(image) {
+  return Number.isFinite(image?.logicalWidth) && image.logicalWidth > 0
+    ? image.logicalWidth
+    : image?.width ?? 0;
+}
+
+function imageLogicalHeight(image) {
+  return Number.isFinite(image?.logicalHeight) && image.logicalHeight > 0
+    ? image.logicalHeight
+    : image?.height ?? 0;
 }
 
 function rgbaCanvas(image) {

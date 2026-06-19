@@ -55,6 +55,7 @@ const { parseScenarioText, stripScenarioTags } = await import(
   "../web/scenario-text.js"
 );
 const { drawScenarioRichText } = await import("../web/scenario-text.js");
+const { bindScenarioPlayerInput, paintScenarioEvent } = await import("../web/session-player.js");
 
 assert.deepEqual(parseScenarioText("AB<r yomi>kanji</r>CD"), [
   { type: "text", text: "AB" },
@@ -140,6 +141,82 @@ assert.equal(stripScenarioTags("pre<r dangling"), "pre<r dangling");
   assert.equal(context.font, "20px serif");
 }
 
+// Message-control hover help uses shipped SGMsgWnd800xxx images. Skip/Voice use
+// disabled visual states when unavailable; Q.Load stays normal when there is no
+// quick-save snapshot, so it neither turns blue nor shows its help image.
+{
+  installCanvasStubs();
+  const skin = messageSkin();
+  const missingQuickContext = fakePaintContext();
+  paintScenarioEvent(
+    missingQuickContext,
+    { width: 1280, height: 720 },
+    { kind: 1, text: "" },
+    skin,
+    6,
+    Infinity,
+    0.6,
+    { quickSaveSummary: () => ({ exists: false }) },
+  );
+  assert.equal(missingQuickContext.drawImageCalls.length, 11);
+  const missingQuickControls = missingQuickContext.drawImageCalls.filter((call) => call.length === 9);
+  assert.equal(missingQuickControls[6][1], 0);
+
+  const enabledSkin = messageSkin();
+  const enabledContext = fakePaintContext();
+  paintScenarioEvent(
+    enabledContext,
+    { width: 1280, height: 720 },
+    { kind: 1, text: "" },
+    enabledSkin,
+    6,
+    Infinity,
+    0.6,
+    { quickSaveSummary: () => ({ exists: true }) },
+  );
+  assert.equal(enabledContext.drawImageCalls.length, 12);
+}
+
+// The Q.Load button is not drawn disabled with no quick-save snapshot, but it is
+// not interactive either.
+{
+  const skin = messageSkin();
+  const canvas = fakeInputCanvas();
+  const player = {
+    configState: { open: false, hover: null },
+    userDataState: { open: false, hover: null },
+    backlogState: { open: false, hoverControl: null },
+    backlog: [],
+    messageWindowHidden: false,
+    event: { kind: 1, text: "" },
+    skin,
+    safeState: {},
+    autoMode: false,
+    skipMode: false,
+    quickSaveSummary: () => ({ exists: false }),
+    cancelAutoSkip() {
+      this.cancelledAutoSkip = true;
+    },
+  };
+  let updates = 0;
+  bindScenarioPlayerInput(canvas, () => ({ player }), () => {
+    updates += 1;
+  });
+  const point = messageControlClientPoint(canvas, skin, 6);
+  canvas.dispatch("pointerup", {
+    timeStamp: 100,
+    button: 0,
+    clientX: point.clientX,
+    clientY: point.clientY,
+  });
+  assert.equal(player.safeState.messageControlClickName, "quick-load");
+  assert.equal(player.safeState.messageControlClickResult, "inactive");
+  assert.equal(player.safeState.messageControlClickOk, 0);
+  assert.equal(player.safeState.inputResult, 4);
+  assert.equal(player.cancelledAutoSkip, undefined);
+  assert.equal(updates, 1);
+}
+
 // Typing reveal: chars appear over time at msPerChar; click completes; 0 = instant.
 const reveal = createScenarioMessageVisualState();
 beginScenarioMessageReveal(reveal, { charCount: 10, msPerChar: 30, now: 1000 });
@@ -155,3 +232,128 @@ beginScenarioMessageReveal(reveal, { charCount: 10, msPerChar: 0, now: 3000 });
 assert.equal(isScenarioMessageRevealing(reveal, 3000), false); // instant
 
 console.log("scenario_message_window=ok");
+
+function messageSkin() {
+  return {
+    panel: image(1198, 168),
+    nameplate: null,
+    controls: Array.from({ length: 10 }, () => ({
+      image: image(240, 27),
+      stateWidth: 60,
+      stateHeight: 27,
+      sourceStateWidth: 60,
+      sourceStateHeight: 27,
+    })),
+    help: Array.from({ length: 10 }, () => image(440, 20)),
+  };
+}
+
+function image(width, height) {
+  return {
+    width,
+    height,
+    logicalWidth: width,
+    logicalHeight: height,
+    pixels: new Uint8ClampedArray(width * height * 4),
+  };
+}
+
+function fakePaintContext() {
+  return {
+    drawImageCalls: [],
+    globalAlpha: 1,
+    fillStyle: "",
+    font: "",
+    textBaseline: "",
+    save() {},
+    restore() {},
+    drawImage(...args) {
+      this.drawImageCalls.push(args);
+    },
+    fillText() {},
+    measureText(text) {
+      return { width: Array.from(String(text)).length * 10 };
+    },
+  };
+}
+
+function fakeInputCanvas() {
+  const windowTarget = fakeEventTarget();
+  return {
+    ...fakeEventTarget(),
+    width: 1280,
+    height: 720,
+    dataset: {},
+    ownerDocument: { defaultView: windowTarget },
+    closest() {
+      return null;
+    },
+    getBoundingClientRect() {
+      return {
+        left: 0,
+        top: 0,
+        width: this.width,
+        height: this.height,
+      };
+    },
+  };
+}
+
+function fakeEventTarget() {
+  const listeners = new Map();
+  return {
+    addEventListener(type, handler) {
+      const handlers = listeners.get(type) ?? [];
+      handlers.push(handler);
+      listeners.set(type, handlers);
+    },
+    dispatch(type, event) {
+      for (const handler of listeners.get(type) ?? []) {
+        handler(event);
+      }
+    },
+  };
+}
+
+function messageControlClientPoint(canvas, skin, index) {
+  const scale = 1.04;
+  const controlsWidth = skin.controls.reduce(
+    (sum, control) => sum + control.stateWidth * scale,
+    0,
+  );
+  let x = Math.round((canvas.width - skin.panel.width) / 2)
+    + skin.panel.width
+    - controlsWidth
+    - 30;
+  for (let i = 0; i < index; i += 1) {
+    x += skin.controls[i].stateWidth * scale;
+  }
+  const control = skin.controls[index];
+  const y = canvas.height - skin.panel.height - 23;
+  return {
+    clientX: x + control.stateWidth * scale / 2,
+    clientY: y + control.stateHeight / 2,
+  };
+}
+
+function installCanvasStubs() {
+  globalThis.ImageData ??= class ImageData {
+    constructor(data, width, height) {
+      this.data = data;
+      this.width = width;
+      this.height = height;
+    }
+  };
+  globalThis.document ??= {
+    createElement(tagName) {
+      assert.equal(tagName, "canvas");
+      return {
+        width: 0,
+        height: 0,
+        getContext() {
+          return { putImageData() {} };
+        },
+      };
+    },
+  };
+}

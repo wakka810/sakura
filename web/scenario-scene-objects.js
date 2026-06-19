@@ -303,15 +303,25 @@ export function paintScenarioSceneObjects(context, canvas, state, now = performa
     const frameIndex = scenarioSceneObjectFrameIndex(object, now);
     const frameCount = object.animation?.frameCount ?? 1;
     const frameWidth = object.image.width / frameCount;
+    const logicalFrameWidth = imageLogicalWidth(object.image) / frameCount;
+    const logicalHeight = imageLogicalHeight(object.image);
     context.save();
     context.globalAlpha = object.alpha;
     context.globalCompositeOperation = sceneObjectCompositeOperation(object.blendMode);
-    drawSceneObjectFrame(context, canvas, object, frameIndex, frameWidth);
+    drawSceneObjectFrame(context, canvas, object, frameIndex, frameWidth, logicalFrameWidth, logicalHeight);
     context.restore();
   }
 }
 
-function drawSceneObjectFrame(context, canvas, object, frameIndex, frameWidth) {
+function drawSceneObjectFrame(
+  context,
+  canvas,
+  object,
+  frameIndex,
+  frameWidth,
+  logicalFrameWidth,
+  logicalHeight,
+) {
   const source = rgbaCanvas(object.image);
   const x = sceneObjectDestinationX(canvas, object);
   const y = Math.round(canvas.height / 2 + object.y - object.anchorY);
@@ -323,8 +333,8 @@ function drawSceneObjectFrame(context, canvas, object, frameIndex, frameWidth) {
       {
         alpha: object.alpha,
         cacheKey: object.maskCacheKey ?? object,
-        height: object.image.height,
-        width: frameWidth,
+        height: logicalHeight,
+        width: logicalFrameWidth,
         x,
         y,
       },
@@ -339,8 +349,8 @@ function drawSceneObjectFrame(context, canvas, object, frameIndex, frameWidth) {
     object.image.height,
     x,
     y,
-    frameWidth,
-    object.image.height,
+    logicalFrameWidth,
+    logicalHeight,
   );
 }
 
@@ -532,6 +542,18 @@ function rgbaCanvas(image) {
   );
   sceneObjectCanvasCache.set(image, scratch);
   return scratch;
+}
+
+function imageLogicalWidth(image) {
+  return Number.isFinite(image?.logicalWidth) && image.logicalWidth > 0
+    ? image.logicalWidth
+    : image?.width ?? 0;
+}
+
+function imageLogicalHeight(image) {
+  return Number.isFinite(image?.logicalHeight) && image.logicalHeight > 0
+    ? image.logicalHeight
+    : image?.height ?? 0;
 }
 
 function sceneObjectCompositeOperation(blendMode) {

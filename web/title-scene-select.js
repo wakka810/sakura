@@ -1,3 +1,4 @@
+import { bgiMinchoFont } from "./bgi-fonts.js";
 import { DEFAULT_SCENARIO_ROUTE } from "./scenario-routes.js";
 
 // omakescene._bp embeds these 5x4 scene-grid origins as immediate arrays.
@@ -195,7 +196,7 @@ export function paintTitleSceneSelect(context, canvas, state, buttons = {}, imag
     return false;
   }
   context.save();
-  context.font = "17px 'Noto Serif CJK JP', 'Yu Mincho', 'MS Mincho', serif";
+  context.font = bgiMinchoFont(17);
   context.textBaseline = "top";
   for (const choice of titleSceneChoices()) {
     paintSceneCell(
@@ -267,11 +268,14 @@ function drawTitleSceneThumbnail(context, image, rect, hovered) {
   const scratch = titleSceneImageScratch(image);
   const stateWidth = Math.floor(image.width / THUMBNAIL_STATE_COUNT);
   const sourceWidth = stateWidth > 0 ? stateWidth : image.width;
+  const logicalStateWidth = imageLogicalWidth(image) / THUMBNAIL_STATE_COUNT;
+  const logicalSourceWidth = stateWidth > 0 ? logicalStateWidth : imageLogicalWidth(image);
+  const logicalHeight = imageLogicalHeight(image);
   const state = hovered && image.width >= sourceWidth * THUMBNAIL_STATE_COUNT ? 2 : 1;
   const sourceX = Math.min(state, Math.max(0, Math.floor(image.width / sourceWidth) - 1)) * sourceWidth;
-  const scale = Math.min(rect.width / sourceWidth, rect.height / image.height);
-  const drawWidth = Math.max(1, Math.round(sourceWidth * scale));
-  const drawHeight = Math.max(1, Math.round(image.height * scale));
+  const scale = Math.min(rect.width / logicalSourceWidth, rect.height / logicalHeight);
+  const drawWidth = Math.max(1, Math.round(logicalSourceWidth * scale));
+  const drawHeight = Math.max(1, Math.round(logicalHeight * scale));
   const drawX = Math.round(rect.x + (rect.width - drawWidth) / 2);
   const drawY = Math.round(rect.y + (rect.height - drawHeight) / 2);
   context.fillStyle = "#000000";
@@ -292,12 +296,14 @@ function drawTitleSceneThumbnail(context, image, rect, hovered) {
 function paintBackButton(context, back, hovered) {
   if (back?.image) {
     const scratch = titleSceneImageScratch(back.image);
+    const sourceStateWidth = back.sourceStateWidth ?? back.stateWidth;
+    const sourceStateHeight = back.sourceStateHeight ?? back.image.height;
     context.drawImage(
       scratch,
-      (hovered ? 1 : 0) * back.stateWidth,
+      (hovered ? 1 : 0) * sourceStateWidth,
       0,
-      back.stateWidth,
-      back.stateHeight,
+      sourceStateWidth,
+      sourceStateHeight,
       BACK_X,
       BACK_Y,
       back.stateWidth,
@@ -331,4 +337,16 @@ function titleSceneImageScratch(image) {
   );
   image.__titleSceneScratch = scratch;
   return scratch;
+}
+
+function imageLogicalWidth(image) {
+  return Number.isFinite(image?.logicalWidth) && image.logicalWidth > 0
+    ? image.logicalWidth
+    : image?.width ?? 0;
+}
+
+function imageLogicalHeight(image) {
+  return Number.isFinite(image?.logicalHeight) && image.logicalHeight > 0
+    ? image.logicalHeight
+    : image?.height ?? 0;
 }

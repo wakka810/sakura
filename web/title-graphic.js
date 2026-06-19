@@ -1,3 +1,5 @@
+import { bgiMinchoFont } from "./bgi-fonts.js";
+
 export const TITLE_GRAPHIC_COLUMNS = 4;
 export const TITLE_GRAPHIC_ROWS = 2;
 export const TITLE_GRAPHIC_PAGE_SIZE = TITLE_GRAPHIC_COLUMNS * TITLE_GRAPHIC_ROWS;
@@ -23,7 +25,7 @@ const BUTTON_SHEET_STATES = 4;
 const PAGE_NUMBER_X = 1085;
 const PAGE_COUNT_X = 1164;
 const PAGE_NUMBER_Y = 662;
-const PAGE_FONT = "bold 25px 'Noto Serif CJK JP', 'Yu Mincho', 'MS Mincho', serif";
+const PAGE_FONT = bgiMinchoFont(25, "bold");
 const ASSET_DECODER = new TextDecoder("ascii", { fatal: false });
 
 const CHROME_ASSET_NAMES = Object.freeze([
@@ -653,7 +655,13 @@ function paintGraphicBackground(context, canvas, chromeCache) {
 function paintGraphicPageOverlay(context, chromeCache) {
   const overlay = chromeImage(chromeCache, "SGCG100000");
   if (overlay) {
-    context.drawImage(titleGraphicImageScratch(overlay), 0, 0, overlay.width, overlay.height);
+    context.drawImage(
+      titleGraphicImageScratch(overlay),
+      0,
+      0,
+      imageLogicalWidth(overlay),
+      imageLogicalHeight(overlay),
+    );
   }
 }
 
@@ -710,7 +718,7 @@ function paintGraphicViewer(context, canvas, state, imageCache) {
     return;
   }
   context.fillStyle = "rgba(255, 255, 255, 0.75)";
-  context.font = "24px 'Noto Serif CJK JP', 'Yu Mincho', 'MS Mincho', serif";
+  context.font = bgiMinchoFont(24);
   context.textAlign = "center";
   context.textBaseline = "middle";
   context.fillText("Now Loading", canvas.width / 2, canvas.height / 2);
@@ -725,22 +733,28 @@ function chromeImage(chromeCache, assetName) {
 }
 
 function drawContainedImage(context, image, x, y, width, height) {
-  const scale = Math.min(width / image.width, height / image.height);
-  const drawWidth = Math.max(1, Math.round(image.width * scale));
-  const drawHeight = Math.max(1, Math.round(image.height * scale));
+  const logicalWidth = imageLogicalWidth(image);
+  const logicalHeight = imageLogicalHeight(image);
+  const scale = Math.min(width / logicalWidth, height / logicalHeight);
+  const drawWidth = Math.max(1, Math.round(logicalWidth * scale));
+  const drawHeight = Math.max(1, Math.round(logicalHeight * scale));
   const drawX = Math.round(x + (width - drawWidth) / 2);
   const drawY = Math.round(y + (height - drawHeight) / 2);
   context.drawImage(titleGraphicImageScratch(image), drawX, drawY, drawWidth, drawHeight);
 }
 
 function drawTitleGraphicImage(context, image, assetName, x, y, width, height) {
-  if (/^ev_thum_\d+$/i.test(String(assetName ?? "")) && image.width >= 600 && image.height >= 113) {
+  const logicalWidth = imageLogicalWidth(image);
+  const logicalHeight = imageLogicalHeight(image);
+  if (/^ev_thum_\d+$/i.test(String(assetName ?? "")) && logicalWidth >= 600 && logicalHeight >= 113) {
+    const sourceScaleX = image.width / logicalWidth;
+    const sourceScaleY = image.height / logicalHeight;
     context.drawImage(
       titleGraphicImageScratch(image),
-      200,
+      Math.round(200 * sourceScaleX),
       0,
-      200,
-      113,
+      Math.round(200 * sourceScaleX),
+      Math.round(113 * sourceScaleY),
       x,
       y,
       width,
@@ -841,4 +855,16 @@ function titleGraphicImageScratch(image) {
   );
   image.__titleGraphicScratch = scratch;
   return scratch;
+}
+
+function imageLogicalWidth(image) {
+  return Number.isFinite(image?.logicalWidth) && image.logicalWidth > 0
+    ? image.logicalWidth
+    : image?.width ?? 0;
+}
+
+function imageLogicalHeight(image) {
+  return Number.isFinite(image?.logicalHeight) && image.logicalHeight > 0
+    ? image.logicalHeight
+    : image?.height ?? 0;
 }

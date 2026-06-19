@@ -1,7 +1,19 @@
+@font-face {
+  font-family: "Sakura MS Gothic";
+  src: url("/api/fonts/ms-gothic");
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Sakura MS Mincho";
+  src: url("/api/fonts/ms-mincho");
+  font-display: block;
+}
+
 :root {
   color-scheme: dark;
   font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    "Sakura MS Gothic", "MS Gothic", "Noto Sans CJK JP", sans-serif;
   background: #000;
   color: #e8eaf0;
 }
@@ -91,6 +103,126 @@ canvas:focus-visible,
   box-sizing: border-box;
   border-left: 1px solid #2b3038;
   background: #181b20;
+}
+
+.engine-manager {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 20;
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 12px;
+  border: 1px solid rgba(236, 240, 248, 0.28);
+  border-radius: 8px;
+  background: rgba(18, 21, 27, 0.94);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  color: #f0f3f8;
+  pointer-events: auto;
+}
+
+.engine-manager[hidden] {
+  display: none;
+}
+
+.engine-manager__header,
+.engine-manager__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.engine-manager__header {
+  margin-bottom: 12px;
+}
+
+.engine-manager__title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.engine-manager__close {
+  width: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 6px;
+  line-height: 1;
+}
+
+.engine-manager__tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.engine-manager__tab,
+.engine-manager__action {
+  min-height: 34px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.engine-manager__tab.is-active {
+  border-color: #f1f4fa;
+  background: #f1f4fa;
+}
+
+.engine-manager__content {
+  min-height: 210px;
+}
+
+.engine-manager__row {
+  min-height: 34px;
+  font-size: 13px;
+}
+
+.engine-manager__row select {
+  width: 138px;
+}
+
+.engine-manager__row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+}
+
+.engine-manager__kv {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.65fr) minmax(0, 1fr);
+  gap: 8px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.engine-manager__kv dt {
+  color: #aab1bd;
+}
+
+.engine-manager__kv dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.engine-manager__actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.engine-manager__status {
+  margin-top: 10px;
+  min-height: 16px;
+  color: #b6bfce;
+  font-size: 12px;
 }
 
 .status {

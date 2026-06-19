@@ -1,4 +1,5 @@
 const SFX_CHANNEL_COUNT = 9;
+const MEDIA_PLAY_SETTLE_TIMEOUT_MS = 500;
 
 export function createAudioMixer() {
   const state = {
@@ -7,6 +8,7 @@ export function createAudioMixer() {
     playAttempts: 0,
     playSuccess: 0,
     playBlocked: 0,
+    playTimeout: 0,
     firstSoundId: 0,
     lastSoundId: 0,
     firstOffset: 0,
@@ -14,20 +16,24 @@ export function createAudioMixer() {
     trackReady: 0,
     trackPlaySuccess: 0,
     trackPlayBlocked: 0,
+    trackPlayTimeout: 0,
     voiceReady: 0,
     voicePlaySuccess: 0,
     voicePlayBlocked: 0,
+    voicePlayTimeout: 0,
     voiceActiveChannels: 0,
     voiceLastChannel: 0,
     sfxReady: 0,
     sfxPlaySuccess: 0,
     sfxPlayBlocked: 0,
+    sfxPlayTimeout: 0,
     sfxActiveChannels: 0,
     sfxLastChannel: 0,
     sfxFadeMs: 0,
     loopSfxReady: 0,
     loopSfxPlaySuccess: 0,
     loopSfxPlayBlocked: 0,
+    loopSfxPlayTimeout: 0,
     loopSfxFadeMs: 0,
     loopSfxTargetVolume: 0,
     masterVolume: 1,
@@ -94,25 +100,19 @@ export function createAudioMixer() {
     async playFirstQueued() {
       state.playAttempts += 1;
       if (!audio || !state.ready) {
-        state.playBlocked += 1;
+        recordPlayResult(null, { ok: false, reason: "not_ready" });
         return { ok: false, reason: "not_ready" };
       }
-      try {
-        audio.currentTime = 0;
-        await audio.play();
-        state.playSuccess += 1;
-        return { ok: true, reason: "ok" };
-      } catch {
-        state.playBlocked += 1;
-        return { ok: false, reason: "blocked" };
-      }
+      audio.currentTime = 0;
+      const result = await playMediaElement(audio);
+      recordPlayResult(null, result);
+      return result;
     },
     async playTrack(ogg, { loop = true, volume = 1, fadeInMs = 0 } = {}) {
       state.playAttempts += 1;
       resetBgm();
       if (!configureBgm(ogg)) {
-        state.playBlocked += 1;
-        state.trackPlayBlocked += 1;
+        recordPlayResult("track", { ok: false, reason: "not_ready" });
         return { ok: false, reason: "not_ready" };
       }
       audio.loop = loop;
@@ -149,19 +149,14 @@ export function createAudioMixer() {
           }
         };
       }
-      try {
-        await audio.play();
-        state.playSuccess += 1;
-        state.trackPlaySuccess += 1;
+      const result = await playMediaElement(audio);
+      recordPlayResult("track", result);
+      if (result.ok || result.pending === true) {
         if (fadeDuration > 0) {
           rampBgmVolume(trackScriptVolume, fadeDuration, false);
         }
-        return { ok: true, reason: "ok" };
-      } catch {
-        state.playBlocked += 1;
-        state.trackPlayBlocked += 1;
-        return { ok: false, reason: "blocked" };
       }
+      return result;
     },
     async playVoice(ogg, { volume = 1, channel = 0 } = {}) {
       state.playAttempts += 1;
@@ -169,8 +164,7 @@ export function createAudioMixer() {
       resetVoiceChannel(channelIndex);
       const configured = configureAudioElement(ogg);
       if (!configured) {
-        state.playBlocked += 1;
-        state.voicePlayBlocked += 1;
+        recordPlayResult("voice", { ok: false, reason: "not_ready" });
         return { ok: false, reason: "not_ready" };
       }
       const slot = voiceChannels[channelIndex];
@@ -189,17 +183,12 @@ export function createAudioMixer() {
       };
       state.voiceLastChannel = channelIndex;
       updateVoiceState();
-      try {
-        await slot.audio.play();
-        state.playSuccess += 1;
-        state.voicePlaySuccess += 1;
-        return { ok: true, reason: "ok" };
-      } catch {
-        state.playBlocked += 1;
-        state.voicePlayBlocked += 1;
+      const result = await playMediaElement(slot.audio);
+      recordPlayResult("voice", result);
+      if (!result.ok) {
         resetVoiceChannel(channelIndex);
-        return { ok: false, reason: "blocked" };
       }
+      return result;
     },
     async playSfx(ogg, { volume = 1, channel = 0 } = {}) {
       state.playAttempts += 1;
@@ -207,8 +196,7 @@ export function createAudioMixer() {
       resetSfxChannel(channelIndex);
       const configured = configureAudioElement(ogg);
       if (!configured) {
-        state.playBlocked += 1;
-        state.sfxPlayBlocked += 1;
+        recordPlayResult("sfx", { ok: false, reason: "not_ready" });
         return { ok: false, reason: "not_ready" };
       }
       const slot = sfxChannels[channelIndex];
@@ -227,25 +215,19 @@ export function createAudioMixer() {
       };
       state.sfxLastChannel = channelIndex;
       updateSfxState();
-      try {
-        await slot.audio.play();
-        state.playSuccess += 1;
-        state.sfxPlaySuccess += 1;
-        return { ok: true, reason: "ok" };
-      } catch {
-        state.playBlocked += 1;
-        state.sfxPlayBlocked += 1;
+      const result = await playMediaElement(slot.audio);
+      recordPlayResult("sfx", result);
+      if (!result.ok) {
         resetSfxChannel(channelIndex);
-        return { ok: false, reason: "blocked" };
       }
+      return result;
     },
     async playLoopingSfx(ogg, { volume = 1 } = {}) {
       state.playAttempts += 1;
       resetLoopSfx();
       const configured = configureAudioElement(ogg);
       if (!configured) {
-        state.playBlocked += 1;
-        state.loopSfxPlayBlocked += 1;
+        recordPlayResult("loopSfx", { ok: false, reason: "not_ready" });
         return { ok: false, reason: "not_ready" };
       }
       loopSfxAudio = configured.audio;
@@ -257,16 +239,9 @@ export function createAudioMixer() {
       loopSfxAudio.volume = effectiveSfxVolume(loopSfxScriptVolume);
       state.loopSfxTargetVolume = loopSfxScriptVolume;
       state.loopSfxReady = 1;
-      try {
-        await loopSfxAudio.play();
-        state.playSuccess += 1;
-        state.loopSfxPlaySuccess += 1;
-        return { ok: true, reason: "ok" };
-      } catch {
-        state.playBlocked += 1;
-        state.loopSfxPlayBlocked += 1;
-        return { ok: false, reason: "blocked" };
-      }
+      const result = await playMediaElement(loopSfxAudio);
+      recordPlayResult("loopSfx", result);
+      return result;
     },
     fadeOut(durationMs) {
       return rampBgmVolume(0, durationMs, true);
@@ -426,6 +401,26 @@ export function createAudioMixer() {
       audio: element,
       url: URL.createObjectURL(new Blob([ogg], { type: "audio/ogg" })),
     };
+  }
+
+  function recordPlayResult(kind, result) {
+    if (result?.ok === true) {
+      state.playSuccess += 1;
+      if (kind) {
+        state[`${kind}PlaySuccess`] += 1;
+      }
+      return;
+    }
+    state.playBlocked += 1;
+    if (result?.reason === "timeout") {
+      state.playTimeout += 1;
+    }
+    if (kind) {
+      state[`${kind}PlayBlocked`] += 1;
+      if (result?.reason === "timeout") {
+        state[`${kind}PlayTimeout`] += 1;
+      }
+    }
   }
 
   function resetBgm() {
@@ -713,6 +708,37 @@ function clampDuration(value) {
 function clampSfxChannel(value) {
   const channel = Number.isInteger(value) ? value : 0;
   return Math.max(0, Math.min(channel, SFX_CHANNEL_COUNT - 1));
+}
+
+async function playMediaElement(audio) {
+  let playPromise = null;
+  try {
+    playPromise = audio.play();
+  } catch {
+    return { ok: false, reason: "blocked" };
+  }
+  if (!playPromise || typeof playPromise.then !== "function") {
+    return { ok: true, reason: "ok" };
+  }
+  let timeout = 0;
+  const guarded = Promise.resolve(playPromise).then(
+    () => ({ ok: true, reason: "ok" }),
+    () => ({ ok: false, reason: "blocked" }),
+  );
+  const timeoutPromise = new Promise((resolve) => {
+    timeout = globalThis.setTimeout(
+      () => resolve({ ok: false, reason: "timeout", pending: true }),
+      MEDIA_PLAY_SETTLE_TIMEOUT_MS,
+    );
+  });
+  const result = await Promise.race([guarded, timeoutPromise]);
+  if (timeout !== 0) {
+    globalThis.clearTimeout(timeout);
+  }
+  if (result.reason === "timeout") {
+    void guarded;
+  }
+  return result;
 }
 
 function startAudioVolumeRamp(audio, target, duration, isCurrent, setFrame, onComplete) {

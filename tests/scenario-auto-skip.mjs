@@ -80,20 +80,20 @@ try {
       player.configState.settings.skipMode = "all";
     }
   });
-  await page.keyboard.down("Control");
+  await page.keyboard.down("ControlRight");
   await page.waitForTimeout(1800);
   const keySkipHeld = await currentEventCount(page);
   assert.ok(
     keySkipHeld >= keySkipBefore + 10,
-    `held Ctrl skip did not advance enough messages: before=${keySkipBefore} after=${keySkipHeld}`,
+    `held Right Ctrl skip did not advance enough messages: before=${keySkipBefore} after=${keySkipHeld}`,
   );
-  await page.keyboard.up("Control");
+  await page.keyboard.up("ControlRight");
   const keySkipReleased = await currentEventCount(page);
   await page.waitForTimeout(300);
   assert.equal(
     await currentEventCount(page),
     keySkipReleased,
-    "held Ctrl skip kept advancing after keyup",
+    "held Right Ctrl skip kept advancing after keyup",
   );
   const modesAfterKeyup = await page.evaluate(() => {
     const state = window.__sakuraActiveInstall?.player?.safeState ?? {};

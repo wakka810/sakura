@@ -1,4 +1,5 @@
 import { readArc20EntryPayload } from "./local-catalog.js";
+import { loadImageRecord } from "./upscale-client.js";
 
 const TEXT_ENCODER = new TextEncoder();
 const BGI_STAGE_WIDTH = 1280;
@@ -675,7 +676,7 @@ function countReadyAssets(runtime, model) {
 
 function ensureGraphAsset(runtime, asset) {
   const state = ensureRuntimeAssetState(runtime);
-  const key = graphAssetKey(asset.archiveName, asset.entryName);
+  const key = graphAssetKey(runtime, asset.archiveName, asset.entryName);
   const cached = state.assets.get(key);
   if (cached) {
     return cached;
@@ -736,7 +737,7 @@ function ensureGraphNamedAsset(runtime, archiveName, entryName) {
     return null;
   }
   const state = ensureRuntimeAssetState(runtime);
-  const key = graphAssetKey(archiveName || "*", entryName);
+  const key = graphAssetKey(runtime, archiveName || "*", entryName);
   const cached = state.assets.get(key);
   if (cached) {
     return cached;
@@ -775,12 +776,7 @@ async function loadGraphArchiveOffsetAsset(runtime, archiveOffset, key, state) {
 
 async function loadGraphNamedAsset(runtime, archiveName, entryName, key, state) {
   try {
-    const fallback = await resolveNamedGraphPayload(runtime, archiveName, entryName);
-    if (!(fallback instanceof Uint8Array)) {
-      state.assets.set(key, { ready: false, source: null });
-      return;
-    }
-    const rgba = decodeRuntimeImage(runtime, fallback);
+    const rgba = await loadNamedGraphImage(runtime, archiveName, entryName);
     if (rgba === null) {
       state.assets.set(key, { ready: false, source: null });
       return;
@@ -797,6 +793,33 @@ async function loadGraphNamedAsset(runtime, archiveName, entryName, key, state) 
     state.inflight.delete(key);
     runtime.requestPaint?.();
   }
+}
+
+async function loadNamedGraphImage(runtime, archiveName, entryName) {
+  const record = resolveNamedGraphRecord(runtime, archiveName, entryName);
+  if (record) {
+    return await loadImageRecord(runtime.catalog, runtime.core, record, {
+      cache: runtime.imageCache,
+      cacheLimit: runtime.imageCacheLimit,
+      role: "visible",
+      settings: runtime.upscaleSettings,
+      onReady: () => runtime.requestPaint?.(),
+    });
+  }
+  const fallback = await resolveNamedGraphPayload(runtime, archiveName, entryName);
+  return fallback instanceof Uint8Array ? decodeRuntimeImage(runtime, fallback) : null;
+}
+
+function resolveNamedGraphRecord(runtime, archiveName, entryName) {
+  const entryBytes = TEXT_ENCODER.encode(entryName);
+  const archiveBytes = archiveName ? TEXT_ENCODER.encode(archiveName) : null;
+  if (archiveBytes) {
+    const direct = runtime.catalog.findByArchiveAndNameBytes?.(archiveBytes, entryBytes);
+    if (direct) {
+      return direct;
+    }
+  }
+  return runtime.catalog.findByNameBytes?.(entryBytes) ?? null;
 }
 
 async function resolveNamedGraphPayload(runtime, archiveName, entryName) {
@@ -844,15 +867,7 @@ async function readArchiveOffsetPayload(runtime, archiveOffset) {
 
 async function loadGraphAsset(runtime, asset, key, state) {
   try {
-    const payload = await runtime.catalog.readPayloadByArchiveAndNameBytes(
-      TEXT_ENCODER.encode(asset.archiveName),
-      TEXT_ENCODER.encode(asset.entryName),
-    ) ?? await runtime.catalog.readPayloadByNameBytes(TEXT_ENCODER.encode(asset.entryName));
-    if (!(payload instanceof Uint8Array)) {
-      state.assets.set(key, { ready: false, source: null });
-      return;
-    }
-    const rgba = decodeRuntimeImage(runtime, payload);
+    const rgba = await loadNamedGraphImage(runtime, asset.archiveName, asset.entryName);
     if (rgba === null) {
       state.assets.set(key, { ready: false, source: null });
       return;
@@ -880,8 +895,18 @@ function ensureRuntimeAssetState(runtime) {
   return state;
 }
 
-function graphAssetKey(archiveName, entryName) {
-  return `${archiveName.toLowerCase()}\u0000${entryName.toLowerCase()}`;
+function graphAssetKey(runtime, archiveName, entryName) {
+  return `${runtimeAssetSettingsKey(runtime)}\u0000${archiveName.toLowerCase()}\u0000${entryName.toLowerCase()}`;
+}
+
+function runtimeAssetSettingsKey(runtime) {
+  const settings = runtime?.upscaleSettings ?? {};
+  return [
+    settings.upscaleEnabled === true ? 1 : 0,
+    settings.upscaleScale ?? 1,
+    settings.upscaleModel ?? "",
+    settings.upscaleQualityMode ?? "",
+  ].join(":");
 }
 
 function decodeRuntimeImage(runtime, payload) {

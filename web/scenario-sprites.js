@@ -500,8 +500,10 @@ function drawSpriteLayer(
   const centerX = layer.x === null
     ? spriteCenterX(canvas.width, layer.slot)
     : canvas.width / 2 + layer.x;
-  const x = Math.round(centerX - image.width / 2 + (offset?.x ?? 0));
-  const y = Math.round(canvas.height - image.height + layer.y + (offset?.y ?? 0));
+  const logicalWidth = imageLogicalWidth(image);
+  const logicalHeight = imageLogicalHeight(image);
+  const x = Math.round(centerX - logicalWidth / 2 + (offset?.x ?? 0));
+  const y = Math.round(canvas.height - logicalHeight + layer.y + (offset?.y ?? 0));
   if (transitionMap) {
     paintMappedTransition(
       context,
@@ -511,8 +513,8 @@ function drawSpriteLayer(
       {
         alpha: layer.alpha,
         cacheKey: transitionMap.transition,
-        height: image.height,
-        width: image.width,
+        height: logicalHeight,
+        width: logicalWidth,
         x,
         y,
       },
@@ -521,7 +523,7 @@ function drawSpriteLayer(
   }
   context.save();
   context.globalAlpha = clampUnit(layer.alpha * transitionAlpha);
-  context.drawImage(rgbaCanvas(image), x, y);
+  context.drawImage(rgbaCanvas(image), x, y, logicalWidth, logicalHeight);
   context.restore();
 }
 
@@ -546,6 +548,18 @@ function rgbaCanvas(image) {
   );
   spriteCanvasCache.set(image, scratch);
   return scratch;
+}
+
+function imageLogicalWidth(image) {
+  return Number.isFinite(image?.logicalWidth) && image.logicalWidth > 0
+    ? image.logicalWidth
+    : image?.width ?? 0;
+}
+
+function imageLogicalHeight(image) {
+  return Number.isFinite(image?.logicalHeight) && image.logicalHeight > 0
+    ? image.logicalHeight
+    : image?.height ?? 0;
 }
 
 function clampUnit(value) {

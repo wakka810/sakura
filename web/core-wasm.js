@@ -888,7 +888,7 @@ function writeFixedPacket(exports, payload, packetLength, writer, parser) {
   }
 }
 
-function parseRgbaPacket(packet) {
+export function parseRgbaPacket(packet) {
   const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
   const width = view.getUint32(0, true);
   const height = view.getUint32(4, true);
@@ -898,7 +898,7 @@ function parseRgbaPacket(packet) {
     throw new Error("invalid RGBA packet length");
   }
   const pixels = packet.slice(16, 16 + byteLength);
-  return { width, height, stride, pixels };
+  return { width, height, stride, pixels, logicalWidth: width, logicalHeight: height };
 }
 
 function parseScenarioSessionStepPacket(packet) {

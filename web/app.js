@@ -1,8 +1,15 @@
 import { createInputController } from "./input.js";
+import {
+  BGI_GOTHIC_FAMILY,
+  BGI_MINCHO_FAMILY,
+  bgiGothicFont,
+  bgiMinchoFont,
+} from "./bgi-fonts.js";
 import { createCore, loadCore } from "./core-wasm.js";
 import {
   mountLocalInstall,
   mountServerInstall,
+  refreshMountedImageAssets,
   syncMountedAudioState,
 } from "./install-runtime.js";
 import { formatInstallSummary } from "./install-summary.js";
@@ -10,6 +17,7 @@ import {
   bindScenarioPlayerInput,
   paintScenarioOverlay,
   paintScenarioScene,
+  readScenarioQuickSaveSummary,
   readScenarioSaveSlotSummary,
   scenarioScreenOffset,
 } from "./session-player.js";
@@ -43,9 +51,11 @@ import {
   createScenarioUserDataState,
   openScenarioUserDataWindow,
   paintScenarioUserDataWindow,
+  resolveUserDataPreviewImage,
   scenarioUserDataControlAt,
   userDataHoverKey,
   USER_DATA_SLOTS_PER_PAGE,
+  USER_DATA_TOTAL_PAGES,
 } from "./scenario-userdata-window.js";
 import {
   applyTitleSceneControl,
@@ -88,12 +98,26 @@ import {
 import { scenarioSequenceForRoute } from "./scenario-routes.js";
 import { loadViewedData } from "./viewed-data.js";
 import {
+  readTitleClearState,
   normalizeTitleMenuMode,
   titleExtraUnlocked,
   titleMenuControls,
   TITLE_MENU_MODE_EXTRA,
   TITLE_MENU_MODE_MAIN,
 } from "./title-menu.js";
+import {
+  loadImageAsset,
+  normalizeUpscaleSettings,
+  readStoredUpscaleSettings,
+  storeUpscaleSettings,
+} from "./upscale-client.js";
+import {
+  captureLocalStorageSnapshot,
+  loadCloudStateSnapshot,
+  restoreLocalStorageSnapshot,
+  saveCloudStateSnapshot,
+} from "./cloud-state.js";
+import { createEngineManagementOverlay } from "./engine-management-overlay.js";
 
 const statusEl = document.querySelector("#core-status");
 const outputEl = document.querySelector("#probe-output");
@@ -104,6 +128,22 @@ const playAudioButton = document.querySelector("#play-audio");
 const installFilesInput = document.querySelector("#install-files");
 const canvas = document.querySelector("#stage");
 const context = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
+const STAGE_LOGICAL_WIDTH = 1280;
+const STAGE_LOGICAL_HEIGHT = 720;
+const scenarioLogicalCanvas = {
+  get width() {
+    return STAGE_LOGICAL_WIDTH;
+  },
+  get height() {
+    return STAGE_LOGICAL_HEIGHT;
+  },
+  get dataset() {
+    return canvas.dataset;
+  },
+  getBoundingClientRect() {
+    return canvas.getBoundingClientRect();
+  },
+};
 const runtimeDiagnosticsEnabled =
   new URLSearchParams(window.location.search).get("debug") === "1";
 document.documentElement.dataset.runtimeDiagnostics = String(runtimeDiagnosticsEnabled);
@@ -131,6 +171,35 @@ const input = createInputController(canvas, {
   keyboardTarget: window,
   onChange: publishRuntimeState,
 });
+const engineManager = createEngineManagementOverlay({
+  upscaleSettings: readStoredUpscaleSettings(),
+  onUpscaleChange: (settings) => {
+    storeUpscaleSettings(settings);
+    applyUpscaleSettingsToMounted(activeInstall, settings, { refresh: true });
+    publishRuntimeState(true);
+  },
+  onCloudSave: saveCloudRuntimeState,
+  onCloudLoad: () => loadCloudRuntimeState({ reload: true }),
+  onCloudRefresh: refreshCloudRuntimeState,
+  readSystemInfo: readEngineManagerInfo,
+});
+document.body.append(engineManager.element);
+exposeEngineManagerDebug();
+void preloadBgiFonts();
+
+async function preloadBgiFonts() {
+  if (typeof document.fonts?.load !== "function") {
+    return;
+  }
+  await Promise.allSettled([
+    document.fonts.load(`20px ${BGI_GOTHIC_FAMILY}`),
+    document.fonts.load(`20px ${BGI_MINCHO_FAMILY}`),
+  ]);
+  if (activeInstall) {
+    paintMountedFrame(activeInstall);
+    publishRuntimeState();
+  }
+}
 
 function isCurrentInstall(mounted) {
   return mounted !== null
@@ -139,10 +208,213 @@ function isCurrentInstall(mounted) {
     && activeInstall === mounted;
 }
 
+function configureStageCanvasForMounted(mounted) {
+  const scale = stageBackingScaleForMounted(mounted);
+  const width = STAGE_LOGICAL_WIDTH * scale;
+  const height = STAGE_LOGICAL_HEIGHT * scale;
+  canvas.dataset.logicalWidth = String(STAGE_LOGICAL_WIDTH);
+  canvas.dataset.logicalHeight = String(STAGE_LOGICAL_HEIGHT);
+  canvas.dataset.backingScale = String(scale);
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  return scale;
+}
+
+function stageBackingScaleForMounted(mounted) {
+  const settings = mountedUpscaleSettings(mounted);
+  if (settings.upscaleEnabled !== true) {
+    return 1;
+  }
+  const scale = Number.parseInt(settings.upscaleScale ?? "2", 10);
+  return scale === 2 ? 2 : 1;
+}
+
+function mountedUpscaleSettings(mounted) {
+  return normalizeUpscaleSettings(mounted?.upscaleSettings ?? engineManager.settings);
+}
+
+function applyUpscaleSettingsToMounted(mounted, settings, options = {}) {
+  if (!mounted || mounted.destroyed === true) {
+    return;
+  }
+  const normalized = normalizeUpscaleSettings(settings);
+  const previous = JSON.stringify(mounted.upscaleSettings ?? null);
+  mounted.upscaleSettings = normalized;
+  mounted.safeState.upscaleEnabled = Number(normalized.upscaleEnabled === true);
+  mounted.safeState.upscaleScale = normalized.upscaleScale;
+  mounted.safeState.upscaleModel = normalized.upscaleModel;
+  mounted.safeState.upscaleQualityMode = normalized.upscaleQualityMode;
+  const changed = previous !== JSON.stringify(normalized);
+  mounted.player?.applyUpscaleSettings?.(normalized, {
+    refresh: options.refresh === true && changed,
+  });
+  mounted.graphRuntime = null;
+  if (options.refresh === true && changed) {
+    mounted.sharedImageAssetCache?.clear?.();
+    mounted.titleGraphicImageCache?.clear?.();
+    mounted.titleSceneImageCache?.clear?.();
+    mounted.titleGraphicChromeCache?.clear?.();
+    mounted.userDataThumbnailCache?.clear?.();
+    prepareTitleGraphicPage(mounted);
+    prepareTitleGraphicChrome(mounted);
+    prepareTitleSceneThumbnails(mounted);
+  }
+  if (normalized.upscaleEnabled === true || (options.refresh === true && changed)) {
+    void refreshMountedChromeAssets(mounted, normalized);
+  }
+  if (isCurrentInstall(mounted)) {
+    paintMountedFrame(mounted);
+    publishRuntimeState(true);
+  }
+}
+
+function refreshMountedChromeAssets(mounted, settings) {
+  return refreshMountedImageAssets(mounted, settings, {
+    onReady: () => {
+      if (!isCurrentInstall(mounted)) {
+        return;
+      }
+      void refreshMountedChromeAssets(mounted, settings);
+      paintMountedFrame(mounted);
+      publishRuntimeState(true);
+    },
+  }).then((updated) => {
+    if (updated && isCurrentInstall(mounted)) {
+      mounted.__bootPhases = null;
+      paintMountedFrame(mounted);
+      publishRuntimeState(true);
+    }
+    return updated;
+  }).catch(() => false);
+}
+
 function exposeActiveInstallDebug() {
   globalThis.__sakuraActiveInstall = activeInstall;
   if (globalThis.window) {
     window.__sakuraActiveInstall = activeInstall;
+  }
+}
+
+function exposeEngineManagerDebug() {
+  const saveCloud = () => saveCloudRuntimeState();
+  const loadCloud = (options = {}) => loadCloudRuntimeState(options);
+  const refreshCloud = () => refreshCloudRuntimeState();
+  globalThis.__sakuraEngineManager = engineManager;
+  globalThis.sakuraSaveCloudState = saveCloud;
+  globalThis.__sakuraSaveCloudState = saveCloud;
+  globalThis.sakuraLoadCloudState = loadCloud;
+  globalThis.__sakuraLoadCloudState = loadCloud;
+  globalThis.sakuraRefreshCloudState = refreshCloud;
+  globalThis.__sakuraRefreshCloudState = refreshCloud;
+  if (globalThis.window) {
+    window.__sakuraEngineManager = engineManager;
+    window.sakuraSaveCloudState = saveCloud;
+    window.__sakuraSaveCloudState = saveCloud;
+    window.sakuraLoadCloudState = loadCloud;
+    window.__sakuraLoadCloudState = loadCloud;
+    window.sakuraRefreshCloudState = refreshCloud;
+    window.__sakuraRefreshCloudState = refreshCloud;
+  }
+}
+
+async function saveCloudRuntimeState() {
+  const snapshot = captureLocalStorageSnapshot();
+  return await saveCloudStateSnapshot(snapshot);
+}
+
+async function loadCloudRuntimeState(options = {}) {
+  const snapshot = await loadCloudStateSnapshot();
+  if (!snapshot) {
+    return { ok: false, reason: "cloud_state_missing", restoredKeyCount: 0, metadata: null };
+  }
+  const restore = restoreLocalStorageSnapshot(snapshot);
+  if (options.reload !== false) {
+    window.setTimeout(() => window.location.reload(), 250);
+  }
+  return {
+    ok: true,
+    reason: "ok",
+    restoredKeyCount: restore.keyCount,
+    metadata: snapshot.metadata,
+  };
+}
+
+async function refreshCloudRuntimeState() {
+  const snapshot = await loadCloudStateSnapshot();
+  return snapshot ? { ok: true, metadata: snapshot.metadata } : { ok: false, metadata: null };
+}
+
+function readEngineManagerInfo() {
+  const mounted = activeInstall;
+  const player = mounted?.player ?? null;
+  const progress = readProgressSummary();
+  const scale = canvas.dataset.backingScale ?? "1";
+  const settings = mountedUpscaleSettings(mounted);
+  return {
+    progress,
+    system: {
+      mounted: mounted?.destroyed !== true && mounted !== null,
+      stage: mounted?.stage ?? "",
+      scenarioName: player?.safeState?.scenarioName ?? "",
+      scenarioRoute: player?.safeState?.scenarioRoute ?? "",
+      eventCount: player?.event?.eventCount ?? 0,
+      canvas: `${canvas.width}x${canvas.height} @${scale}x`,
+      audioQueued: mounted?.safeState?.entrySoundQueue?.recorded ?? 0,
+      runtimeReady: mounted?.safeState?.runtimeSession?.ready === true,
+      upscale: settings.upscaleEnabled
+        ? `${settings.upscaleScale}x ${settings.upscaleModel} ${settings.upscaleQualityMode}`
+        : "Off",
+    },
+  };
+}
+
+function readProgressSummary() {
+  const totalSlots = USER_DATA_TOTAL_PAGES * USER_DATA_SLOTS_PER_PAGE;
+  let saveSlotCount = 0;
+  for (let slot = 0; slot < totalSlots; slot += 1) {
+    if (readScenarioSaveSlotSummary(slot).exists) {
+      saveSlotCount += 1;
+    }
+  }
+  const quickSave = readScenarioQuickSaveSummary();
+  const titleClear = readTitleClearState();
+  const viewed = loadViewedData();
+  const readEventCount = readScenarioReadEventCount();
+  const storage = safeLocalStorageMetadata();
+  return {
+    saveSlotCount,
+    saveSlotTotal: totalSlots,
+    quickSaveExists: quickSave.exists === true,
+    titleClearRouteCount: Object.keys(titleClear.routes ?? {}).length,
+    readEventCount,
+    viewed: {
+      cg: viewed.cg?.size ?? 0,
+      bgm: viewed.bgm?.size ?? 0,
+      scene: viewed.scene?.size ?? 0,
+      movie: viewed.movie?.size ?? 0,
+    },
+    localStorageKeyCount: storage.keyCount,
+    localStorageBytes: storage.byteLength,
+  };
+}
+
+function readScenarioReadEventCount() {
+  try {
+    const encoded = window.localStorage?.getItem("sakura.read.events.v1");
+    const parsed = encoded ? JSON.parse(encoded) : null;
+    return Array.isArray(parsed?.keys) ? parsed.keys.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function safeLocalStorageMetadata() {
+  try {
+    return captureLocalStorageSnapshot().metadata;
+  } catch {
+    return { keyCount: 0, byteLength: 0 };
   }
 }
 
@@ -768,6 +1040,13 @@ window.addEventListener("keydown", (event) => {
   event.stopImmediatePropagation();
 }, true);
 window.addEventListener("keydown", (event) => {
+  if (event.code === "ControlLeft" && !event.repeat) {
+    engineManager.toggle();
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+}, true);
+window.addEventListener("keydown", (event) => {
   const mounted = activeInstall;
   const titleMusicKeys = new Set(["ArrowLeft", "ArrowRight", "PageUp", "PageDown"]);
   const titleGraphicKeys = new Set(["ArrowLeft", "ArrowRight", "PageUp", "PageDown"]);
@@ -852,6 +1131,7 @@ async function probeSelectedInstallFiles() {
   if (serial === installProbeSerial) {
     activeInstall?.destroy?.();
     activeInstall = mounted;
+    applyUpscaleSettingsToMounted(activeInstall, engineManager.settings, { refresh: false });
     exposeActiveInstallDebug();
     bindRuntimeSessionControls();
     paintMountedFrame(activeInstall);
@@ -1363,6 +1643,7 @@ async function bootServerInstall() {
   }
   activeInstall?.destroy?.();
   activeInstall = mounted;
+  applyUpscaleSettingsToMounted(activeInstall, engineManager.settings, { refresh: false });
   exposeActiveInstallDebug();
   if (activeInstall?.summary) {
     activeInstall.summary.localSystemRuntimeTimingStage = 104;
@@ -1374,12 +1655,14 @@ async function bootServerInstall() {
   renderInstallSummaryText(mounted.summary, true);
 }
 
-function titleLayout(image) {
-  const scale = Math.min(canvas.width / image.width, canvas.height / image.height);
-  const w = Math.round(image.width * scale);
-  const h = Math.round(image.height * scale);
-  const x = Math.floor((canvas.width - w) / 2);
-  const y = Math.floor((canvas.height - h) / 2);
+function titleLayout(image, stageCanvas = scenarioLogicalCanvas) {
+  const logicalWidth = imageLogicalWidth(image);
+  const logicalHeight = imageLogicalHeight(image);
+  const scale = Math.min(stageCanvas.width / logicalWidth, stageCanvas.height / logicalHeight);
+  const w = Math.round(logicalWidth * scale);
+  const h = Math.round(logicalHeight * scale);
+  const x = Math.floor((stageCanvas.width - w) / 2);
+  const y = Math.floor((stageCanvas.height - h) / 2);
   return { x, y, w, h };
 }
 
@@ -1729,9 +2012,19 @@ function applyTitleConfigClick(mounted, clientX, clientY) {
 function canvasPointFromClient(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
   return {
-    x: (clientX - rect.left) * (canvas.width / rect.width),
-    y: (clientY - rect.top) * (canvas.height / rect.height),
+    x: (clientX - rect.left) * (canvasLogicalWidth() / rect.width),
+    y: (clientY - rect.top) * (canvasLogicalHeight() / rect.height),
   };
+}
+
+function canvasLogicalWidth() {
+  const value = Number.parseInt(canvas.dataset.logicalWidth ?? "", 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : canvas.width;
+}
+
+function canvasLogicalHeight() {
+  const value = Number.parseInt(canvas.dataset.logicalHeight ?? "", 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : canvas.height;
 }
 
 function ensureTitleUserDataState(mounted) {
@@ -1789,12 +2082,26 @@ function titleUserDataSlotRecords(mounted) {
     { length: USER_DATA_SLOTS_PER_PAGE },
     (_, index) => {
       const summary = readScenarioSaveSlotSummary(start + index);
-      if (summary.exists && summary.backgroundName) {
+      if (summary.exists && summary.previewDataUrl) {
+        summary.thumbnail = resolveTitleUserDataPreviewThumbnail(mounted, summary.previewDataUrl);
+      } else if (summary.exists && summary.backgroundName) {
         summary.thumbnail = resolveTitleUserDataThumbnail(mounted, summary.backgroundName);
       }
       return summary;
     },
   );
+}
+
+function resolveTitleUserDataPreviewThumbnail(mounted, dataUrl) {
+  if (!mounted.userDataPreviewThumbnailCache) {
+    mounted.userDataPreviewThumbnailCache = new Map();
+  }
+  return resolveUserDataPreviewImage(dataUrl, mounted.userDataPreviewThumbnailCache, () => {
+    if (isCurrentInstall(mounted) && titleUserDataIsOpen(mounted)) {
+      paintMountedFrame(mounted);
+      publishRuntimeState();
+    }
+  });
 }
 
 // Decode the saved scene CG into a thumbnail for the title-screen Load window,
@@ -1815,10 +2122,13 @@ function resolveTitleUserDataThumbnail(mounted, assetName) {
   void (async () => {
     let image = null;
     try {
-      const payload = await mounted.catalog?.readPayloadByNameBytes?.(
-        assetNameEncoder.encode(assetName),
-      );
-      image = payload ? mounted.core?.imageRgba?.(payload) ?? null : null;
+      image = await loadMountedImageAsset(mounted, assetName, "visible", (readyImage) => {
+        cache.set(assetName, { status: "ready", image: readyImage });
+        if (isCurrentInstall(mounted) && titleUserDataIsOpen(mounted)) {
+          paintMountedFrame(mounted);
+          publishRuntimeState();
+        }
+      });
     } catch {
       image = null;
     }
@@ -2030,6 +2340,36 @@ function prepareTitleGraphicChrome(mounted) {
   }
 }
 
+async function loadMountedImageAsset(mounted, assetName, role, onReady) {
+  if (!mounted?.catalog || !mounted?.core) {
+    return null;
+  }
+  if (!mounted.sharedImageAssetCache) {
+    mounted.sharedImageAssetCache = new Map();
+  }
+  const settings = mountedUpscaleSettings(mounted);
+  const settingsKey = JSON.stringify(settings);
+  return await loadImageAsset(mounted.catalog, mounted.core, assetNameEncoder.encode(assetName), {
+    cache: mounted.sharedImageAssetCache,
+    cacheLimit: 96,
+    role,
+    settings,
+    isStillWanted: () => !mounted.destroyed
+      && isCurrentInstall(mounted)
+      && JSON.stringify(mountedUpscaleSettings(mounted)) === settingsKey,
+    onReady: (_cacheKey, readyImage) => {
+      if (!isCurrentInstall(mounted)) {
+        return;
+      }
+      if (JSON.stringify(mountedUpscaleSettings(mounted)) !== settingsKey) {
+        return;
+      }
+      onReady?.(readyImage);
+      publishRuntimeState(true);
+    },
+  });
+}
+
 async function loadTitleGraphicChromeImage(mounted, assetName) {
   if (!/^[A-Za-z0-9_]+$/.test(String(assetName ?? ""))) {
     return null;
@@ -2046,8 +2386,10 @@ async function loadTitleGraphicChromeImage(mounted, assetName) {
   }
   const promise = (async () => {
     try {
-      const payload = await mounted.catalog?.readPayloadByNameBytes?.(assetNameEncoder.encode(assetName));
-      const image = payload ? mounted.core?.imageRgba?.(payload) ?? null : null;
+      const image = await loadMountedImageAsset(mounted, assetName, "ui", (readyImage) => {
+        mounted.titleGraphicChromeCache.set(assetName, { status: "ready", image: readyImage });
+        paintMountedFrame(mounted);
+      });
       mounted.titleGraphicChromeCache.set(assetName, {
         status: image ? "ready" : "missing",
         image,
@@ -2078,8 +2420,10 @@ async function loadTitleGraphicImage(mounted, assetName) {
   }
   const promise = (async () => {
     try {
-      const payload = await mounted.catalog?.readPayloadByNameBytes?.(assetNameEncoder.encode(assetName));
-      const image = payload ? mounted.core?.imageRgba?.(payload) ?? null : null;
+      const image = await loadMountedImageAsset(mounted, assetName, "visible", (readyImage) => {
+        mounted.titleGraphicImageCache.set(assetName, { status: "ready", image: readyImage });
+        paintMountedFrame(mounted);
+      });
       mounted.titleGraphicImageCache.set(assetName, {
         status: image ? "ready" : "missing",
         image,
@@ -2187,8 +2531,10 @@ async function loadTitleSceneImage(mounted, assetName) {
   }
   const promise = (async () => {
     try {
-      const payload = await mounted.catalog?.readPayloadByNameBytes?.(assetNameEncoder.encode(assetName));
-      const image = payload ? mounted.core?.imageRgba?.(payload) ?? null : null;
+      const image = await loadMountedImageAsset(mounted, assetName, "visible", (readyImage) => {
+        mounted.titleSceneImageCache.set(assetName, { status: "ready", image: readyImage });
+        paintMountedFrame(mounted);
+      });
       mounted.titleSceneImageCache.set(assetName, {
         status: image ? "ready" : "missing",
         image,
@@ -2515,15 +2861,27 @@ function imageScratch(image) {
   return c;
 }
 
-function paintTitleScreen(mounted) {
+function imageLogicalWidth(image) {
+  return Number.isFinite(image?.logicalWidth) && image.logicalWidth > 0
+    ? image.logicalWidth
+    : image?.width ?? 0;
+}
+
+function imageLogicalHeight(image) {
+  return Number.isFinite(image?.logicalHeight) && image.logicalHeight > 0
+    ? image.logicalHeight
+    : image?.height ?? 0;
+}
+
+function paintTitleScreen(mounted, stageCanvas = scenarioLogicalCanvas) {
   const image = mounted.titleImage;
   context.fillStyle = "#000";
-  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillRect(0, 0, stageCanvas.width, stageCanvas.height);
   context.save();
   context.globalAlpha = stageFadeAlpha;
-  const { x, y, w, h } = titleLayout(image);
+  const { x, y, w, h } = titleLayout(image, stageCanvas);
   context.drawImage(imageScratch(image), x, y, w, h);
-  const scale = w / image.width;
+  const scale = w / imageLogicalWidth(image);
   if (!titleGraphicIsOpen(mounted) && !titleSceneIsOpen(mounted) && !titleMusicIsOpen(mounted)) {
     const controls = currentTitleMenuControls(mounted);
     for (let i = 0; i < controls.length; i += 1) {
@@ -2531,12 +2889,14 @@ function paintTitleScreen(mounted) {
       const button = mounted.titleButtonSprites?.[control.sprite] ?? null;
       if (button?.image) {
         const state = !control.enabled ? 3 : (mounted.hoverIndex === i ? 1 : 0);
+        const sourceStateWidth = button.sourceStateWidth ?? button.stateWidth;
+        const sourceStateHeight = button.sourceStateHeight ?? button.image.height;
         context.drawImage(
           imageScratch(button.image),
-          state * button.stateWidth,
+          state * sourceStateWidth,
           0,
-          button.stateWidth,
-          button.stateHeight,
+          sourceStateWidth,
+          sourceStateHeight,
           Math.round(x + control.x * scale),
           Math.round(y + control.y * scale),
           button.stateWidth * scale,
@@ -2550,15 +2910,15 @@ function paintTitleScreen(mounted) {
   context.restore();
   paintScenarioUserDataWindow(
     context,
-    canvas,
+    stageCanvas,
     mounted.userDataWindow,
     mounted.titleUserDataState,
     titleUserDataIsOpen(mounted) ? titleUserDataSlotRecords(mounted) : [],
   );
-  paintScenarioConfigWindow(context, canvas, mounted.configWindow, mounted.titleConfigState);
+  paintScenarioConfigWindow(context, stageCanvas, mounted.configWindow, mounted.titleConfigState);
   paintTitleGraphic(
     context,
-    canvas,
+    stageCanvas,
     mounted.titleGraphicState,
     mountedTitleGraphicAssets(mounted),
     mounted.titleButtonSprites,
@@ -2567,14 +2927,14 @@ function paintTitleScreen(mounted) {
   );
   paintTitleSceneSelect(
     context,
-    canvas,
+    stageCanvas,
     mounted.titleSceneState,
     mounted.titleButtonSprites,
     mounted.titleSceneImageCache,
     mounted.titleSceneLockedSet,
   );
-  paintTitleMusic(context, canvas, mounted.titleMusicState, mounted.titleButtonSprites, mounted.titleMusicSprites);
-  paintScenarioDialogWindow(context, canvas, mounted.dialogWindow, mounted.dialogState);
+  paintTitleMusic(context, stageCanvas, mounted.titleMusicState, mounted.titleButtonSprites, mounted.titleMusicSprites);
+  paintScenarioDialogWindow(context, stageCanvas, mounted.dialogWindow, mounted.dialogState);
   stageNonBlackSampleCount = 1;
 }
 
@@ -2582,10 +2942,10 @@ function titleMenuHit(mounted, clientX, clientY) {
   const image = mounted.titleImage;
   if (!image) return -1;
   const rect = canvas.getBoundingClientRect();
-  const px = (clientX - rect.left) * (canvas.width / rect.width);
-  const py = (clientY - rect.top) * (canvas.height / rect.height);
-  const { x, y, w, h } = titleLayout(image);
-  const scale = w / image.width;
+  const px = (clientX - rect.left) * (canvasLogicalWidth() / rect.width);
+  const py = (clientY - rect.top) * (canvasLogicalHeight() / rect.height);
+  const { x, y, w } = titleLayout(image, scenarioLogicalCanvas);
+  const scale = w / imageLogicalWidth(image);
   const controls = currentTitleMenuControls(mounted);
   for (let i = controls.length - 1; i >= 0; i -= 1) {
     const control = controls[i];
@@ -2610,7 +2970,7 @@ function currentTitleMenuControls(mounted) {
 
 function paintFallbackTitleButton(ctx, control, hovered, x, y, scale) {
   ctx.save();
-  ctx.font = "bold 36px 'Times New Roman', serif";
+  ctx.font = bgiMinchoFont(36, "bold");
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
   ctx.fillStyle = control.enabled ? (hovered ? "#dcefff" : "#ffffff") : "rgba(255,255,255,0.42)";
@@ -2618,7 +2978,7 @@ function paintFallbackTitleButton(ctx, control, hovered, x, y, scale) {
   ctx.restore();
 }
 
-function paintBootScreen(mounted) {
+function paintBootScreen(mounted, stageCanvas = scenarioLogicalCanvas) {
   const phases = bootPhaseList(mounted);
   const i = Math.min(mounted.bootPhase, phases.length - 1);
   const cur = phases[i];
@@ -2626,9 +2986,9 @@ function paintBootScreen(mounted) {
   const t = performance.now() - (mounted.stageEnteredAt ?? 0);
   const progress = cur.hold ? 1 : Math.min(1, t / cur.dur);
   context.fillStyle = "#000";
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  drawPhaseLayer(prev, 1);
-  drawPhaseLayer(cur, progress);
+  context.fillRect(0, 0, stageCanvas.width, stageCanvas.height);
+  drawPhaseLayer(prev, 1, stageCanvas);
+  drawPhaseLayer(cur, progress, stageCanvas);
   stageNonBlackSampleCount = 1;
 }
 
@@ -2652,15 +3012,15 @@ function bootPhaseList(mounted) {
   return list;
 }
 
-function drawPhaseLayer(phase, alpha) {
+function drawPhaseLayer(phase, alpha, stageCanvas = scenarioLogicalCanvas) {
   if (!phase) return;
   context.save();
   context.globalAlpha = Math.max(0, Math.min(1, alpha));
   if (phase.color) {
     context.fillStyle = phase.color;
-    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillRect(0, 0, stageCanvas.width, stageCanvas.height);
   } else if (phase.image) {
-    const { x, y, w, h } = titleLayout(phase.image);
+    const { x, y, w, h } = titleLayout(phase.image, stageCanvas);
     context.drawImage(imageScratch(phase.image), x, y, w, h);
   }
   context.restore();
@@ -2682,6 +3042,10 @@ function advanceBootPhase(mounted) {
 }
 
 function paintMountedFrame(mounted) {
+  if (!mounted) {
+    return;
+  }
+  const backingScale = configureStageCanvasForMounted(mounted);
   if (mounted.stage === "exited") {
     context.fillStyle = "#000";
     context.fillRect(0, 0, canvas.width, canvas.height);
@@ -2689,11 +3053,17 @@ function paintMountedFrame(mounted) {
     return;
   }
   if (mounted.stage === "boot" && mounted.bootScreens?.length) {
-    paintBootScreen(mounted);
+    context.save();
+    context.scale(backingScale, backingScale);
+    paintBootScreen(mounted, scenarioLogicalCanvas);
+    context.restore();
     return;
   }
   if (mounted.stage === "title" && mounted.titleImage) {
-    paintTitleScreen(mounted);
+    context.save();
+    context.scale(backingScale, backingScale);
+    paintTitleScreen(mounted, scenarioLogicalCanvas);
+    context.restore();
     return;
   }
   if (mounted.stage === "scenario" && mounted.player) {
@@ -2709,16 +3079,25 @@ function paintMountedFrame(mounted) {
     context.fillStyle = "#000";
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.save();
+    context.scale(backingScale, backingScale);
     context.translate(offset.x, offset.y);
-    const painted = paintScenarioScene(context, canvas, mounted.player, { clear: false });
+    const painted = paintScenarioScene(context, scenarioLogicalCanvas, mounted.player, { clear: false });
     paintScenarioOverlay(
       context,
-      canvas,
+      scenarioLogicalCanvas,
       mounted.player,
       mounted.messageWindow,
     );
     context.restore();
-    paintScenarioDialogWindow(context, canvas, mounted.dialogWindow, mounted.dialogState);
+    context.save();
+    context.scale(backingScale, backingScale);
+    paintScenarioDialogWindow(
+      context,
+      scenarioLogicalCanvas,
+      mounted.dialogWindow,
+      mounted.dialogState,
+    );
+    context.restore();
     if (!painted) {
       return;
     }
@@ -2733,14 +3112,17 @@ function paintMountedFrame(mounted) {
   }
   const image = mounted.bootImage;
   if (image === null) {
-    paintBootFrame(core);
-    renderMountedGraphQueue(mounted);
+    context.save();
+    context.scale(backingScale, backingScale);
+    paintBootFrame(core, scenarioLogicalCanvas);
+    renderMountedGraphQueue(mounted, scenarioLogicalCanvas);
     paintScenarioOverlay(
       context,
-      canvas,
+      scenarioLogicalCanvas,
       mounted.player,
       mounted.messageWindow,
     );
+    context.restore();
     stageNonBlackSampleCount = 1;
     return;
   }
@@ -2749,19 +3131,24 @@ function paintMountedFrame(mounted) {
 
   context.fillStyle = "#000";
   context.fillRect(0, 0, canvas.width, canvas.height);
-  const scale = Math.min(canvas.width / image.width, canvas.height / image.height);
-  const width = Math.round(image.width * scale);
-  const height = Math.round(image.height * scale);
-  const x = Math.floor((canvas.width - width) / 2);
-  const y = Math.floor((canvas.height - height) / 2);
+  context.save();
+  context.scale(backingScale, backingScale);
+  const logicalWidth = imageLogicalWidth(image);
+  const logicalHeight = imageLogicalHeight(image);
+  const scale = Math.min(scenarioLogicalCanvas.width / logicalWidth, scenarioLogicalCanvas.height / logicalHeight);
+  const width = Math.round(logicalWidth * scale);
+  const height = Math.round(logicalHeight * scale);
+  const x = Math.floor((scenarioLogicalCanvas.width - width) / 2);
+  const y = Math.floor((scenarioLogicalCanvas.height - height) / 2);
   context.drawImage(frameCanvas, x, y, width, height);
-  renderMountedGraphQueue(mounted);
+  renderMountedGraphQueue(mounted, scenarioLogicalCanvas);
   paintScenarioOverlay(
     context,
-    canvas,
+    scenarioLogicalCanvas,
     mounted.player,
     mounted.messageWindow,
   );
+  context.restore();
   stageNonBlackSampleCount = 1;
 }
 
@@ -2790,6 +3177,9 @@ function mountedGraphRuntime(mounted) {
   mounted.graphRuntime = {
     catalog: mounted.catalog,
     core,
+    imageCache: mounted.sharedImageAssetCache,
+    imageCacheLimit: 192,
+    upscaleSettings: mountedUpscaleSettings(mounted),
     requestPaint: () => {
       if (activeInstall === mounted) {
         paintMountedFrame(mounted);
@@ -2810,10 +3200,10 @@ function mountedGraphRuntime(mounted) {
   return mounted.graphRuntime;
 }
 
-function renderMountedGraphQueue(mounted) {
+function renderMountedGraphQueue(mounted, stageCanvas = canvas) {
   const graphRender = renderGraphQueue(
     context,
-    canvas,
+    stageCanvas,
     mounted?.safeState?.runtimeGraphHistoryQueue,
     mountedGraphRuntime(mounted),
   );
@@ -2850,10 +3240,10 @@ function renderMountedGraphQueue(mounted) {
   };
 }
 
-function paintBootFrame(core) {
+function paintBootFrame(core, stageCanvas = scenarioLogicalCanvas) {
   void core;
   context.fillStyle = "#111318";
-  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillRect(0, 0, stageCanvas.width, stageCanvas.height);
   if (!runtimeDiagnosticsEnabled) {
     return;
   }
@@ -2863,6 +3253,6 @@ function paintBootFrame(core) {
   context.fillRect(36, 42, 240, 120);
   context.restore();
   context.fillStyle = "#e9edf1";
-  context.font = "24px system-ui, 'Noto Sans CJK JP', sans-serif";
+  context.font = bgiGothicFont(24);
   context.fillText("BGI runtime core loaded", 40, 64);
 }

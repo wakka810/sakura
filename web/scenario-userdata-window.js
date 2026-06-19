@@ -2,8 +2,7 @@
 // (system index 22) + the SGUsDtWnd* sysgrp.arc art family.
 //
 // Geometry/asset assignment was extracted from the shipped SGUsDtWnd* assets
-// (sizes/state counts) and verified pixel-for-pixel against the Wine capture
-// (`screenshot/save_wine.png`), NOT guessed:
+// (sizes/state counts) and the usdtwnd._bp draw script:
 //
 // * Base bg SGUsDtWnd990000 (save) / 990100 (load), 1280x720 — carries the
 //   "Save"/"Load" title + feather and the baked "Page:" label and "/" glyph.
@@ -25,13 +24,20 @@
 // * Digits SGUsDtWnd00000N (24x48, black serif) render the page number around
 //   the baked "/" — current page right-aligned, total-page count left-aligned.
 
+import { bgiGothicFont } from "./bgi-fonts.js";
+import { drawBgiText } from "./bgi-text-renderer.js";
+import { stripScenarioTags } from "./scenario-text.js";
+
 const SCREEN_WIDTH = 1280;
 const SCREEN_HEIGHT = 720;
 
 export const USER_DATA_SLOTS_PER_PAGE = 9;
 export const USER_DATA_TOTAL_PAGES = 10; // Wine shows "Page: 1 / 10".
+export const USER_DATA_PREVIEW_WIDTH = 160;
+export const USER_DATA_PREVIEW_HEIGHT = 90;
 
 const BUTTON_STATES = 4; // 0=idle, 1=hover, 2=pressed, 3=disabled.
+const USER_DATA_PREVIEW_MAX_DATA_URL_LENGTH = 256 * 1024;
 
 // Slot grid (392x160 frames).
 const SLOT_WIDTH = 392;
@@ -39,17 +45,26 @@ const SLOT_HEIGHT = 160;
 const SLOT_COLUMNS_X = Object.freeze([44, 444, 844]);
 const SLOT_ROWS_Y = Object.freeze([110, 284, 458]);
 
-// Slot content offsets (relative to the slot's top-left), verified vs Wine.
-const THUMB_DX = 16;
+// Slot content offsets (relative to the slot's top-left). usdtwnd._bp draws
+// the saved thumbnail image at 36,12 and text buffers at 210,16 / 38,110.
+const THUMB_DX = 36;
 const THUMB_DY = 12;
-const THUMB_W = 164;
-const THUMB_H = 92;
-const DATE_DX = 208;
-const DATE_DY = 18;
-const TIME_DY = 41;
-const BODY_DX = 36;
-const BODY_DY = 116;
+const THUMB_W = USER_DATA_PREVIEW_WIDTH;
+const THUMB_H = USER_DATA_PREVIEW_HEIGHT;
+const DATE_DX = 210;
+const DATE_DY = 16;
+const DATE_TEXT_DY = 2;
+const DATE_LINE_H = 22;
+const DATE_CELL_W = 17.5;
+const DATE_SCALE_X = 2;
+const BODY_DX = 38;
+const BODY_DY = 110;
+const BODY_TEXT_DX = -2;
+const BODY_TEXT_DY = 2;
+const BODY_W = 324;
 const TEXT_BLUE = "rgb(0, 71, 157)"; // decompiled color 0x479D (usdtwnd._bp @0x1222).
+const USER_DATA_DATE_FONT = bgiGothicFont(18);
+const USER_DATA_BODY_FONT = bgiGothicFont(18);
 
 // Top navigation buttons (556x43 sheets).
 const TOP_Y = 40;
@@ -224,6 +239,47 @@ export function userDataHoverKey(control) {
   return control.action ?? control.kind ?? null;
 }
 
+export function normalizeUserDataPreviewDataUrl(value) {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > USER_DATA_PREVIEW_MAX_DATA_URL_LENGTH
+    || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(value)
+  ) {
+    return "";
+  }
+  return value;
+}
+
+export function resolveUserDataPreviewImage(dataUrl, cache, onReady = null) {
+  const normalized = normalizeUserDataPreviewDataUrl(dataUrl);
+  if (!normalized || !(cache instanceof Map)) {
+    return null;
+  }
+  const cached = cache.get(normalized);
+  if (cached) {
+    return cached.image ?? null;
+  }
+  if (typeof globalThis.Image !== "function") {
+    return null;
+  }
+  cache.set(normalized, { status: "loading", image: null });
+  const element = new globalThis.Image();
+  element.onload = () => {
+    const width = element.naturalWidth || element.width || USER_DATA_PREVIEW_WIDTH;
+    const height = element.naturalHeight || element.height || USER_DATA_PREVIEW_HEIGHT;
+    const image = { source: element, width, height, logicalWidth: width, logicalHeight: height };
+    cache.set(normalized, { status: "ready", image });
+    onReady?.(image);
+  };
+  element.onerror = () => {
+    cache.set(normalized, { status: "missing", image: null });
+    onReady?.(null);
+  };
+  element.src = normalized;
+  return null;
+}
+
 export function paintScenarioUserDataWindow(context, canvas, skin, state, records) {
   if (!state?.open || !skin) {
     return false;
@@ -264,35 +320,35 @@ function drawSlotRecord(context, record, x, y) {
     return;
   }
   context.save();
-  // Thumbnail (the saved scene CG), cover-fit into the box.
+  // Thumbnail (the saved scene CG), fit into the original 160x90 save-data box.
   if (record.thumbnail) {
-    drawThumbnailCover(context, record.thumbnail, x + THUMB_DX, y + THUMB_DY, THUMB_W, THUMB_H);
+    drawThumbnailFit(context, record.thumbnail, x + THUMB_DX, y + THUMB_DY, THUMB_W, THUMB_H);
   }
-  // Date / time, blue, two lines, top-right of the thumbnail.
+  // usdtwnd._bp builds `%02d/%02d/%02d.%02d:%02d:%02d`, renders it through
+  // Graph:9c into buffer 121, then places that buffer at 210,16. The engine's
+  // text buffer lays the date and time as two rows in the shipped Load capture.
   const { date, time } = formatSavedAt(record.savedAt);
   context.fillStyle = TEXT_BLUE;
   context.textBaseline = "top";
-  // MS Gothic (engine default, regular weight). The original renders the date/
-  // time with wide character spacing (the airy "07: 52: 30" look), so match the
-  // glyph height (~17px) and per-char cell width seen in the Wine reference.
-  if ("letterSpacing" in context) {
-    context.letterSpacing = "7px";
-  }
-  context.font = "21px 'MS Gothic', 'Noto Sans CJK JP', 'IPAGothic', 'Yu Gothic', sans-serif";
+  context.font = USER_DATA_DATE_FONT;
   if (date) {
-    context.fillText(date, x + DATE_DX, y + DATE_DY);
+    drawFixedCellText(context, date, x + DATE_DX, y + DATE_DY + DATE_TEXT_DY, DATE_CELL_W, DATE_SCALE_X);
   }
   if (time) {
-    context.fillText(time, x + DATE_DX, y + TIME_DY);
-  }
-  if ("letterSpacing" in context) {
-    context.letterSpacing = "0px";
+    drawFixedCellText(
+      context,
+      time,
+      x + DATE_DX,
+      y + DATE_DY + DATE_TEXT_DY + DATE_LINE_H,
+      DATE_CELL_W,
+      DATE_SCALE_X,
+    );
   }
   // Body text (the saved message line), blue, below the thumbnail.
-  const body = (record.text ?? "").replace(/\s+/g, " ").trim();
-  if (body) {
-    context.font = "18px 'MS Gothic', 'Noto Sans CJK JP', 'IPAGothic', 'Yu Gothic', sans-serif";
-    fillTextClipped(context, body, x + BODY_DX, y + BODY_DY, SLOT_WIDTH - BODY_DX - 12);
+  const body = normalizeUserDataBodyText(record.text ?? "");
+  if (body.trim()) {
+    context.font = USER_DATA_BODY_FONT;
+    drawTextClipped(context, body, x + BODY_DX + BODY_TEXT_DX, y + BODY_DY + BODY_TEXT_DY, BODY_W);
   }
   context.restore();
 }
@@ -316,16 +372,36 @@ function formatSavedAt(savedAt) {
   };
 }
 
-function fillTextClipped(context, text, x, y, maxWidth) {
+function normalizeUserDataBodyText(text) {
+  return stripScenarioTags(String(text)).replace(/[\r\n\t]+/g, " ");
+}
+
+function drawFixedCellText(context, text, x, y, cellWidth, scaleX = 1) {
+  let cursor = x;
+  for (const ch of text) {
+    if (scaleX !== 1 && typeof context.translate === "function" && typeof context.scale === "function") {
+      context.save();
+      context.translate(cursor, y);
+      context.scale(scaleX, 1);
+      drawBgiText(context, ch, 0, 0);
+      context.restore();
+    } else {
+      drawBgiText(context, ch, cursor, y);
+    }
+    cursor += cellWidth;
+  }
+}
+
+function drawTextClipped(context, text, x, y, maxWidth) {
   let value = text;
   if (context.measureText(value).width <= maxWidth) {
-    context.fillText(value, x, y);
+    drawBgiText(context, value, x, y);
     return;
   }
   while (value.length > 1 && context.measureText(`${value}…`).width > maxWidth) {
     value = value.slice(0, -1);
   }
-  context.fillText(`${value}…`, x, y);
+  drawBgiText(context, `${value}…`, x, y);
 }
 
 function drawTopButtons(context, skin, state) {
@@ -370,7 +446,7 @@ function drawDigits(context, digits, text, anchorX, y, align) {
   }
   const scaled = glyphs.map((glyph) => ({
     glyph,
-    w: (glyph.width * PAGE_DIGIT_H) / glyph.height,
+    w: (imageLogicalWidth(glyph) * PAGE_DIGIT_H) / imageLogicalHeight(glyph),
   }));
   const totalWidth = scaled.reduce((sum, item) => sum + item.w, 0);
   let cursor = align === "right" ? anchorX - totalWidth : anchorX;
@@ -388,7 +464,7 @@ function drawDigits(context, digits, text, anchorX, y, align) {
 
 function hitButton(x, y, bx, by, image) {
   const width = imageStateWidth(image);
-  return x >= bx && x < bx + width && y >= by && y < by + image.height;
+  return x >= bx && x < bx + width && y >= by && y < by + imageLogicalHeight(image);
 }
 
 function slotAt(x, y, page) {
@@ -403,53 +479,78 @@ function slotAt(x, y, page) {
 }
 
 function imageStateWidth(image) {
+  return image ? Math.floor(imageLogicalWidth(image) / BUTTON_STATES) : 0;
+}
+
+function imageSourceStateWidth(image) {
   return image ? Math.floor(image.width / BUTTON_STATES) : 0;
 }
 
 function drawStateImage(context, image, x, y, stateIndex) {
   const stateWidth = imageStateWidth(image);
+  const sourceStateWidth = imageSourceStateWidth(image);
   context.drawImage(
     rgbaCanvas(image),
-    Math.max(0, Math.min(stateIndex, BUTTON_STATES - 1)) * stateWidth,
+    Math.max(0, Math.min(stateIndex, BUTTON_STATES - 1)) * sourceStateWidth,
     0,
-    stateWidth,
+    sourceStateWidth,
     image.height,
     x,
     y,
     stateWidth,
-    image.height,
+    imageLogicalHeight(image),
   );
 }
 
-function drawThumbnailCover(context, image, x, y, w, h) {
-  const scale = Math.max(w / image.width, h / image.height);
-  const drawW = image.width * scale;
-  const drawH = image.height * scale;
-  const sx = (drawW - w) / 2 / scale;
-  const sy = (drawH - h) / 2 / scale;
+function drawThumbnailFit(context, image, x, y, w, h) {
+  const logicalWidth = imageLogicalWidth(image);
+  const logicalHeight = imageLogicalHeight(image);
+  const scale = Math.min(w / logicalWidth, h / logicalHeight);
+  const drawW = logicalWidth * scale;
+  const drawH = logicalHeight * scale;
+  const dx = x + (w - drawW) / 2;
+  const dy = y + (h - drawH) / 2;
   context.save();
   context.beginPath();
   context.rect(x, y, w, h);
   context.clip();
   context.drawImage(
     rgbaCanvas(image),
-    sx,
-    sy,
-    image.width - sx * 2,
-    image.height - sy * 2,
-    x,
-    y,
-    w,
-    h,
+    0,
+    0,
+    image.width,
+    image.height,
+    dx,
+    dy,
+    drawW,
+    drawH,
   );
   context.restore();
 }
 
 function drawRgbaImage(context, image, x, y) {
-  context.drawImage(rgbaCanvas(image), x, y, image.width, image.height);
+  context.drawImage(rgbaCanvas(image), x, y, imageLogicalWidth(image), imageLogicalHeight(image));
+}
+
+function imageLogicalWidth(image) {
+  return Number.isFinite(image?.logicalWidth) && image.logicalWidth > 0
+    ? image.logicalWidth
+    : image?.width ?? 0;
+}
+
+function imageLogicalHeight(image) {
+  return Number.isFinite(image?.logicalHeight) && image.logicalHeight > 0
+    ? image.logicalHeight
+    : image?.height ?? 0;
 }
 
 function rgbaCanvas(image) {
+  if (image?.source) {
+    return image.source;
+  }
+  if (!image?.pixels) {
+    return image;
+  }
   const cached = imageCanvasCache.get(image);
   if (cached) {
     return cached;

@@ -11,11 +11,14 @@
 //   trackX[330x3,920x4], rowY[118,182,246 | 118,182,246,310]); each row draws
 //   10 step icons at X = trackX + step*28 using SGCnfgWnd000000 (84x22, 4
 //   states x21). Fill: step<value -> state0 (pink), step==value -> state2
-//   (pink/current), step>value -> state3 (pale outline).
+//   (pink/current), step>value -> state3 (pale outline); hovering an unselected
+//   step uses state1 (blue).
 // * 6 two-choice rows (Y=309,373,437,501,565,629), left column X=324, right
 //   column X=473; each option is its own SGCnfgWnd0N0000/0N0100 button (552x37,
-//   4 states x138). The left/right asset assignment was read from the script's
-//   image-id table (catalog base 1664, stride 4 per asset).
+//   4 states x138). The selected option stays state2 even when hovered; only
+//   an unselected hovered option uses state1 (blue). The left/right asset
+//   assignment was read from the script's image-id table (catalog base 1664,
+//   stride 4 per asset).
 // * 8 character portraits (SGCnfgWnd100000..110100, 200x130, 2 states x100):
 //   columns X=766,876,986,1096, rows Y=386,526.
 // * Reset/Title/Back (SGCnfgWnd200000/200100/200200, 556x43, 4 states x139) at
@@ -293,7 +296,7 @@ export function scenarioConfigControlAt(x, y, state, skin) {
       }
       const colX = side === "left" ? CHOICE_LEFT_X : CHOICE_RIGHT_X;
       const width = imageStateWidth(image, CHOICE_STATES);
-      if (x >= colX && x < colX + width && y >= row.y && y < row.y + image.height) {
+      if (x >= colX && x < colX + width && y >= row.y && y < row.y + imageLogicalHeight(image)) {
         return { kind: "choice", key: row.key, value: option.value, side };
       }
     }
@@ -348,7 +351,7 @@ export function scenarioConfigHoverKey(control) {
     return control.action;
   }
   if (control?.kind === "slider") {
-    return control.key;
+    return `${control.key}:${control.step}`;
   }
   if (control?.kind === "choice") {
     return `${control.key}:${control.side}`;
@@ -386,8 +389,12 @@ function drawMeterRows(context, skin, state) {
   }
   for (const row of METER_ROWS) {
     const selected = meterSelectedIndex(state.settings[row.key]);
+    const hoveredStep = hoveredMeterStep(state.hover, row.key);
     for (let step = 0; step < METER_STEPS; step += 1) {
-      const sourceIndex = step < selected ? 0 : step === selected ? 2 : 3;
+      const hovered = hoveredStep === step && step !== selected;
+      const sourceIndex = hovered
+        ? 1
+        : step < selected ? 0 : step === selected ? 2 : 3;
       drawStateImage(
         context,
         icon,
@@ -411,10 +418,22 @@ function drawChoiceRows(context, skin, state) {
       const colX = side === "left" ? CHOICE_LEFT_X : CHOICE_RIGHT_X;
       const selected = state.settings[row.key] === option.value;
       const hovered = state.hover === `${row.key}:${side}`;
-      const sourceIndex = hovered ? 1 : selected ? 2 : 0;
+      const sourceIndex = selected ? 2 : hovered ? 1 : 0;
       drawStateImage(context, image, colX, row.y, sourceIndex, CHOICE_STATES);
     }
   }
+}
+
+function hoveredMeterStep(hover, key) {
+  if (typeof hover !== "string") {
+    return -1;
+  }
+  const prefix = `${key}:`;
+  if (!hover.startsWith(prefix)) {
+    return -1;
+  }
+  const step = Number.parseInt(hover.slice(prefix.length), 10);
+  return Number.isInteger(step) && step >= 0 && step < METER_STEPS ? step : -1;
 }
 
 function drawCharacterVoices(context, skin, state) {
@@ -444,16 +463,17 @@ function drawCornerButtons(context, skin, state) {
 
 function drawStateImage(context, image, x, y, sourceIndex, stateCount) {
   const stateWidth = imageStateWidth(image, stateCount);
+  const sourceStateWidth = imageSourceStateWidth(image, stateCount);
   context.drawImage(
     rgbaCanvas(image),
-    Math.max(0, Math.min(sourceIndex, stateCount - 1)) * stateWidth,
+    Math.max(0, Math.min(sourceIndex, stateCount - 1)) * sourceStateWidth,
     0,
-    stateWidth,
+    sourceStateWidth,
     image.height,
     x,
     y,
     stateWidth,
-    image.height,
+    imageLogicalHeight(image),
   );
 }
 
@@ -472,7 +492,7 @@ function faceIndexAt(x, y, faces) {
     const colX = FACE_COLUMNS_X[index % FACE_COLUMNS_X.length];
     const rowY = FACE_ROWS_Y[Math.floor(index / FACE_COLUMNS_X.length)];
     const width = imageStateWidth(image, FACE_STATES);
-    if (x >= colX && x < colX + width && y >= rowY && y < rowY + image.height) {
+    if (x >= colX && x < colX + width && y >= rowY && y < rowY + imageLogicalHeight(image)) {
       return index;
     }
   }
@@ -480,6 +500,10 @@ function faceIndexAt(x, y, faces) {
 }
 
 function imageStateWidth(image, stateCount) {
+  return image ? Math.floor(imageLogicalWidth(image) / stateCount) : 0;
+}
+
+function imageSourceStateWidth(image, stateCount) {
   return image ? Math.floor(image.width / stateCount) : 0;
 }
 
@@ -496,7 +520,19 @@ function scenarioConfigStorage() {
 }
 
 function drawRgbaImage(context, image, x, y) {
-  context.drawImage(rgbaCanvas(image), x, y, image.width, image.height);
+  context.drawImage(rgbaCanvas(image), x, y, imageLogicalWidth(image), imageLogicalHeight(image));
+}
+
+function imageLogicalWidth(image) {
+  return Number.isFinite(image?.logicalWidth) && image.logicalWidth > 0
+    ? image.logicalWidth
+    : image?.width ?? 0;
+}
+
+function imageLogicalHeight(image) {
+  return Number.isFinite(image?.logicalHeight) && image.logicalHeight > 0
+    ? image.logicalHeight
+    : image?.height ?? 0;
 }
 
 function rgbaCanvas(image) {

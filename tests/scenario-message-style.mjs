@@ -1,18 +1,24 @@
 import assert from "node:assert/strict";
+import { bgiFontByNumber } from "../web/bgi-fonts.js";
 import {
   applyScenarioMessageStylePatch,
   createScenarioMessageStyleState,
   resolveScenarioMessageTextLayout,
 } from "../web/session-player.js";
 
+assert.match(bgiFontByNumber(0, 28), /Sakura MS Gothic/);
+assert.match(bgiFontByNumber(1, 28), /Sakura MS Mincho/);
+
 // 0x014c sets font number/size/weight. The opening scenarios carry e.g.
 // (0,40,0) for emphasis and (0,28,0) for the default body size.
 {
   const style = createScenarioMessageStyleState();
   applyScenarioMessageStylePatch(style, 0x014c, [0, 40, 0]);
+  assert.equal(style.fontNumber, 0);
   assert.equal(style.fontSize, 40);
   assert.equal(style.fontWeight, 0);
-  applyScenarioMessageStylePatch(style, 0x014c, [0, 28, 1]);
+  applyScenarioMessageStylePatch(style, 0x014c, [1, 28, 1]);
+  assert.equal(style.fontNumber, 1);
   assert.equal(style.fontSize, 28);
   assert.equal(style.fontWeight, 1);
 }
@@ -29,7 +35,8 @@ import {
 // 0x014d sets font number/height/width/weight.
 {
   const style = createScenarioMessageStyleState();
-  applyScenarioMessageStylePatch(style, 0x014d, [0, 32, 24, 1]);
+  applyScenarioMessageStylePatch(style, 0x014d, [1, 32, 24, 1]);
+  assert.equal(style.fontNumber, 1);
   assert.equal(style.fontHeight, 32);
   assert.equal(style.fontWidth, 24);
   assert.equal(style.fontWeight, 1);

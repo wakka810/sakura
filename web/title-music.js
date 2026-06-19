@@ -1,3 +1,5 @@
+import { bgiMinchoFont } from "./bgi-fonts.js";
+
 export const TITLE_MUSIC_TRACKS = Object.freeze([
   "bgm001",
   "bgm002",
@@ -192,12 +194,12 @@ export function paintTitleMusic(context, canvas, state, buttons = {}, sprites = 
     context.strokeStyle = "rgba(63, 74, 46, 0.55)";
     context.lineWidth = 2;
     context.strokeRect(248.5, 70.5, 626, 570);
-    context.font = "22px 'Noto Serif CJK JP', 'Yu Mincho', 'MS Mincho', serif";
+    context.font = bgiMinchoFont(22);
     context.fillStyle = "#23301d";
     context.textBaseline = "top";
     context.fillText("Music", 272, 80);
   }
-  context.font = "16px 'Noto Serif CJK JP', 'Yu Mincho', 'MS Mincho', serif";
+  context.font = bgiMinchoFont(16);
   for (const choice of titleMusicVisibleChoices(state)) {
     paintMusicCell(
       context,
@@ -244,12 +246,14 @@ function paintMusicCell(context, choice, hovered, selected, sprites) {
   const sprite = sprites?.tracks?.get?.(choice.assetName) ?? null;
   if (sprite?.image) {
     const state = selected ? 2 : hovered ? 1 : 0;
+    const sourceStateWidth = sprite.sourceStateWidth ?? sprite.stateWidth;
+    const sourceStateHeight = sprite.sourceStateHeight ?? sprite.image.height;
     context.drawImage(
       titleMusicImageScratch(sprite.image),
-      state * sprite.stateWidth,
+      state * sourceStateWidth,
       0,
-      sprite.stateWidth,
-      sprite.stateHeight,
+      sourceStateWidth,
+      sourceStateHeight,
       rect.x,
       rect.y,
       sprite.stateWidth,
@@ -278,12 +282,14 @@ function paintMusicCell(context, choice, hovered, selected, sprites) {
 function paintBackButton(context, back, hovered) {
   if (back?.image) {
     const scratch = titleMusicImageScratch(back.image);
+    const sourceStateWidth = back.sourceStateWidth ?? back.stateWidth;
+    const sourceStateHeight = back.sourceStateHeight ?? back.image.height;
     context.drawImage(
       scratch,
-      (hovered ? 1 : 0) * back.stateWidth,
+      (hovered ? 1 : 0) * sourceStateWidth,
       0,
-      back.stateWidth,
-      back.stateHeight,
+      sourceStateWidth,
+      sourceStateHeight,
       BACK_X,
       BACK_Y,
       back.stateWidth,

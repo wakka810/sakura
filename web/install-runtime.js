@@ -13,6 +13,10 @@ import { normalizeScenarioName, normalizeScenarioRoute } from "./scenario-routes
 import { createAudioMixer } from "./audio-mixer.js";
 import { PRIORITY_GRAPH_SERVICE_IDS } from "./graph-renderer.js";
 import { TITLE_MUSIC_TRACKS } from "./title-music.js";
+import {
+  loadImageAsset,
+  normalizeUpscaleSettings,
+} from "./upscale-client.js";
 
 const PAYLOAD_KIND_DSC = 1;
 const PAYLOAD_KIND_COMPRESSED_BG = 2;
@@ -75,6 +79,23 @@ const AUX_POINTER_BASE = 0x20000000;
 const LOCAL_POINTER_MASK = 0x01ffffff;
 const AUX_SLOT0_ARCHIVE_OFFSET = 0x406000;
 const AUX_SLOT0_ARCHIVE_BASE = AUX_POINTER_BASE + AUX_SLOT0_ARCHIVE_OFFSET;
+const MOUNTED_IMAGE_CACHE_LIMIT = 256;
+const ASSET_NAME_ENCODER = new TextEncoder();
+const TITLE_BUTTON_DEFS = Object.freeze([
+  ["Start", "SGTitle000000"],
+  ["Load", "SGTitle000100"],
+  ["Config", "SGTitle000200"],
+  ["Exit", "SGTitle000300"],
+  ["Extra", "SGTitle000400"],
+  ["Graphic", "SGTitle000500"],
+  ["Scene", "SGTitle000600"],
+  ["Music", "SGTitle000700"],
+  ["back", "SGTitle000800"],
+  ["IV", "SGTitle000900"],
+  ["V", "SGTitle001000"],
+  ["VI", "SGTitle001100"],
+]);
+const BOOT_SCREEN_NAMES = Object.freeze(["makuralogo", "att01", "att02"]);
 
 function requestedSystemEntryName() {
   try {
@@ -251,6 +272,72 @@ export function syncMountedAudioState(mounted) {
   mounted.summary.localRuntimeAudioPlayBlocked = state.playBlocked;
   mounted.safeState.audioReady = state.ready;
   mounted.safeState.audioMixer = state;
+}
+
+export async function refreshMountedImageAssets(mounted, settings, options = {}) {
+  if (!mounted || mounted.destroyed === true || !mounted.catalog || !mounted.core) {
+    return false;
+  }
+  const normalized = normalizeUpscaleSettings(settings);
+  const serial = (mounted.imageAssetRefreshSerial ?? 0) + 1;
+  mounted.imageAssetRefreshSerial = serial;
+  mounted.sharedImageAssetCache ??= new Map();
+  const refresh = () => {
+    if (mounted.destroyed === true || mounted.imageAssetRefreshSerial !== serial) {
+      return;
+    }
+    options.onReady?.();
+  };
+  const loadOptions = {
+    settings: normalized,
+    cache: mounted.sharedImageAssetCache,
+    cacheLimit: MOUNTED_IMAGE_CACHE_LIMIT,
+    isStillWanted: () => mounted.destroyed !== true
+      && mounted.imageAssetRefreshSerial === serial
+      && JSON.stringify(normalizeUpscaleSettings(mounted.upscaleSettings)) === JSON.stringify(normalized),
+    onReady: refresh,
+  };
+  const [
+    titleImage,
+    titleButtonSprites,
+    titleMusicSprites,
+    bootScreens,
+    messageWindow,
+    logWindow,
+    userDataWindow,
+    configWindow,
+    dialogWindow,
+  ] = await Promise.all([
+    loadTitleImage(mounted.catalog, mounted.core, loadOptions),
+    loadTitleButtonSprites(mounted.catalog, mounted.core, loadOptions),
+    loadTitleMusicSprites(mounted.catalog, mounted.core, loadOptions),
+    loadBootScreens(mounted.catalog, mounted.core, loadOptions),
+    loadMessageWindow(mounted.catalog, mounted.core, loadOptions),
+    loadLogWindow(mounted.catalog, mounted.core, loadOptions),
+    loadUserDataWindow(mounted.catalog, mounted.core, loadOptions),
+    loadConfigWindow(mounted.catalog, mounted.core, loadOptions),
+    loadDialogWindow(mounted.catalog, mounted.core, loadOptions),
+  ]);
+  if (mounted.destroyed === true || mounted.imageAssetRefreshSerial !== serial) {
+    return false;
+  }
+  mounted.titleImage = titleImage;
+  mounted.titleButtonSprites = titleButtonSprites;
+  mounted.titleMusicSprites = titleMusicSprites;
+  mounted.menuButtons = titleMenuButtons(titleButtonSprites);
+  mounted.bootScreens = bootScreens;
+  mounted.messageWindow = messageWindow;
+  mounted.logWindow = logWindow;
+  mounted.userDataWindow = userDataWindow;
+  mounted.configWindow = configWindow;
+  mounted.dialogWindow = dialogWindow;
+  if (mounted.player) {
+    mounted.player.skin = messageWindow;
+    mounted.player.logSkin = logWindow;
+    mounted.player.userDataSkin = userDataWindow;
+    mounted.player.configSkin = configWindow;
+  }
+  return true;
 }
 
 async function orderInstallFiles(files, core) {
@@ -938,6 +1025,7 @@ function queueScenarioPlayer(catalog, core, mounted, hooks, options = {}) {
     player.userDataSkin = mounted.userDataWindow;
     player.configSkin = mounted.configWindow;
     player.audioMixer = mounted.audioMixer;
+    player.applyUpscaleSettings?.(mounted.upscaleSettings ?? null, { refresh: false });
     if (typeof options.afterReady === "function") {
       await options.afterReady(player);
     }
@@ -1350,14 +1438,11 @@ async function probeLocalCbg(catalog, core) {
   return { image: null, summary: { localCbgDecoded: 0, localCbgLargeSkipped: largeSkipped } };
 }
 
-async function loadBootScreens(catalog, core) {
-  const names = ["makuralogo", "att01", "att02"];
+async function loadBootScreens(catalog, core, options = {}) {
   const screens = [];
-  for (const name of names) {
+  for (const name of BOOT_SCREEN_NAMES) {
     try {
-      const payload = await catalog.readPayloadByNameBytes(new TextEncoder().encode(name));
-      if (!payload) continue;
-      const image = decodeMountedImage(core, payload);
+      const image = await loadNamedImage(catalog, core, name, { ...options, role: "visible" });
       if (image) screens.push({ name, image });
     } catch (_) {}
   }
@@ -1370,34 +1455,17 @@ function titleMenuButtons(sprites) {
     .filter(Boolean);
 }
 
-async function loadTitleButtonSprites(catalog, core) {
+async function loadTitleButtonSprites(catalog, core, options = {}) {
   // Title buttons are 4-state sprite sheets: idle/hover/pressed/disabled.
-  const defs = [
-    ["Start", "SGTitle000000"],
-    ["Load", "SGTitle000100"],
-    ["Config", "SGTitle000200"],
-    ["Exit", "SGTitle000300"],
-    ["Extra", "SGTitle000400"],
-    ["Graphic", "SGTitle000500"],
-    ["Scene", "SGTitle000600"],
-    ["Music", "SGTitle000700"],
-    ["back", "SGTitle000800"],
-    ["IV", "SGTitle000900"],
-    ["V", "SGTitle001000"],
-    ["VI", "SGTitle001100"],
-  ];
   const out = {};
-  for (const [label, name] of defs) {
+  for (const [label, name] of TITLE_BUTTON_DEFS) {
     try {
-      const payload = await catalog.readPayloadByNameBytes(new TextEncoder().encode(name));
-      if (!payload) continue;
-      const image = decodeMountedImage(core, payload);
+      const image = await loadNamedImage(catalog, core, name, { ...options, role: "ui" });
       if (image) {
         out[label] = {
           label,
           image,
-          stateWidth: Math.floor(image.width / 4),
-          stateHeight: image.height,
+          ...stateSheetMetrics(image, 4),
         };
       }
     } catch (_) {}
@@ -1405,12 +1473,10 @@ async function loadTitleButtonSprites(catalog, core) {
   return out;
 }
 
-async function loadTitleMusicSprites(catalog, core) {
+async function loadTitleMusicSprites(catalog, core, options = {}) {
   const out = { background: null, tracks: new Map() };
-  const encoder = new TextEncoder();
   try {
-    const payload = await catalog.readPayloadByNameBytes(encoder.encode("SGMusic990000"));
-    const image = payload ? decodeMountedImage(core, payload) : null;
+    const image = await loadNamedImage(catalog, core, "SGMusic990000", { ...options, role: "ui" });
     if (image) {
       out.background = image;
     }
@@ -1419,15 +1485,13 @@ async function loadTitleMusicSprites(catalog, core) {
     const track = TITLE_MUSIC_TRACKS[index];
     const spriteName = `SGMusic${String((index + 1) * 100).padStart(6, "0")}`;
     try {
-      const payload = await catalog.readPayloadByNameBytes(encoder.encode(spriteName));
-      const image = payload ? decodeMountedImage(core, payload) : null;
+      const image = await loadNamedImage(catalog, core, spriteName, { ...options, role: "ui" });
       if (image) {
         out.tracks.set(track, {
           label: track,
           spriteName,
           image,
-          stateWidth: Math.floor(image.width / 3),
-          stateHeight: image.height,
+          ...stateSheetMetrics(image, 3),
         });
       }
     } catch (_) {}
@@ -1435,11 +1499,9 @@ async function loadTitleMusicSprites(catalog, core) {
   return out;
 }
 
-async function loadTitleImage(catalog, core) {
+async function loadTitleImage(catalog, core, options = {}) {
   try {
-    const payload = await catalog.readPayloadByNameBytes(new TextEncoder().encode("SGTitle990000"));
-    if (!payload) return null;
-    return decodeMountedImage(core, payload);
+    return await loadNamedImage(catalog, core, "SGTitle990000", { ...options, role: "visible" });
   } catch (_) {
     return null;
   }
@@ -1464,16 +1526,27 @@ async function loadGdbState(catalog, core) {
   }
 }
 
-async function loadMessageWindow(catalog, core) {
+async function loadMessageWindow(catalog, core, options = {}) {
   const controlNames = Array.from(
     { length: 10 },
     (_, index) => `SGMsgWnd000${index}00`,
   );
-  const [panel, nameplate, ...controlImages] = await Promise.all([
-    loadNamedImage(catalog, core, "SGMsgWnd990000"),
-    loadNamedImage(catalog, core, "SGMsgWnd990100"),
-    ...controlNames.map((name) => loadNamedImage(catalog, core, name)),
+  const helpNames = Array.from(
+    { length: 10 },
+    (_, index) => `SGMsgWnd80000${index}`,
+  );
+  const [
+    panel,
+    nameplate,
+    ...messageImages
+  ] = await Promise.all([
+    loadNamedImage(catalog, core, "SGMsgWnd990000", options),
+    loadNamedImage(catalog, core, "SGMsgWnd990100", options),
+    ...controlNames.map((name) => loadNamedImage(catalog, core, name, options)),
+    ...helpNames.map((name) => loadNamedImage(catalog, core, name, options)),
   ]);
+  const controlImages = messageImages.slice(0, controlNames.length);
+  const helpImages = messageImages.slice(controlNames.length);
   return {
     panel,
     nameplate,
@@ -1481,13 +1554,13 @@ async function loadMessageWindow(catalog, core) {
       .filter((image) => image !== null)
       .map((image) => ({
         image,
-        stateWidth: Math.floor(image.width / 4),
-        stateHeight: image.height,
+        ...stateSheetMetrics(image, 4),
       })),
+    help: helpImages,
   };
 }
 
-async function loadLogWindow(catalog, core) {
+async function loadLogWindow(catalog, core, options = {}) {
   const [
     lineUp,
     lineDown,
@@ -1498,14 +1571,14 @@ async function loadLogWindow(catalog, core) {
     panel,
     track,
   ] = await Promise.all([
-    loadNamedImage(catalog, core, "SGLogWnd000000"),
-    loadNamedImage(catalog, core, "SGLogWnd000100"),
-    loadNamedImage(catalog, core, "SGLogWnd010000"),
-    loadNamedImage(catalog, core, "SGLogWnd010100"),
-    loadNamedImage(catalog, core, "SGLogWnd100000"),
-    loadNamedImage(catalog, core, "SGLogWnd200000"),
-    loadNamedImage(catalog, core, "SGLogWnd990000"),
-    loadNamedImage(catalog, core, "SGLogWnd990100"),
+    loadNamedImage(catalog, core, "SGLogWnd000000", options),
+    loadNamedImage(catalog, core, "SGLogWnd000100", options),
+    loadNamedImage(catalog, core, "SGLogWnd010000", options),
+    loadNamedImage(catalog, core, "SGLogWnd010100", options),
+    loadNamedImage(catalog, core, "SGLogWnd100000", options),
+    loadNamedImage(catalog, core, "SGLogWnd200000", options),
+    loadNamedImage(catalog, core, "SGLogWnd990000", options),
+    loadNamedImage(catalog, core, "SGLogWnd990100", options),
   ]);
   return {
     panel,
@@ -1519,7 +1592,7 @@ async function loadLogWindow(catalog, core) {
   };
 }
 
-async function loadUserDataWindow(catalog, core) {
+async function loadUserDataWindow(catalog, core, options = {}) {
   const [
     saveBase,
     loadBase,
@@ -1538,24 +1611,24 @@ async function loadUserDataWindow(catalog, core) {
     save,
     ...digits
   ] = await Promise.all([
-    loadNamedImage(catalog, core, "SGUsDtWnd990000"),
-    loadNamedImage(catalog, core, "SGUsDtWnd990100"),
-    loadNamedImage(catalog, core, "SGUsDtWnd900000"),
-    loadNamedImage(catalog, core, "SGUsDtWnd900100"),
-    loadNamedImage(catalog, core, "SGUsDtWnd100000"), // Previous
-    loadNamedImage(catalog, core, "SGUsDtWnd100100"), // Next
-    loadNamedImage(catalog, core, "SGUsDtWnd100200"), // Top
-    loadNamedImage(catalog, core, "SGUsDtWnd100300"), // Last
-    loadNamedImage(catalog, core, "SGUsDtWnd200000"), // Load
-    loadNamedImage(catalog, core, "SGUsDtWnd200100"), // Back
-    loadNamedImage(catalog, core, "SGUsDtWnd200200"), // Exit
-    loadNamedImage(catalog, core, "SGUsDtWnd200300"), // Delete
-    loadNamedImage(catalog, core, "SGUsDtWnd200400"), // Move
-    loadNamedImage(catalog, core, "SGUsDtWnd200500"), // Copy
-    loadNamedImage(catalog, core, "SGUsDtWnd200600"), // Save
+    loadNamedImage(catalog, core, "SGUsDtWnd990000", options),
+    loadNamedImage(catalog, core, "SGUsDtWnd990100", options),
+    loadNamedImage(catalog, core, "SGUsDtWnd900000", options),
+    loadNamedImage(catalog, core, "SGUsDtWnd900100", options),
+    loadNamedImage(catalog, core, "SGUsDtWnd100000", options), // Previous
+    loadNamedImage(catalog, core, "SGUsDtWnd100100", options), // Next
+    loadNamedImage(catalog, core, "SGUsDtWnd100200", options), // Top
+    loadNamedImage(catalog, core, "SGUsDtWnd100300", options), // Last
+    loadNamedImage(catalog, core, "SGUsDtWnd200000", options), // Load
+    loadNamedImage(catalog, core, "SGUsDtWnd200100", options), // Back
+    loadNamedImage(catalog, core, "SGUsDtWnd200200", options), // Exit
+    loadNamedImage(catalog, core, "SGUsDtWnd200300", options), // Delete
+    loadNamedImage(catalog, core, "SGUsDtWnd200400", options), // Move
+    loadNamedImage(catalog, core, "SGUsDtWnd200500", options), // Copy
+    loadNamedImage(catalog, core, "SGUsDtWnd200600", options), // Save
     ...Array.from(
       { length: 10 },
-      (_, index) => loadNamedImage(catalog, core, `SGUsDtWnd00000${index}`),
+      (_, index) => loadNamedImage(catalog, core, `SGUsDtWnd00000${index}`, options),
     ),
   ]);
   return {
@@ -1580,7 +1653,7 @@ async function loadUserDataWindow(catalog, core) {
   };
 }
 
-async function loadConfigWindow(catalog, core) {
+async function loadConfigWindow(catalog, core, options = {}) {
   const [
     base,
     sliderMarker,
@@ -1601,23 +1674,23 @@ async function loadConfigWindow(catalog, core) {
     back,
     ...faces
   ] = await Promise.all([
-    loadNamedImage(catalog, core, "SGCnfgWnd990000"),
-    loadNamedImage(catalog, core, "SGCnfgWnd000000"),
-    loadNamedImage(catalog, core, "SGCnfgWnd010000"),
-    loadNamedImage(catalog, core, "SGCnfgWnd010100"),
-    loadNamedImage(catalog, core, "SGCnfgWnd020000"),
-    loadNamedImage(catalog, core, "SGCnfgWnd020100"),
-    loadNamedImage(catalog, core, "SGCnfgWnd030000"),
-    loadNamedImage(catalog, core, "SGCnfgWnd030100"),
-    loadNamedImage(catalog, core, "SGCnfgWnd040000"),
-    loadNamedImage(catalog, core, "SGCnfgWnd040100"),
-    loadNamedImage(catalog, core, "SGCnfgWnd050000"),
-    loadNamedImage(catalog, core, "SGCnfgWnd050100"),
-    loadNamedImage(catalog, core, "SGCnfgWnd060000"),
-    loadNamedImage(catalog, core, "SGCnfgWnd060100"),
-    loadNamedImage(catalog, core, "SGCnfgWnd200000"),
-    loadNamedImage(catalog, core, "SGCnfgWnd200100"),
-    loadNamedImage(catalog, core, "SGCnfgWnd200200"),
+    loadNamedImage(catalog, core, "SGCnfgWnd990000", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd000000", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd010000", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd010100", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd020000", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd020100", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd030000", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd030100", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd040000", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd040100", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd050000", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd050100", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd060000", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd060100", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd200000", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd200100", options),
+    loadNamedImage(catalog, core, "SGCnfgWnd200200", options),
     ...[
       "SGCnfgWnd100000",
       "SGCnfgWnd100100",
@@ -1627,7 +1700,7 @@ async function loadConfigWindow(catalog, core) {
       "SGCnfgWnd100500",
       "SGCnfgWnd110000",
       "SGCnfgWnd110100",
-    ].map((name) => loadNamedImage(catalog, core, name)),
+    ].map((name) => loadNamedImage(catalog, core, name, options)),
   ]);
   return {
     base,
@@ -1651,7 +1724,7 @@ async function loadConfigWindow(catalog, core) {
   };
 }
 
-async function loadDialogWindow(catalog, core) {
+async function loadDialogWindow(catalog, core, options = {}) {
   const [
     yes,
     no,
@@ -1663,15 +1736,15 @@ async function loadDialogWindow(catalog, core) {
     deletePanel,
     quickSave,
   ] = await Promise.all([
-    loadNamedImage(catalog, core, "SGDialog000000"),
-    loadNamedImage(catalog, core, "SGDialog000100"),
-    loadNamedImage(catalog, core, "SGDialog990000"),
-    loadNamedImage(catalog, core, "SGDialog990001"),
-    loadNamedImage(catalog, core, "SGDialog990002"),
-    loadNamedImage(catalog, core, "SGDialog990003"),
-    loadNamedImage(catalog, core, "SGDialog990005"),
-    loadNamedImage(catalog, core, "SGDialog990006"),
-    loadNamedImage(catalog, core, "SGDialog990007"),
+    loadNamedImage(catalog, core, "SGDialog000000", options),
+    loadNamedImage(catalog, core, "SGDialog000100", options),
+    loadNamedImage(catalog, core, "SGDialog990000", options),
+    loadNamedImage(catalog, core, "SGDialog990001", options),
+    loadNamedImage(catalog, core, "SGDialog990002", options),
+    loadNamedImage(catalog, core, "SGDialog990003", options),
+    loadNamedImage(catalog, core, "SGDialog990005", options),
+    loadNamedImage(catalog, core, "SGDialog990006", options),
+    loadNamedImage(catalog, core, "SGDialog990007", options),
   ]);
   return {
     buttons: { yes, no },
@@ -1691,15 +1764,23 @@ function logControl(image) {
   if (image === null) return null;
   return {
     image,
-    stateWidth: Math.floor(image.width / 2),
-    stateHeight: image.height,
+    ...stateSheetMetrics(image, 2),
   };
 }
 
-async function loadNamedImage(catalog, core, name) {
+async function loadNamedImage(catalog, core, name, options = {}) {
   try {
-    const payload = await catalog.readPayloadByNameBytes(new TextEncoder().encode(name));
-    return payload ? decodeMountedImage(core, payload) : null;
+    return await loadImageAsset(catalog, core, ASSET_NAME_ENCODER.encode(name), {
+      cache: options.cache,
+      cacheLimit: options.cacheLimit ?? MOUNTED_IMAGE_CACHE_LIMIT,
+      role: options.role ?? "ui",
+      settings: options.settings,
+      isStillWanted: options.isStillWanted,
+      onReady: (_cacheKey, image) => {
+        options.onImageReady?.(name, image);
+        options.onReady?.(name, image);
+      },
+    });
   } catch {
     return null;
   }
@@ -1707,7 +1788,33 @@ async function loadNamedImage(catalog, core, name) {
 
 function decodeMountedImage(core, payload) {
   const decode = core?.imageRgba ?? core?.cbgRgba ?? null;
-  return typeof decode === "function" ? decode(payload) : null;
+  const image = typeof decode === "function" ? decode(payload) : null;
+  if (image) {
+    image.logicalWidth = image.width;
+    image.logicalHeight = image.height;
+  }
+  return image;
+}
+
+function stateSheetMetrics(image, stateCount) {
+  return {
+    stateWidth: Math.floor(imageLogicalWidth(image) / stateCount),
+    stateHeight: imageLogicalHeight(image),
+    sourceStateWidth: Math.floor(image.width / stateCount),
+    sourceStateHeight: image.height,
+  };
+}
+
+function imageLogicalWidth(image) {
+  return Number.isFinite(image?.logicalWidth) && image.logicalWidth > 0
+    ? image.logicalWidth
+    : image?.width ?? 0;
+}
+
+function imageLogicalHeight(image) {
+  return Number.isFinite(image?.logicalHeight) && image.logicalHeight > 0
+    ? image.logicalHeight
+    : image?.height ?? 0;
 }
 
 async function probeLocalAudio(catalog, core) {

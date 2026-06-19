@@ -366,6 +366,17 @@ class LocalAssetCatalog {
     return this.readPayload(record);
   }
 
+  serverRecordLocation(record) {
+    const archive = this.#archives[record?.archiveIndex ?? -1];
+    if (!archive?.endpoint || !Number.isInteger(archive.serverArchiveIndex) || !Number.isInteger(record?.entryIndex)) {
+      return null;
+    }
+    return {
+      archive: archive.serverArchiveIndex,
+      entry: record.entryIndex,
+    };
+  }
+
   async readPayloadByArchiveAndNameBytes(archiveName, entryName) {
     const record = this.findByArchiveAndNameBytes(archiveName, entryName);
     return record === null ? null : this.readPayload(record);

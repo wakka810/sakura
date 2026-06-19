@@ -1,3 +1,5 @@
+import { bgiFontByNumber } from "./bgi-fonts.js";
+import { drawBgiText } from "./bgi-text-renderer.js";
 import { stripScenarioTags } from "./scenario-text.js";
 
 const VISIBLE_ENTRY_COUNT = 4;
@@ -149,10 +151,10 @@ function drawLogEntries(context, entries, skin, state) {
       );
     }
     if (entry.name) {
-      context.font = "18px 'Noto Serif CJK JP', 'Yu Mincho', 'MS Mincho', serif";
-      drawSpacedWrappedText(context, entry.name, TEXT_X, NAME_Y + baseY, 1080, 32, 1, 8);
+      context.font = bgiFontByNumber(entry.style?.fontNumber ?? 0, 18, entry.style?.fontWeight === 1 ? "bold" : "");
+      drawSpacedWrappedText(context, entry.name, TEXT_X, NAME_Y + baseY, 1080, 32, 1, 0);
     }
-    context.font = "20px 'Noto Serif CJK JP', 'Yu Mincho', 'MS Mincho', serif";
+    context.font = bgiFontByNumber(entry.style?.fontNumber ?? 0, 20, entry.style?.fontWeight === 1 ? "bold" : "");
     drawSpacedWrappedText(
       context,
       visibleBacklogText(entry.text),
@@ -161,20 +163,22 @@ function drawLogEntries(context, entries, skin, state) {
       1080,
       40,
       2,
-      10,
+      0,
     );
   }
 }
 
 function drawStateImage(context, control, x, y, hovered) {
   if (!control?.image) return;
-  const sourceX = hovered ? control.stateWidth : 0;
+  const sourceStateWidth = control.sourceStateWidth ?? control.stateWidth;
+  const sourceStateHeight = control.sourceStateHeight ?? control.image.height;
+  const sourceX = hovered ? sourceStateWidth : 0;
   context.drawImage(
     rgbaCanvas(control.image),
     sourceX,
     0,
-    control.stateWidth,
-    control.stateHeight,
+    sourceStateWidth,
+    sourceStateHeight,
     x,
     y,
     control.stateWidth,
@@ -184,7 +188,19 @@ function drawStateImage(context, control, x, y, hovered) {
 
 function drawRgbaImage(context, image, x, y) {
   if (!image) return;
-  context.drawImage(rgbaCanvas(image), x, y, image.width, image.height);
+  context.drawImage(rgbaCanvas(image), x, y, imageLogicalWidth(image), imageLogicalHeight(image));
+}
+
+function imageLogicalWidth(image) {
+  return Number.isFinite(image?.logicalWidth) && image.logicalWidth > 0
+    ? image.logicalWidth
+    : image?.width ?? 0;
+}
+
+function imageLogicalHeight(image) {
+  return Number.isFinite(image?.logicalHeight) && image.logicalHeight > 0
+    ? image.logicalHeight
+    : image?.height ?? 0;
 }
 
 function rgbaCanvas(image) {
@@ -232,7 +248,7 @@ function drawSpacedWrappedText(
       cursorX = x;
       cursorY += lineHeight;
     }
-    context.fillText(char, cursorX, cursorY);
+    drawBgiText(context, char, cursorX, cursorY);
     cursorX += width + spacing;
   }
 }

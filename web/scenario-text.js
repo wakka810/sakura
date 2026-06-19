@@ -9,6 +9,8 @@
 // uses the active 0x014f word color. `<l>` is preserved as unstyled text.
 // `<t>` and `<cr>` are spacing/forced-break controls.
 
+import { drawBgiText } from "./bgi-text-renderer.js";
+
 const RUBY_SCALE = 0.5;
 const RUBY_GAP = 2;
 
@@ -136,7 +138,7 @@ function rubyReadingWidth(context, reading) {
 }
 
 function scaledFont(font, scale) {
-  // font is like "29px 'Noto Serif CJK JP', …" — scale the leading px size.
+  // font is like "28px 'Sakura MS Gothic', …" — scale the leading px size.
   return font.replace(/(\d+(?:\.\d+)?)px/, (_, px) =>
     `${Math.max(1, Math.round(Number(px) * scale))}px`);
 }
@@ -272,12 +274,13 @@ export function drawScenarioRichText(
           const baseChars = Array.from(u.base);
           const visN = Math.min(baseChars.length, Math.max(0, maxChars - revealed));
           const visBase = baseChars.slice(0, visN).join("");
-          context.fillText(visBase, penX + (cell - baseW) / 2, lineY);
+          drawBgiText(context, visBase, penX + (cell - baseW) / 2, lineY);
           if (u.reading && visN >= baseChars.length) {
             const unitFont = context.font;
             context.font = scaledFont(unitFont, RUBY_SCALE);
             const rsize = rubyFontPx(unitFont);
-            context.fillText(
+            drawBgiText(
+              context,
               u.reading,
               penX + (cell - readW) / 2,
               lineY - rsize - RUBY_GAP,
@@ -287,7 +290,7 @@ export function drawScenarioRichText(
         }
         penX += cell;
       } else if (revealed < maxChars) {
-        context.fillText(u.text, penX, lineY);
+        drawBgiText(context, u.text, penX, lineY);
         penX += context.measureText(u.text).width;
       }
       if (unitWordColor !== null) {

@@ -1,5 +1,5 @@
 // Boot the browser runtime against the local install server and dump state + screenshot.
-// Usage: node tools/boot-runtime.mjs [--png out.png] [--json out.json] [--route pi|an|rn|ze] [--scenario-name NAME] [--start-route pi|an|rn|ze] [--start-scenario-name NAME] [--smoke-routes] [--smoke-route-chapters] [--smoke-full-routes] [--smoke-full-route ROUTE] [--quick-save-load-smoke] [--quick-save-storage-failure-smoke] [--timeout-ms N] [--post-ready-ms N] [--wait-after-target-ms N] [--advance-delay-ms N] [--wait-title] [--click-title-menu Start|Load|Config|Extra|Graphic|Scene|Music|IV|V|VI|Exit]... [--open-title-scene] [--click-title-scene INDEX] [--click-title-graphic INDEX] [--click-title-graphic-button previous|next|top|last|back]... [--click-title-graphic-viewer] [--click-title-music INDEX] [--click-dialog-control yes|no|ack] [--seed-save-slot N] [--seed-dummy-save-slot N] [--seed-config-voice-off INDEX] [--save-load-advance N] [--open-log-after-backlog N] [--click-message-control INDEX] [--open-userdata save|load] [--click-userdata-control top|previous|next|last|load|save|back|exit|delete|move|copy] [--click-config-control reset|title|back] [--advance-until-event N] [--advance-until-message-control N] [--message-control-count N] [--message-control-opcode N] [--advance-until-sprite-transition N] [--sprite-transition-scenario NAME] [--advance-until-sprite-motion N] [--advance-until-control-motion N] [--advance-until-scene-object N] [--advance-after-scene-object N] [--advance-after-scene-object-delay-ms N] [--advance-until-scene-object-transition N] [--scene-object-transition-event N] [--advance-after-scene-object-transition N] [--advance-until-filter N] [--advance-after-filter N] [--advance-until-filter-clear N] [--advance-after-filter-clear N] [--advance-until-preset-shake N] [--advance-until-sfx-control N] [--advance-until-voice-channels N] [--voice-channel-count N] [--advance-until-scenario N] [--target-scenario NAME] [--advance-until-choice N]
+// Usage: node tools/boot-runtime.mjs [--png out.png] [--json out.json] [--route pi|an|rn|ze] [--scenario-name NAME] [--start-route pi|an|rn|ze] [--start-scenario-name NAME] [--smoke-routes] [--smoke-route-chapters] [--smoke-full-routes] [--smoke-full-route ROUTE] [--quick-save-load-smoke] [--quick-save-storage-failure-smoke] [--cloud-state-smoke] [--engine-manager-click-smoke] [--timeout-ms N] [--post-ready-ms N] [--wait-after-target-ms N] [--advance-delay-ms N] [--wait-title] [--click-title-menu Start|Load|Config|Extra|Graphic|Scene|Music|IV|V|VI|Exit]... [--open-title-scene] [--click-title-scene INDEX] [--click-title-graphic INDEX] [--click-title-graphic-button previous|next|top|last|back]... [--click-title-graphic-viewer] [--click-title-music INDEX] [--click-dialog-control yes|no|ack] [--seed-save-slot N] [--seed-dummy-save-slot N] [--seed-config-voice-off INDEX] [--seed-upscale] [--seed-upscale-scale N] [--seed-upscale-model MODEL] [--seed-upscale-mode fast|quality] [--press-left-ctrl] [--save-load-advance N] [--open-log-after-backlog N] [--click-message-control INDEX] [--open-userdata save|load] [--click-userdata-control top|previous|next|last|load|save|back|exit|delete|move|copy] [--click-config-control reset|title|back] [--advance-until-event N] [--advance-until-message-control N] [--message-control-count N] [--message-control-opcode N] [--advance-until-sprite-transition N] [--sprite-transition-scenario NAME] [--advance-until-sprite-motion N] [--advance-until-control-motion N] [--advance-until-scene-object N] [--advance-after-scene-object N] [--advance-after-scene-object-delay-ms N] [--advance-until-scene-object-transition N] [--scene-object-transition-event N] [--advance-after-scene-object-transition N] [--advance-until-filter N] [--advance-after-filter N] [--advance-until-filter-clear N] [--advance-after-filter-clear N] [--advance-until-preset-shake N] [--advance-until-sfx-control N] [--advance-until-voice-channels N] [--voice-channel-count N] [--advance-until-scenario N] [--target-scenario NAME] [--advance-until-choice N]
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { chromium } from "playwright";
@@ -12,6 +12,10 @@ import {
   normalizedScenarioConfigSettings,
   SCENARIO_CONFIG_STORAGE_KEY,
 } from "../web/scenario-config-window.js";
+import {
+  normalizeUpscaleSettings,
+  UPSCALE_SETTINGS_STORAGE_KEY,
+} from "../web/upscale-client.js";
 
 function parseArgs(argv) {
   const o = {
@@ -33,6 +37,8 @@ function parseArgs(argv) {
     smokeFullRoute: "",
     quickSaveLoadSmoke: false,
     quickSaveStorageFailureSmoke: false,
+    cloudStateSmoke: false,
+    engineManagerClickSmoke: false,
     advanceDelayMs: 250,
     waitTitle: false,
     clickTitleMenu: "",
@@ -48,6 +54,11 @@ function parseArgs(argv) {
     seedDummySaveSlot: -1,
     seedTitleClear: "",
     seedConfigVoiceOff: -1,
+    seedUpscale: false,
+    seedUpscaleScale: 2,
+    seedUpscaleModel: "waifu2x",
+    seedUpscaleMode: "fast",
+    pressLeftCtrl: false,
     saveLoadAdvance: 0,
     openLogAfterBacklog: 0,
     clickMessageControl: -1,
@@ -113,6 +124,12 @@ function parseArgs(argv) {
     else if (a === "--quick-save-storage-failure-smoke") {
       o.quickSaveStorageFailureSmoke = true;
     }
+    else if (a === "--cloud-state-smoke") {
+      o.cloudStateSmoke = true;
+    }
+    else if (a === "--engine-manager-click-smoke") {
+      o.engineManagerClickSmoke = true;
+    }
     else if (a === "--advance") { o.advance = Number.parseInt(argv[++i], 10); }
     else if (a === "--advance-delay-ms") { o.advanceDelayMs = Number.parseInt(argv[++i], 10); }
     else if (a === "--wait-title") { o.waitTitle = true; }
@@ -144,6 +161,24 @@ function parseArgs(argv) {
     else if (a === "--seed-title-clear") { o.seedTitleClear = argv[++i] ?? "iv"; }
     else if (a === "--seed-config-voice-off") {
       o.seedConfigVoiceOff = Number.parseInt(argv[++i], 10);
+    }
+    else if (a === "--seed-upscale") {
+      o.seedUpscale = true;
+    }
+    else if (a === "--seed-upscale-scale") {
+      o.seedUpscale = true;
+      o.seedUpscaleScale = Number.parseInt(argv[++i], 10);
+    }
+    else if (a === "--seed-upscale-model") {
+      o.seedUpscale = true;
+      o.seedUpscaleModel = argv[++i] ?? "waifu2x";
+    }
+    else if (a === "--seed-upscale-mode") {
+      o.seedUpscale = true;
+      o.seedUpscaleMode = argv[++i] ?? "fast";
+    }
+    else if (a === "--press-left-ctrl") {
+      o.pressLeftCtrl = true;
     }
     else if (a === "--save-load-advance") { o.saveLoadAdvance = Number.parseInt(argv[++i], 10); }
     else if (a === "--open-log-after-backlog") {
@@ -308,6 +343,17 @@ try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   page.on("console", (m) => { consoleLines.push(`[${m.type()}] ${m.text()}`); });
   page.on("pageerror", (e) => { consoleLines.push(`[pageerror] ${e.message}`); });
+  if (opts.seedUpscale) {
+    const settings = normalizeUpscaleSettings({
+      upscaleEnabled: true,
+      upscaleScale: opts.seedUpscaleScale,
+      upscaleModel: opts.seedUpscaleModel,
+      upscaleQualityMode: opts.seedUpscaleMode,
+    });
+    await page.addInitScript(({ key, settings: seededSettings }) => {
+      window.localStorage.setItem(key, JSON.stringify({ version: 1, settings: seededSettings }));
+    }, { key: UPSCALE_SETTINGS_STORAGE_KEY, settings });
+  }
   await page.goto(url, { waitUntil: "load", timeout: 20_000 });
 
   const deadline = Date.now() + opts.timeoutMs;
@@ -543,6 +589,28 @@ try {
   if (opts.clickDialogControl) {
     await clickDialogControl(page, opts.clickDialogControl);
   }
+  let pressedLeftCtrl = null;
+  if (opts.pressLeftCtrl) {
+    await page.keyboard.press("ControlLeft");
+    await page.waitForTimeout(120);
+    pressedLeftCtrl = await page.evaluate(() => {
+      const manager = document.querySelector(".engine-manager");
+      const inst = window.__sakuraActiveInstall ?? null;
+      return {
+        managerPresent: manager !== null,
+        managerOpen: manager !== null && manager.hidden !== true,
+        activeTab: manager?.dataset?.activeTab ?? "",
+        tabLabels: Array.from(manager?.querySelectorAll?.(".engine-manager__tab") ?? [])
+          .map((button) => button.textContent ?? ""),
+        scenarioConfigOpen: inst?.player?.configState?.open === true,
+        safeConfigOpen: inst?.player?.safeState?.configOpen ?? 0,
+      };
+    });
+  }
+  let engineManagerClick = null;
+  if (opts.engineManagerClickSmoke) {
+    engineManagerClick = await runEngineManagerClickSmoke(page);
+  }
   if (opts.waitAfterTargetMs > 0) {
     await page.waitForTimeout(opts.waitAfterTargetMs);
   }
@@ -580,6 +648,10 @@ try {
   if (opts.quickSaveStorageFailureSmoke) {
     quickSaveStorageFailure = await runQuickSaveStorageFailureSmoke(page, opts);
   }
+  let cloudState = null;
+  if (opts.cloudStateSmoke) {
+    cloudState = await runCloudStateSmoke(page);
+  }
 
   const state = await page.evaluate(() => {
     const s = window.__sakuraRuntimeState ?? null;
@@ -593,6 +665,14 @@ try {
     const canvas = document.getElementById("stage");
     const ctx = canvas?.getContext?.("2d", { willReadFrequently: true }) ?? null;
     const sample = (x, y) => ctx ? Array.from(ctx.getImageData(x, y, 1, 1).data) : null;
+    const imageSummary = (image) => image ? {
+      width: image.width ?? 0,
+      height: image.height ?? 0,
+      logicalWidth: image.logicalWidth ?? image.width ?? 0,
+      logicalHeight: image.logicalHeight ?? image.height ?? 0,
+      upscaled: image.upscaled === true,
+      upscaleScale: image.upscaleScale ?? 1,
+    } : null;
     const hq = s?.runtimeGraphHistoryQueue ?? null;
     const slim = (ev) => ({
       serviceId: ev?.serviceId, off: ev?.instructionOffset, argc: ev?.argCount,
@@ -605,6 +685,45 @@ try {
       summary: s?.summary ?? null,
       runtimeError: s?.runtimeError ?? null,
       runtimeSessionLast: s?.runtimeSession?.last ?? null,
+      engineManager: (() => {
+        const overlay = document.querySelector(".engine-manager");
+        const status = overlay?.querySelector?.(".engine-manager__status") ?? null;
+        return {
+          present: overlay !== null,
+          open: overlay !== null && overlay.hidden !== true,
+          activeTab: overlay?.dataset?.activeTab ?? "",
+          statusText: status?.textContent ?? "",
+        };
+      })(),
+      hostVisual: inst ? {
+        stage: inst.stage ?? "",
+        backingScale: Number.parseInt(canvas?.dataset?.backingScale ?? "1", 10),
+        titleImage: inst.titleImage ? imageSummary(inst.titleImage) : null,
+        bootScreens: (inst.bootScreens ?? []).map((screen) => ({
+          name: screen.name,
+          image: imageSummary(screen.image),
+        })),
+        titleButtons: Object.fromEntries(
+          Object.entries(inst.titleButtonSprites ?? {}).map(([name, sprite]) => [
+            name,
+            {
+              image: imageSummary(sprite.image),
+              stateWidth: sprite.stateWidth ?? 0,
+              stateHeight: sprite.stateHeight ?? 0,
+              sourceStateWidth: sprite.sourceStateWidth ?? 0,
+              sourceStateHeight: sprite.sourceStateHeight ?? 0,
+            },
+          ]),
+        ),
+        titleMusicBackground: inst.titleMusicSprites?.background
+          ? imageSummary(inst.titleMusicSprites.background)
+          : null,
+        messagePanel: inst.messageWindow?.panel ? imageSummary(inst.messageWindow.panel) : null,
+        configBase: inst.configWindow?.base ? imageSummary(inst.configWindow.base) : null,
+        dialogExit: inst.dialogWindow?.panels?.exit
+          ? imageSummary(inst.dialogWindow.panels.exit)
+          : null,
+      } : null,
       graphRender: s?.graphRender ?? null,
       playerEvent: ev ? {
         kind: ev.kind,
@@ -649,6 +768,12 @@ try {
       scenarioVisual: inst?.player ? {
         backgroundName: inst.player.scene?.currentName ?? null,
         backgroundReady: Number(inst.player.scene?.current !== null),
+        backgroundUpscaled: inst.player.scene?.current?.upscaled === true,
+        backgroundUpscaleScale: inst.player.scene?.current?.upscaleScale ?? 1,
+        backgroundWidth: inst.player.scene?.current?.width ?? 0,
+        backgroundHeight: inst.player.scene?.current?.height ?? 0,
+        backgroundLogicalWidth: inst.player.scene?.current?.logicalWidth ?? 0,
+        backgroundLogicalHeight: inst.player.scene?.current?.logicalHeight ?? 0,
         shakeMs: inst.player.safeState?.sceneShakeMs ?? 0,
         shakeAmplitudeX: inst.player.safeState?.sceneShakeAmplitudeX ?? 0,
         shakeAmplitudeY: inst.player.safeState?.sceneShakeAmplitudeY ?? 0,
@@ -1195,6 +1320,7 @@ try {
     saveLoad,
     quickSaveLoad,
     quickSaveStorageFailure,
+    cloudState,
     seededSave,
     seededDummySave,
     seededTitleClear,
@@ -1206,6 +1332,8 @@ try {
     clickedTitleGraphicButtons,
     clickedTitleGraphicViewer: clickedTitleGraphicViewerResult,
     clickedTitleMusic,
+    pressedLeftCtrl,
+    engineManagerClick,
     routeSmoke,
     routeChapterSmoke,
     fullRouteSmoke,
@@ -2831,6 +2959,98 @@ async function runQuickSaveStorageFailureSmoke(page, opts) {
     normalSlot0Untouched: afterFailure.normalSlot0Exists === false,
     noNoticeDialog: afterFailure.dialogOpen === false,
   };
+}
+
+async function runEngineManagerClickSmoke(page) {
+  return await page.evaluate(async () => {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const read = () => {
+      const manager = document.querySelector(".engine-manager");
+      return {
+        present: manager !== null,
+        open: manager !== null && manager.hidden !== true,
+        activeTab: manager?.dataset?.activeTab ?? "",
+        statusText: manager?.querySelector(".engine-manager__status")?.textContent ?? "",
+      };
+    };
+    const clickButton = (selector, text = "") => {
+      const buttons = Array.from(document.querySelectorAll(selector));
+      const target = buttons.find((button) => (
+        text === "" || (button.textContent ?? "").trim() === text
+      ));
+      if (!target) {
+        return false;
+      }
+      target.dispatchEvent(new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+      }));
+      return true;
+    };
+    const waitFor = async (predicate, timeoutMs = 5000) => {
+      const deadline = performance.now() + timeoutMs;
+      while (performance.now() < deadline) {
+        if (predicate()) {
+          return true;
+        }
+        await sleep(50);
+      }
+      return false;
+    };
+    const before = read();
+    const cloudSaveClicked = clickButton(".engine-manager__action", "Cloud Save");
+    const saveSettled = await waitFor(() => /^Saved \d+ keys$/.test(read().statusText));
+    const afterCloudSave = read();
+    const progressTabClicked = clickButton(".engine-manager__tab", "Progress");
+    await sleep(50);
+    const afterProgressTab = read();
+    const closeClicked = clickButton(".engine-manager__close", "x");
+    await sleep(50);
+    const afterClose = read();
+    window.__sakuraEngineManager?.open?.("cloud");
+    await sleep(50);
+    return {
+      before,
+      cloudSaveClicked,
+      saveSettled,
+      afterCloudSave,
+      progressTabClicked,
+      afterProgressTab,
+      closeClicked,
+      afterClose,
+      final: read(),
+    };
+  });
+}
+
+async function runCloudStateSmoke(page) {
+  return await page.evaluate(async () => {
+    const storage = window.localStorage;
+    storage.setItem("__sakura_cloud_smoke_progress", "saved");
+    storage.setItem("sakura.config.v1", JSON.stringify({
+      version: 1,
+      settings: { textSpeed: 0.42 },
+    }));
+    const save = await window.sakuraSaveCloudState?.();
+    storage.setItem("__sakura_cloud_smoke_progress", "changed");
+    storage.setItem("__sakura_cloud_smoke_extra", "remove-me");
+    const beforeLoad = {
+      progress: storage.getItem("__sakura_cloud_smoke_progress"),
+      extra: storage.getItem("__sakura_cloud_smoke_extra"),
+    };
+    const load = await window.sakuraLoadCloudState?.({ reload: false });
+    return {
+      save,
+      load,
+      beforeLoad,
+      afterLoad: {
+        progress: storage.getItem("__sakura_cloud_smoke_progress"),
+        extra: storage.getItem("__sakura_cloud_smoke_extra"),
+        config: storage.getItem("sakura.config.v1"),
+      },
+    };
+  });
 }
 
 async function captureQuickSaveLoadState(page) {

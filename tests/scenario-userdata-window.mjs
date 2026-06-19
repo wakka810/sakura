@@ -4,6 +4,7 @@ import {
   closeScenarioUserDataWindow,
   createScenarioUserDataState,
   openScenarioUserDataWindow,
+  paintScenarioUserDataWindow,
   scenarioUserDataControlAt,
   userDataHoverKey,
   USER_DATA_TOTAL_PAGES,
@@ -145,6 +146,7 @@ storedValues.set("sakura.session.slot.1", JSON.stringify({
   savedAt: "2026-06-14 12:00:00",
   event: { eventCount: 42, text: "saved text" },
   visual: { backgroundName: "EV_op01a" },
+  preview: { dataUrl: "data:image/png;base64,QUJDRA==" },
 }));
 assert.deepEqual(readScenarioSaveSlotSummary(1, storage), {
   slot: 1,
@@ -154,6 +156,7 @@ assert.deepEqual(readScenarioSaveSlotSummary(1, storage), {
   savedAt: "2026-06-14 12:00:00",
   text: "saved text",
   backgroundName: "EV_op01a",
+  previewDataUrl: "data:image/png;base64,QUJDRA==",
 });
 storedValues.set("sakura.session.quick", JSON.stringify({
   scenarioName: "02_abend_01",
@@ -171,8 +174,116 @@ assert.deepEqual(readScenarioQuickSaveSummary(storage), {
   backgroundName: "",
 });
 
+// --- Slot painting follows usdtwnd._bp geometry ---
+const paintOps = [];
+installCanvasStubs();
+openScenarioUserDataWindow(state, "save");
+paintScenarioUserDataWindow(
+  fakeContext(paintOps),
+  { width: 1280, height: 720 },
+  skin,
+  state,
+  [{
+    exists: true,
+    thumbnail: image(1280, 720),
+    savedAt: "2026-06-18 07:52:30",
+    text: "　ただ、舞い散る桜を見ている。",
+  }],
+);
+
+const thumbnailDraw = paintOps.find((op) =>
+  op.kind === "drawImage"
+  && op.args.length === 9
+  && Math.round(op.args[5]) === 80
+  && Math.round(op.args[6]) === 122
+);
+assert.ok(thumbnailDraw, "thumbnail draw uses usdtwnd._bp slot offset 36,12");
+assert.equal(Math.round(thumbnailDraw.args[7]), 160);
+assert.equal(Math.round(thumbnailDraw.args[8]), 90);
+
+const dateDraws = paintOps.filter((op) => op.kind === "fillText" && op.y === 128);
+const timeDraws = paintOps.filter((op) => op.kind === "fillText" && op.y === 150);
+assert.equal(dateDraws.map((op) => op.text).join(""), "26/06/18");
+assert.equal(timeDraws.map((op) => op.text).join(""), "07:52:30");
+assert.deepEqual(dateDraws.map((op) => [op.text, op.x, op.y]), [
+  ["2", 254, 128],
+  ["6", 271.5, 128],
+  ["/", 289, 128],
+  ["0", 306.5, 128],
+  ["6", 324, 128],
+  ["/", 341.5, 128],
+  ["1", 359, 128],
+  ["8", 376.5, 128],
+]);
+assert.equal(timeDraws[0].x, 254);
+assert.equal(timeDraws[0].y, 150);
+assert.match(dateDraws[0].font, /MS Gothic/);
+assert.equal(dateDraws[0].letterSpacing, undefined);
+assert.equal(paintOps.some((op) => op.kind === "fillText" && op.text === "26/06/18.07:52:30"), false);
+
+const bodyDraw = paintOps.find((op) => op.kind === "fillText" && op.text.startsWith("　ただ、"));
+assert.ok(bodyDraw, "slot body text rendered");
+assert.equal(bodyDraw.x, 80);
+assert.equal(bodyDraw.y, 222);
+assert.match(bodyDraw.font, /MS Gothic/);
+
 console.log("scenario_userdata_window=ok");
 
 function image(width, height) {
   return { width, height, pixels: new Uint8Array(width * height * 4) };
+}
+
+function installCanvasStubs() {
+  if (!globalThis.ImageData) {
+    globalThis.ImageData = class ImageData {
+      constructor(data, width, height) {
+        this.data = data;
+        this.width = width;
+        this.height = height;
+      }
+    };
+  }
+  globalThis.document = {
+    createElement: () => ({
+      getContext: () => ({
+        putImageData: () => {},
+      }),
+    }),
+  };
+}
+
+function fakeContext(ops) {
+  return {
+    fillStyle: "",
+    font: "",
+    textBaseline: "",
+    save() {},
+    restore() {},
+    scale(x, y) {
+      ops.push({ kind: "scale", x, y });
+    },
+    beginPath() {},
+    rect() {},
+    clip() {},
+    fillRect(x, y, width, height) {
+      ops.push({ kind: "fillRect", x, y, width, height });
+    },
+    drawImage(...args) {
+      ops.push({ kind: "drawImage", args });
+    },
+    fillText(text, x, y) {
+      ops.push({
+        kind: "fillText",
+        text,
+        x,
+        y,
+        font: this.font,
+        fillStyle: this.fillStyle,
+        letterSpacing: this.letterSpacing,
+      });
+    },
+    measureText(text) {
+      return { width: [...text].length * 16 };
+    },
+  };
 }
