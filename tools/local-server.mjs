@@ -7,6 +7,7 @@ import { homedir, networkInterfaces } from "node:os";
 import { basename, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { extractIconFromPe } from "./pe-icon.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const webRoot = join(root, "web");
@@ -78,6 +79,7 @@ const state = {
   upscaleQueue: [],
   upscaleRunning: 0,
   upscaleJobCounter: 0,
+  faviconPromise: null,
 };
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -150,6 +152,10 @@ async function route(request, response) {
     await sendSidecar(url, response);
     return;
   }
+  if (url.pathname === "/api/install/favicon" || url.pathname === "/favicon.ico") {
+    await sendInstallFavicon(response);
+    return;
+  }
   if (url.pathname === "/api/fonts/status") {
     sendJson(response, 200, await fontStatus());
     return;
@@ -179,12 +185,14 @@ async function buildInstallCatalog() {
   const rootStringsDbPath = resolve(installDir, "BGI.gdb");
   const archives = [];
   const sidecars = [];
+  let bgiExePath = null;
   let exeCount = 0;
   let totalEntries = 0;
 
   for (const path of files) {
-    if (path.endsWith(`${sep}BGI.exe`)) {
+    if (basenameLower(path) === "bgi.exe") {
       exeCount += 1;
+      bgiExePath ??= path;
       continue;
     }
     if (basenameLower(path) === "bgi.gdb") {
@@ -224,7 +232,7 @@ async function buildInstallCatalog() {
       size: sidecar.size,
     })),
   };
-  return { publicCatalog, archives, sidecars };
+  return { publicCatalog, archives, sidecars, bgiExePath };
 }
 
 async function readSidecarCatalog(path, sidecarIndex) {
@@ -370,6 +378,32 @@ async function sendSidecar(url, response) {
     return;
   }
   createReadStream(sidecar.path, { start: offset, end: offset + length - 1 }).pipe(response);
+}
+
+async function sendInstallFavicon(response) {
+  const icon = await installFavicon();
+  if (!icon) {
+    sendJson(response, 404, { error: "favicon_not_found" });
+    return;
+  }
+  response.writeHead(200, {
+    "Content-Type": "image/x-icon",
+    "Content-Length": String(icon.length),
+    "Cache-Control": "no-store",
+  });
+  response.end(icon);
+}
+
+async function installFavicon() {
+  await installCatalog();
+  const exePath = state.install?.bgiExePath ?? null;
+  if (!exePath) {
+    return null;
+  }
+  state.faviconPromise ??= readFile(exePath)
+    .then((exe) => extractIconFromPe(exe))
+    .catch(() => null);
+  return await state.faviconPromise;
 }
 
 async function fontStatus() {
@@ -1645,6 +1679,8 @@ function contentType(path) {
       return "font/ttf";
     case ".otf":
       return "font/otf";
+    case ".ico":
+      return "image/x-icon";
     default:
       return "application/octet-stream";
   }

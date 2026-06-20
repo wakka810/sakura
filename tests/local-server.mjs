@@ -9,7 +9,7 @@ const installDir = await mkdtemp(join(tmpdir(), "sakura-install-"));
 const upscaleCacheDir = await mkdtemp(join(tmpdir(), "sakura-upscale-cache-"));
 const cloudStateDir = await mkdtemp(join(tmpdir(), "sakura-cloud-state-"));
 const fontDir = await mkdtemp(join(tmpdir(), "sakura-fonts-"));
-await writeFile(join(installDir, "BGI.exe"), new Uint8Array([0x4d, 0x5a]));
+await writeFile(join(installDir, "BGI.exe"), buildPeWithIcon());
 await writeFile(join(installDir, "BGI.gdb"), bytes("BURIKO GDB 3.00\0fixture"));
 await writeFile(join(installDir, "synthetic.arc"), buildArc20([
   ["fixture.bin", new Uint8Array([1, 2, 3, 4, 5])],
@@ -102,8 +102,25 @@ try {
     throw new Error("sidecar payload fetch returned wrong bytes");
   }
   const html = await (await fetch(`http://127.0.0.1:${port}/`)).text();
-  if (!html.includes("Sakura BGI Browser Runtime")) {
+  if (!html.includes('id="stage"')) {
     throw new Error("static runtime page missing");
+  }
+  if (!html.includes("<title>サクラノ詩</title>")) {
+    throw new Error("runtime page title missing");
+  }
+  const favicon = new Uint8Array(
+    await (await fetch(`http://127.0.0.1:${port}/favicon.ico`)).arrayBuffer(),
+  );
+  if (
+    favicon.byteLength < 30
+    || favicon[0] !== 0
+    || favicon[1] !== 0
+    || favicon[2] !== 1
+    || favicon[4] !== 1
+    || favicon[6] !== 16
+    || favicon[7] !== 16
+  ) {
+    throw new Error(`favicon endpoint did not return expected ICO bytes ${favicon.byteLength}`);
   }
   const fontStatus = await (await fetch(`http://127.0.0.1:${port}/api/fonts/status`)).json();
   if (
@@ -251,6 +268,77 @@ function buildArc20(files) {
   }
 
   return { data };
+}
+
+function buildPeWithIcon() {
+  const pe = Buffer.alloc(0x600);
+  pe.write("MZ", 0, "binary");
+  pe.writeUInt32LE(0x80, 0x3c);
+  pe.write("PE\0\0", 0x80, "binary");
+  const coff = 0x84;
+  pe.writeUInt16LE(0x014c, coff);
+  pe.writeUInt16LE(1, coff + 2);
+  pe.writeUInt16LE(0xe0, coff + 16);
+  pe.writeUInt16LE(0x010f, coff + 18);
+  const optional = coff + 20;
+  pe.writeUInt16LE(0x10b, optional);
+  const resourceDirectory = optional + 96 + 2 * 8;
+  pe.writeUInt32LE(0x1000, resourceDirectory);
+  pe.writeUInt32LE(0x400, resourceDirectory + 4);
+  const section = optional + 0xe0;
+  pe.write(".rsrc\0\0\0", section, "binary");
+  pe.writeUInt32LE(0x400, section + 8);
+  pe.writeUInt32LE(0x1000, section + 12);
+  pe.writeUInt32LE(0x400, section + 16);
+  pe.writeUInt32LE(0x200, section + 20);
+
+  const resource = 0x200;
+  writeResourceDirectory(pe, resource + 0x00, [
+    { id: 3, directoryOffset: 0x20 },
+    { id: 14, directoryOffset: 0x80 },
+  ]);
+  writeResourceDirectory(pe, resource + 0x20, [{ id: 1, directoryOffset: 0x40 }]);
+  writeResourceDirectory(pe, resource + 0x40, [{ id: 1033, dataOffset: 0x60 }]);
+  writeResourceData(pe, resource + 0x60, 0x1000 + 0x160, 8);
+  writeResourceDirectory(pe, resource + 0x80, [{ id: 1, directoryOffset: 0xa0 }]);
+  writeResourceDirectory(pe, resource + 0xa0, [{ id: 1033, dataOffset: 0xc0 }]);
+  writeResourceData(pe, resource + 0xc0, 0x1000 + 0x120, 20);
+
+  const group = resource + 0x120;
+  pe.writeUInt16LE(0, group);
+  pe.writeUInt16LE(1, group + 2);
+  pe.writeUInt16LE(1, group + 4);
+  pe[group + 6] = 16;
+  pe[group + 7] = 16;
+  pe[group + 8] = 0;
+  pe[group + 9] = 0;
+  pe.writeUInt16LE(1, group + 10);
+  pe.writeUInt16LE(32, group + 12);
+  pe.writeUInt32LE(8, group + 14);
+  pe.writeUInt16LE(1, group + 18);
+  pe.set(Buffer.from([0x28, 0, 0, 0, 16, 0, 0, 0]), resource + 0x160);
+  return pe;
+}
+
+function writeResourceDirectory(pe, offset, entries) {
+  pe.writeUInt16LE(0, offset + 12);
+  pe.writeUInt16LE(entries.length, offset + 14);
+  for (const [index, entry] of entries.entries()) {
+    const entryOffset = offset + 16 + index * 8;
+    pe.writeUInt32LE(entry.id, entryOffset);
+    if (entry.directoryOffset !== undefined) {
+      pe.writeUInt32LE(0x80000000 + entry.directoryOffset, entryOffset + 4);
+    } else {
+      pe.writeUInt32LE(entry.dataOffset, entryOffset + 4);
+    }
+  }
+}
+
+function writeResourceData(pe, offset, rva, size) {
+  pe.writeUInt32LE(rva, offset);
+  pe.writeUInt32LE(size, offset + 4);
+  pe.writeUInt32LE(0, offset + 8);
+  pe.writeUInt32LE(0, offset + 12);
 }
 
 function bytes(value) {
