@@ -108,6 +108,9 @@ try {
   if (!html.includes("<title>サクラノ詩</title>")) {
     throw new Error("runtime page title missing");
   }
+  if (!html.includes('href="./api/install/favicon"')) {
+    throw new Error("runtime page favicon link must use relative API URL");
+  }
   const favicon = new Uint8Array(
     await (await fetch(`http://127.0.0.1:${port}/favicon.ico`)).arrayBuffer(),
   );
