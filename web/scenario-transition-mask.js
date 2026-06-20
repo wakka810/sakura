@@ -1,7 +1,8 @@
 const transitionMaskCache = new WeakMap();
 const alphaMaskCache = new WeakMap();
 const maskedImageCache = new WeakMap();
-const DEFAULT_EDGE_WIDTH = 16;
+// BGI's CDspObjBackF mask path feathers over the full 8-bit mask range.
+const DEFAULT_EDGE_WIDTH = 128;
 
 export function paintMappedTransition(
   context,

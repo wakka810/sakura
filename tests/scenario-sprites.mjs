@@ -837,6 +837,18 @@ if (
   throw new Error("mapped transition did not reveal darker map values first");
 }
 
+const midMaskEarlyAlpha = mappedTransitionAlpha(85, 0.34);
+const midMaskLaterAlpha = mappedTransitionAlpha(85, 0.42);
+if (
+  midMaskEarlyAlpha <= 0
+  || midMaskEarlyAlpha >= 140
+  || midMaskLaterAlpha <= midMaskEarlyAlpha
+  || midMaskLaterAlpha >= 200
+  || mappedTransitionAlpha(240, 0.5) <= 0
+) {
+  throw new Error("mapped transition snapped instead of feathering through the BGI mask ramp");
+}
+
 finishScenarioSpriteTransitions(concurrentSpriteState, 600);
 if (
   concurrentSpriteState.transitions.size !== 1

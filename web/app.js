@@ -2929,8 +2929,19 @@ function startStageAnim(mounted) {
         return;
       }
       paintMountedFrame(m);
-      if (t >= BOOT_FADE_MS) {
+      if (cur.hold) {
         scheduleStageAnimStep(step, Math.max(0, cur.dur - t));
+        return;
+      }
+      scheduleStageAnimStep(step);
+      return;
+    }
+    if (stage === "boot" && TITLE_NOAUTO) {
+      const phases = bootPhaseList(m);
+      const cur = phases[Math.min(m.bootPhase, phases.length - 1)];
+      paintMountedFrame(m);
+      if (cur.hold || t >= cur.dur) {
+        stageAnimRunning = false;
         return;
       }
       scheduleStageAnimStep(step);
@@ -2938,10 +2949,6 @@ function startStageAnim(mounted) {
     }
     paintMountedFrame(m);
     if (stage === "title" && t >= BOOT_FADE_MS) {
-      stageAnimRunning = false;
-      return;
-    }
-    if (stage === "boot" && TITLE_NOAUTO && t >= BOOT_FADE_MS) {
       stageAnimRunning = false;
       return;
     }
