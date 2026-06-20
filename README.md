@@ -48,6 +48,14 @@ node tools/build-wasm.mjs
 npm run serve
 ```
 
+LAN内の端末からアクセスする場合:
+
+```bash
+npm run serve:lan
+```
+
+起動ログに `url=http://192.168.x.x:8788/` のようなURLが出ます。
+
 ## テスト
 
 通常:

@@ -1,5 +1,5 @@
 // Boot the browser runtime against the local install server and dump state + screenshot.
-// Usage: node tools/boot-runtime.mjs [--png out.png] [--json out.json] [--route pi|an|rn|ze] [--scenario-name NAME] [--start-route pi|an|rn|ze] [--start-scenario-name NAME] [--smoke-routes] [--smoke-route-chapters] [--smoke-full-routes] [--smoke-full-route ROUTE] [--quick-save-load-smoke] [--quick-save-storage-failure-smoke] [--cloud-state-smoke] [--engine-manager-click-smoke] [--timeout-ms N] [--post-ready-ms N] [--wait-after-target-ms N] [--advance-delay-ms N] [--wait-title] [--click-title-menu Start|Load|Config|Extra|Graphic|Scene|Music|IV|V|VI|Exit]... [--open-title-scene] [--click-title-scene INDEX] [--click-title-graphic INDEX] [--click-title-graphic-button previous|next|top|last|back]... [--click-title-graphic-viewer] [--click-title-music INDEX] [--click-dialog-control yes|no|ack] [--seed-save-slot N] [--seed-dummy-save-slot N] [--seed-config-voice-off INDEX] [--seed-upscale] [--seed-upscale-scale N] [--seed-upscale-model MODEL] [--seed-upscale-mode fast|quality] [--press-left-ctrl] [--save-load-advance N] [--open-log-after-backlog N] [--click-message-control INDEX] [--open-userdata save|load] [--click-userdata-control top|previous|next|last|load|save|back|exit|delete|move|copy] [--click-config-control reset|title|back] [--advance-until-event N] [--advance-until-message-control N] [--message-control-count N] [--message-control-opcode N] [--advance-until-sprite-transition N] [--sprite-transition-scenario NAME] [--advance-until-sprite-motion N] [--advance-until-control-motion N] [--advance-until-scene-object N] [--advance-after-scene-object N] [--advance-after-scene-object-delay-ms N] [--advance-until-scene-object-transition N] [--scene-object-transition-event N] [--advance-after-scene-object-transition N] [--advance-until-filter N] [--advance-after-filter N] [--advance-until-filter-clear N] [--advance-after-filter-clear N] [--advance-until-preset-shake N] [--advance-until-sfx-control N] [--advance-until-voice-channels N] [--voice-channel-count N] [--advance-until-scenario N] [--target-scenario NAME] [--advance-until-choice N]
+// Usage: node tools/boot-runtime.mjs [--png out.png] [--json out.json] [--route pi|an|rn|ze] [--scenario-name NAME] [--start-route pi|an|rn|ze] [--start-scenario-name NAME] [--smoke-routes] [--smoke-route-chapters] [--smoke-full-routes] [--smoke-full-route ROUTE] [--quick-save-load-smoke] [--quick-save-storage-failure-smoke] [--cloud-state-smoke] [--engine-manager-click-smoke] [--timeout-ms N] [--post-ready-ms N] [--wait-after-target-ms N] [--advance-delay-ms N] [--wait-title] [--click-title-menu Start|Load|Config|Extra|Graphic|Scene|Music|IV|V|VI|Exit]... [--open-title-scene] [--click-title-scene INDEX] [--click-title-graphic INDEX] [--click-title-graphic-button previous|next|top|last|back]... [--click-title-graphic-viewer] [--click-title-music INDEX] [--click-dialog-control yes|no|ack] [--seed-save-slot N] [--seed-dummy-save-slot N] [--seed-config-voice-off INDEX] [--seed-upscale] [--seed-upscale-scale N] [--seed-upscale-model MODEL] [--seed-upscale-mode fast|quality] [--press-left-ctrl] [--two-finger-double-tap] [--save-load-advance N] [--open-log-after-backlog N] [--click-message-control INDEX] [--open-userdata save|load] [--click-userdata-control top|previous|next|last|load|save|back|exit|delete|move|copy] [--click-config-control reset|title|back] [--advance-until-event N] [--advance-until-message-control N] [--message-control-count N] [--message-control-opcode N] [--advance-until-sprite-transition N] [--sprite-transition-scenario NAME] [--advance-until-sprite-motion N] [--advance-until-control-motion N] [--advance-until-scene-object N] [--advance-after-scene-object N] [--advance-after-scene-object-delay-ms N] [--advance-until-scene-object-transition N] [--scene-object-transition-event N] [--advance-after-scene-object-transition N] [--advance-until-filter N] [--advance-after-filter N] [--advance-until-filter-clear N] [--advance-after-filter-clear N] [--advance-until-preset-shake N] [--advance-until-sfx-control N] [--advance-until-voice-channels N] [--voice-channel-count N] [--advance-until-scenario N] [--target-scenario NAME] [--advance-until-choice N]
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { chromium } from "playwright";
@@ -59,6 +59,7 @@ function parseArgs(argv) {
     seedUpscaleModel: "waifu2x",
     seedUpscaleMode: "fast",
     pressLeftCtrl: false,
+    twoFingerDoubleTap: false,
     saveLoadAdvance: 0,
     openLogAfterBacklog: 0,
     clickMessageControl: -1,
@@ -179,6 +180,9 @@ function parseArgs(argv) {
     }
     else if (a === "--press-left-ctrl") {
       o.pressLeftCtrl = true;
+    }
+    else if (a === "--two-finger-double-tap") {
+      o.twoFingerDoubleTap = true;
     }
     else if (a === "--save-load-advance") { o.saveLoadAdvance = Number.parseInt(argv[++i], 10); }
     else if (a === "--open-log-after-backlog") {
@@ -606,6 +610,10 @@ try {
         safeConfigOpen: inst?.player?.safeState?.configOpen ?? 0,
       };
     });
+  }
+  let twoFingerDoubleTapped = null;
+  if (opts.twoFingerDoubleTap) {
+    twoFingerDoubleTapped = await dispatchTwoFingerDoubleTap(page);
   }
   let engineManagerClick = null;
   if (opts.engineManagerClickSmoke) {
@@ -1333,6 +1341,7 @@ try {
     clickedTitleGraphicViewer: clickedTitleGraphicViewerResult,
     clickedTitleMusic,
     pressedLeftCtrl,
+    twoFingerDoubleTapped,
     engineManagerClick,
     routeSmoke,
     routeChapterSmoke,
@@ -2971,6 +2980,10 @@ async function runEngineManagerClickSmoke(page) {
         open: manager !== null && manager.hidden !== true,
         activeTab: manager?.dataset?.activeTab ?? "",
         statusText: manager?.querySelector(".engine-manager__status")?.textContent ?? "",
+        fullscreenButtonText:
+          manager?.querySelector(".engine-manager__fullscreen")?.textContent ?? "",
+        fullscreenButtonDisabled:
+          manager?.querySelector(".engine-manager__fullscreen")?.disabled === true,
       };
     };
     const clickButton = (selector, text = "") => {
@@ -3005,6 +3018,9 @@ async function runEngineManagerClickSmoke(page) {
     const progressTabClicked = clickButton(".engine-manager__tab", "Progress");
     await sleep(50);
     const afterProgressTab = read();
+    const fullscreenClicked = clickButton(".engine-manager__fullscreen");
+    await sleep(50);
+    const afterFullscreenClick = read();
     const closeClicked = clickButton(".engine-manager__close", "x");
     await sleep(50);
     const afterClose = read();
@@ -3017,9 +3033,80 @@ async function runEngineManagerClickSmoke(page) {
       afterCloudSave,
       progressTabClicked,
       afterProgressTab,
+      fullscreenClicked,
+      afterFullscreenClick,
       closeClicked,
       afterClose,
       final: read(),
+    };
+  });
+}
+
+async function dispatchTwoFingerDoubleTap(page) {
+  return await page.evaluate(async () => {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const canvas = document.getElementById("stage");
+    const readManager = () => {
+      const manager = document.querySelector(".engine-manager");
+      const inst = window.__sakuraActiveInstall ?? null;
+      return {
+        managerPresent: manager !== null,
+        managerOpen: manager !== null && manager.hidden !== true,
+        activeTab: manager?.dataset?.activeTab ?? "",
+        scenarioConfigOpen: inst?.player?.configState?.open === true,
+        safeConfigOpen: inst?.player?.safeState?.configOpen ?? 0,
+      };
+    };
+    if (!canvas || typeof PointerEvent !== "function") {
+      return {
+        ...readManager(),
+        dispatched: false,
+        reason: canvas ? "pointer_event_unavailable" : "missing_canvas",
+        events: [],
+      };
+    }
+    const rect = canvas.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const events = [];
+    const dispatch = (type, pointerId, dx) => {
+      const event = new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        pointerId,
+        pointerType: "touch",
+        isPrimary: pointerId === 31,
+        clientX: cx + dx,
+        clientY: cy,
+        button: 0,
+        buttons: type === "pointerup" || type === "pointercancel" ? 0 : 1,
+      });
+      const accepted = canvas.dispatchEvent(event);
+      events.push({
+        type,
+        pointerId,
+        accepted,
+        defaultPrevented: event.defaultPrevented,
+      });
+    };
+    const tap = async (firstPointerId, secondPointerId) => {
+      dispatch("pointerdown", firstPointerId, -28);
+      await sleep(20);
+      dispatch("pointerdown", secondPointerId, 28);
+      await sleep(35);
+      dispatch("pointerup", firstPointerId, -28);
+      await sleep(10);
+      dispatch("pointerup", secondPointerId, 28);
+    };
+    await tap(31, 32);
+    await sleep(140);
+    await tap(33, 34);
+    await sleep(120);
+    return {
+      ...readManager(),
+      dispatched: true,
+      reason: "ok",
+      events,
     };
   });
 }

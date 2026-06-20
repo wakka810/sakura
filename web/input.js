@@ -2,6 +2,7 @@ export function createInputController(canvas, options = {}) {
   const keyboardTarget = options.keyboardTarget ?? window;
   const onChange = options.onChange ?? (() => {});
   const keysDown = new Set();
+  const activeClickPointers = new Set();
   const state = {
     totalClickCount: 0,
     totalKeyPressCount: 0,
@@ -18,6 +19,7 @@ export function createInputController(canvas, options = {}) {
     state.pressedPointerButton = state.lastPointer?.button ?? 0;
     state.totalClickCount += 1;
     state.pendingClickCount += 1;
+    activeClickPointers.add(pointerKey(event));
     canvas.focus();
     onChange();
   });
@@ -25,16 +27,34 @@ export function createInputController(canvas, options = {}) {
     updatePointerState(canvas, state, event);
     onChange();
   });
-  canvas.addEventListener("pointerup", () => {
-    state.pointerValid = false;
-    state.pressedPointerButton = 0;
+  canvas.addEventListener("pointerup", (event) => {
+    activeClickPointers.delete(pointerKey(event));
+    clearPointerPress(state);
     onChange();
   });
-  canvas.addEventListener("pointerleave", () => {
-    state.pointerValid = false;
-    state.pressedPointerButton = 0;
+  canvas.addEventListener("pointercancel", (event) => {
+    activeClickPointers.delete(pointerKey(event));
+    clearPointerPress(state);
     onChange();
   });
+  canvas.addEventListener("pointerleave", (event) => {
+    activeClickPointers.delete(pointerKey(event));
+    clearPointerPress(state);
+    onChange();
+  });
+
+  function cancelActivePointerClicks() {
+    const canceledClickCount = activeClickPointers.size;
+    if (canceledClickCount === 0 && !state.pointerValid && state.pressedPointerButton === 0) {
+      return 0;
+    }
+    state.totalClickCount = Math.max(0, state.totalClickCount - canceledClickCount);
+    state.pendingClickCount = Math.max(0, state.pendingClickCount - canceledClickCount);
+    activeClickPointers.clear();
+    clearPointerPress(state);
+    onChange();
+    return canceledClickCount;
+  }
 
   keyboardTarget.addEventListener("keydown", (event) => {
     if (!keysDown.has(event.key)) {
@@ -76,6 +96,7 @@ export function createInputController(canvas, options = {}) {
       state.pendingKeyPressCount = 0;
       return runtimeState;
     },
+    cancelActivePointerClicks,
   };
 }
 
@@ -87,4 +108,13 @@ function updatePointerState(canvas, state, event) {
     button: Number.isInteger(event.button) ? event.button + 1 : 0,
   };
   state.pointerValid = true;
+}
+
+function clearPointerPress(state) {
+  state.pointerValid = false;
+  state.pressedPointerButton = 0;
+}
+
+function pointerKey(event) {
+  return Number.isInteger(event.pointerId) ? event.pointerId : "pointer";
 }

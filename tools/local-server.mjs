@@ -3,7 +3,7 @@ import { access, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } f
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
-import { homedir } from "node:os";
+import { homedir, networkInterfaces } from "node:os";
 import { basename, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -101,7 +101,10 @@ const server = createServer((request, response) => {
 
 server.listen(port, host, () => {
   console.log(`sakura_local_server=ready`);
-  console.log(`url=http://${host}:${port}/`);
+  console.log(`bind=${host}:${port}`);
+  for (const url of advertisedUrls(host, port)) {
+    console.log(`url=${url}`);
+  }
   console.log(`install_dir=${installDir}`);
 });
 
@@ -110,7 +113,7 @@ async function route(request, response) {
     sendJson(response, 405, { error: "method_not_allowed" });
     return;
   }
-  const url = new URL(request.url, `http://${host}:${port}`);
+  const url = new URL(request.url, serverUrlBase());
   if (url.pathname === "/api/cloud-state" && request.method === "GET") {
     await sendCloudState(response);
     return;
@@ -610,7 +613,7 @@ async function prewarmUpscaledAssets(request, response) {
     return;
   }
 
-  const urlBase = `http://${host}:${port}`;
+  const urlBase = serverUrlBase();
   const queued = [];
   for (const asset of body.assets.slice(0, 256)) {
     const url = new URL("/api/upscale/asset", urlBase);
@@ -1435,6 +1438,49 @@ function sendJson(response, status, payload) {
     "Cache-Control": "no-store",
   });
   response.end(body);
+}
+
+function advertisedUrls(listenHost, listenPort) {
+  const urls = [];
+  const addUrl = (urlHost) => {
+    const url = `http://${formatUrlHost(urlHost)}:${listenPort}/`;
+    if (!urls.includes(url)) {
+      urls.push(url);
+    }
+  };
+  if (isAnyAddress(listenHost)) {
+    addUrl("127.0.0.1");
+    for (const address of lanIpv4Addresses()) {
+      addUrl(address);
+    }
+  } else {
+    addUrl(listenHost);
+  }
+  return urls;
+}
+
+function serverUrlBase() {
+  return `http://${formatUrlHost(host)}:${port}`;
+}
+
+function isAnyAddress(value) {
+  return value === "0.0.0.0" || value === "::" || value === "";
+}
+
+function lanIpv4Addresses() {
+  const addresses = [];
+  for (const entries of Object.values(networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (entry.family === "IPv4" && !entry.internal) {
+        addresses.push(entry.address);
+      }
+    }
+  }
+  return addresses.sort();
+}
+
+function formatUrlHost(value) {
+  return value.includes(":") && !value.startsWith("[") ? `[${value}]` : value;
 }
 
 async function collectFiles(dir) {

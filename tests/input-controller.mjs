@@ -1,4 +1,6 @@
+import assert from "node:assert/strict";
 import { createInputController } from "../web/input.js";
+import { createTwoFingerDoubleTapRecognizer } from "../web/two-finger-double-tap.js";
 
 class FakeCanvas extends EventTarget {
   focused = false;
@@ -65,6 +67,53 @@ if (runtimeThird.pointerValid !== false) {
   throw new Error(`unexpected third runtime input ${JSON.stringify(runtimeThird)}`);
 }
 
+const cancelCanvas = new FakeCanvas();
+let cancelChangeCount = 0;
+const cancelInput = createInputController(cancelCanvas, {
+  keyboardTarget: new EventTarget(),
+  onChange: () => {
+    cancelChangeCount += 1;
+  },
+});
+cancelCanvas.dispatchEvent(eventWith("pointerdown", {
+  clientX: 20,
+  clientY: 30,
+  button: 0,
+  pointerId: 11,
+}));
+assert.equal(cancelInput.cancelActivePointerClicks(), 1);
+assert.equal(cancelInput.snapshot().clickCount, 0);
+assert.equal(cancelInput.runtimeState().clickCount, 0);
+assert.equal(cancelInput.runtimeState().pointerValid, false);
+assert.equal(cancelChangeCount, 2);
+
+const gesture = createTwoFingerDoubleTapRecognizer();
+let gestureTime = 1000;
+assert.deepEqual(
+  gesture.pointerDown(pointerEvent("pointerdown", 21, 100, 100)),
+  { suppress: false, recognized: false },
+);
+assert.deepEqual(
+  gesture.pointerDown(pointerEvent("pointerdown", 22, 160, 100)),
+  { suppress: true, recognized: false },
+);
+assert.deepEqual(
+  gesture.pointerUp(pointerEvent("pointerup", 21, 100, 100)),
+  { suppress: true, recognized: false },
+);
+assert.deepEqual(
+  gesture.pointerUp(pointerEvent("pointerup", 22, 160, 100)),
+  { suppress: true, recognized: false },
+);
+gestureTime += 140;
+gesture.pointerDown(pointerEvent("pointerdown", 23, 102, 101));
+gesture.pointerDown(pointerEvent("pointerdown", 24, 162, 101));
+gesture.pointerUp(pointerEvent("pointerup", 23, 102, 101));
+assert.deepEqual(
+  gesture.pointerUp(pointerEvent("pointerup", 24, 162, 101)),
+  { suppress: true, recognized: true },
+);
+
 console.log("input_controller_smoke=ok");
 
 function eventWith(type, properties) {
@@ -73,4 +122,15 @@ function eventWith(type, properties) {
     Object.defineProperty(event, key, { value });
   }
   return event;
+}
+
+function pointerEvent(type, pointerId, clientX, clientY) {
+  gestureTime += 20;
+  return eventWith(type, {
+    pointerType: "touch",
+    pointerId,
+    clientX,
+    clientY,
+    timeStamp: gestureTime,
+  });
 }

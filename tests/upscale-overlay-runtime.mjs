@@ -7,6 +7,7 @@ import { join } from "node:path";
 const outputDir = new URL("../output/playwright/engine-management-runtime/", import.meta.url);
 mkdirSync(outputDir, { recursive: true });
 const jsonPath = new URL("left-ctrl-engine-manager.json", outputDir);
+const gestureJsonPath = new URL("two-finger-engine-manager.json", outputDir);
 const cloudStateDir = mkdtempSync(join(tmpdir(), "sakura-engine-manager-cloud-"));
 
 try {
@@ -63,6 +64,12 @@ try {
   assert.match(boot.engineManagerClick.afterCloudSave.statusText, /^Saved \d+ keys$/);
   assert.equal(boot.engineManagerClick.progressTabClicked, true);
   assert.equal(boot.engineManagerClick.afterProgressTab.activeTab, "progress");
+  assert.match(boot.engineManagerClick.before.fullscreenButtonText, /^(Fullscreen|Window)$/);
+  assert.equal(boot.engineManagerClick.fullscreenClicked, true);
+  assert.match(
+    boot.engineManagerClick.afterFullscreenClick.fullscreenButtonText,
+    /^(Fullscreen|Window)$/,
+  );
   assert.equal(boot.engineManagerClick.closeClicked, true);
   assert.equal(boot.engineManagerClick.afterClose.open, false);
   assert.equal(boot.engineManagerClick.final.open, true);
@@ -72,6 +79,52 @@ try {
   assert.equal(boot.cloudState.beforeLoad.extra, "remove-me");
   assert.equal(boot.cloudState.afterLoad.progress, "saved");
   assert.equal(boot.cloudState.afterLoad.extra, null);
+
+  const gestureResult = spawnSync(
+    "node",
+    [
+      "tools/boot-runtime.mjs",
+      "--port",
+      "8822",
+      "--json",
+      gestureJsonPath.pathname,
+      "--timeout-ms",
+      "120000",
+      "--post-ready-ms",
+      "500",
+      "--advance-until-event",
+      "5",
+      "--two-finger-double-tap",
+    ],
+    {
+      cwd: new URL("..", import.meta.url),
+      env: {
+        ...process.env,
+        SAKURA_CLOUD_STATE_DIR: cloudStateDir,
+      },
+      encoding: "utf8",
+      timeout: 150_000,
+    },
+  );
+
+  assert.equal(gestureResult.status, 0, `${gestureResult.stdout}\n${gestureResult.stderr}`);
+
+  const gestureBoot = JSON.parse(readFileSync(gestureJsonPath, "utf8"));
+  assert.equal(gestureBoot.ready, true);
+  assert.equal(gestureBoot.state.runtimeError, null);
+  assert.equal(gestureBoot.twoFingerDoubleTapped.dispatched, true);
+  assert.equal(gestureBoot.twoFingerDoubleTapped.managerPresent, true);
+  assert.equal(gestureBoot.twoFingerDoubleTapped.managerOpen, true);
+  assert.equal(gestureBoot.twoFingerDoubleTapped.activeTab, "cloud");
+  assert.equal(gestureBoot.twoFingerDoubleTapped.scenarioConfigOpen, false);
+  assert.equal(gestureBoot.twoFingerDoubleTapped.safeConfigOpen, 0);
+  assert.equal(
+    gestureBoot.twoFingerDoubleTapped.events.some((event) => event.defaultPrevented),
+    true,
+  );
+  assert.equal(gestureBoot.state.engineManager.present, true);
+  assert.equal(gestureBoot.state.engineManager.open, true);
+  assert.equal(gestureBoot.state.engineManager.activeTab, "cloud");
 } finally {
   rmSync(cloudStateDir, { recursive: true, force: true });
 }

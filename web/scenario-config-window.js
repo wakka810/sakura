@@ -25,6 +25,8 @@
 //   the corners: Reset top-left (44,40), Title (940,40) and Back (1092,40)
 //   top-right.
 
+import { applyFullscreenMode } from "./fullscreen.js";
+
 const SCREEN_WIDTH = 1280;
 const SCREEN_HEIGHT = 720;
 
@@ -186,40 +188,7 @@ export function storeScenarioConfigSettings(settings, storage = scenarioConfigSt
 }
 
 export function applyScenarioScreenMode(settings, documentRef = globalThis.document) {
-  const document = documentRef ?? globalThis.document;
-  if (!document) {
-    return { ok: false, reason: "document_unavailable" };
-  }
-  const wantsFullscreen = settings?.screenMode === "fullscreen";
-  if (wantsFullscreen) {
-    if (document.fullscreenElement) {
-      return { ok: true, reason: "already_fullscreen" };
-    }
-    const target = document.documentElement;
-    if (typeof target?.requestFullscreen !== "function") {
-      return { ok: false, reason: "fullscreen_unavailable" };
-    }
-    try {
-      const promise = target.requestFullscreen();
-      promise?.catch?.(() => {});
-      return { ok: true, reason: "fullscreen_requested" };
-    } catch {
-      return { ok: false, reason: "fullscreen_failed" };
-    }
-  }
-  if (!document.fullscreenElement) {
-    return { ok: true, reason: "already_window" };
-  }
-  if (typeof document.exitFullscreen !== "function") {
-    return { ok: false, reason: "exit_fullscreen_unavailable" };
-  }
-  try {
-    const promise = document.exitFullscreen();
-    promise?.catch?.(() => {});
-    return { ok: true, reason: "exit_fullscreen_requested" };
-  } catch {
-    return { ok: false, reason: "exit_fullscreen_failed" };
-  }
+  return applyFullscreenMode(settings, documentRef);
 }
 
 export function createScenarioConfigState() {

@@ -42,6 +42,9 @@ server.stderr.on("data", (chunk) => {
 
 try {
   await waitFor(() => output.includes("sakura_local_server=ready"), 15_000);
+  if (!output.includes(`url=http://127.0.0.1:${port}/`)) {
+    throw new Error(`server did not advertise localhost URL\n${output}`);
+  }
   const catalogResponse = await fetch(`http://127.0.0.1:${port}/api/install/catalog`);
   if (!catalogResponse.ok) {
     throw new Error(`catalog request failed ${catalogResponse.status}`);

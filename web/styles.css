@@ -23,6 +23,7 @@ html {
   height: 100%;
   overflow: hidden;
   background: #000;
+  overscroll-behavior: none;
 }
 
 body {
@@ -31,6 +32,10 @@ body {
   min-height: 100%;
   overflow: hidden;
   background: #000;
+  overscroll-behavior: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 button {
@@ -57,16 +62,23 @@ button:disabled {
 
 .runtime-shell {
   height: 100vh;
+  height: 100dvh;
+  width: 100vw;
+  width: 100dvw;
   overflow: hidden;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 320px;
+  background: #000;
 }
 
 .stage {
   display: grid;
   place-items: center;
   min-width: 0;
+  min-height: 0;
+  width: 100%;
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   background: #000;
   border: 0;
@@ -76,14 +88,17 @@ button:disabled {
 canvas {
   display: block;
   width: min(100vw, calc(100vh * 16 / 9));
+  width: min(100dvw, calc(100dvh * 16 / 9));
   max-width: 100%;
   max-height: 100vh;
+  max-height: 100dvh;
   aspect-ratio: 16 / 9;
   height: auto;
   background: #000;
   border: 0;
   outline: 0;
   image-rendering: auto;
+  touch-action: none;
 }
 
 canvas:focus,
@@ -99,6 +114,7 @@ canvas:focus-visible,
   gap: 16px;
   padding: 16px;
   height: 100vh;
+  height: 100dvh;
   overflow-y: auto;
   box-sizing: border-box;
   border-left: 1px solid #2b3038;
@@ -113,6 +129,7 @@ canvas:focus-visible,
   width: 380px;
   max-width: calc(100vw - 32px);
   max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
   overflow: auto;
   box-sizing: border-box;
   padding: 12px;
@@ -129,6 +146,7 @@ canvas:focus-visible,
 }
 
 .engine-manager__header,
+.engine-manager__header-actions,
 .engine-manager__row {
   display: flex;
   align-items: center;
@@ -138,6 +156,12 @@ canvas:focus-visible,
 
 .engine-manager__header {
   margin-bottom: 12px;
+}
+
+.engine-manager__header-actions {
+  flex: 0 0 auto;
+  justify-content: end;
+  gap: 8px;
 }
 
 .engine-manager__title {
@@ -150,6 +174,14 @@ canvas:focus-visible,
   min-height: 30px;
   padding: 0;
   border-radius: 6px;
+  line-height: 1;
+}
+
+.engine-manager__fullscreen {
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 12px;
   line-height: 1;
 }
 
@@ -258,10 +290,52 @@ html[data-runtime-mounted="true"]:not([data-runtime-diagnostics="true"]) .panel 
 @media (max-width: 820px) {
   .runtime-shell {
     grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .stage {
+    height: auto;
   }
 
   .panel {
+    height: auto;
+    max-height: 40vh;
+    max-height: 40dvh;
     border-left: 0;
     border-top: 1px solid #2b3038;
   }
+}
+
+@media (max-width: 820px), (pointer: coarse) {
+  .engine-manager {
+    top: max(8px, env(safe-area-inset-top));
+    right: max(8px, env(safe-area-inset-right));
+    left: max(8px, env(safe-area-inset-left));
+    width: auto;
+    max-width: none;
+    max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 16px);
+  }
+
+  .engine-manager__tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+html:fullscreen,
+html:fullscreen body,
+html:fullscreen .runtime-shell,
+html:fullscreen .stage,
+html:-webkit-full-screen,
+html:-webkit-full-screen body,
+html:-webkit-full-screen .runtime-shell,
+html:-webkit-full-screen .stage {
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+}
+
+html:fullscreen canvas,
+html:-webkit-full-screen canvas {
+  width: min(100vw, calc(100vh * 16 / 9));
+  max-height: 100vh;
 }

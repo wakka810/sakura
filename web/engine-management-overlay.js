@@ -40,9 +40,18 @@ export function createEngineManagementOverlay(options = {}) {
   const closeButton = button("x", "engine-manager__close", () => api.close());
   closeButton.setAttribute("aria-label", "Close");
 
+  const fullscreenButton = button("Fullscreen", "engine-manager__fullscreen", () => {
+    void runFullscreenToggle();
+  });
+  fullscreenButton.setAttribute("aria-label", "Toggle fullscreen");
+
+  const headerActions = document.createElement("div");
+  headerActions.className = "engine-manager__header-actions";
+  headerActions.append(fullscreenButton, closeButton);
+
   const header = document.createElement("div");
   header.className = "engine-manager__header";
-  header.append(title, closeButton);
+  header.append(title, headerActions);
 
   const tabs = document.createElement("div");
   tabs.className = "engine-manager__tabs";
@@ -80,6 +89,10 @@ export function createEngineManagementOverlay(options = {}) {
     root.hidden = !state.open;
     root.classList.toggle("engine-manager--open", state.open);
     root.dataset.activeTab = state.activeTab;
+    const fullscreen = readFullscreenState();
+    fullscreenButton.textContent = fullscreen.active ? "Window" : "Fullscreen";
+    fullscreenButton.disabled = !fullscreen.canToggle;
+    fullscreenButton.setAttribute("aria-pressed", String(fullscreen.active));
     for (const [tab, tabButton] of tabButtons) {
       const selected = tab === state.activeTab;
       tabButton.classList.toggle("is-active", selected);
@@ -214,6 +227,36 @@ export function createEngineManagementOverlay(options = {}) {
     }
   }
 
+  async function runFullscreenToggle() {
+    const before = readFullscreenState();
+    if (!before.canToggle) {
+      state.status = "Fullscreen unavailable";
+      render();
+      return;
+    }
+    state.status = before.active ? "Leaving fullscreen..." : "Entering fullscreen...";
+    render();
+    try {
+      const result = await options.onFullscreenToggle?.();
+      state.status = fullscreenStatus(result);
+    } catch (error) {
+      state.status = errorMessage(error);
+    } finally {
+      render();
+    }
+  }
+
+  function readFullscreenState() {
+    const fullscreen = options.readFullscreenState?.() ?? {};
+    const active = fullscreen.active === true;
+    const available = fullscreen.available === true;
+    return {
+      active,
+      available,
+      canToggle: available || active,
+    };
+  }
+
   async function runAction(pendingText, action) {
     state.busy = true;
     state.status = pendingText;
@@ -312,6 +355,19 @@ function formatBytes(value) {
     return `${(bytes / 1024).toFixed(1)} KiB`;
   }
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+function fullscreenStatus(result) {
+  if (!result?.ok) {
+    return "Fullscreen unavailable";
+  }
+  if (result.reason === "fullscreen_requested" || result.reason === "already_fullscreen") {
+    return "Fullscreen active";
+  }
+  if (result.reason === "exit_fullscreen_requested" || result.reason === "already_window") {
+    return "Window mode active";
+  }
+  return result.reason ?? "";
 }
 
 function errorMessage(error) {

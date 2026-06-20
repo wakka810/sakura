@@ -7,6 +7,10 @@ import {
 } from "./bgi-fonts.js";
 import { createCore, loadCore } from "./core-wasm.js";
 import {
+  readFullscreenState,
+  toggleFullscreenMode,
+} from "./fullscreen.js";
+import {
   mountLocalInstall,
   mountServerInstall,
   refreshMountedImageAssets,
@@ -111,6 +115,7 @@ import {
   readStoredUpscaleSettings,
   storeUpscaleSettings,
 } from "./upscale-client.js";
+import { createTwoFingerDoubleTapRecognizer } from "./two-finger-double-tap.js";
 import {
   captureLocalStorageSnapshot,
   loadCloudStateSnapshot,
@@ -182,8 +187,14 @@ const engineManager = createEngineManagementOverlay({
   onCloudLoad: () => loadCloudRuntimeState({ reload: true }),
   onCloudRefresh: refreshCloudRuntimeState,
   readSystemInfo: readEngineManagerInfo,
+  readFullscreenState: readHostFullscreenState,
+  onFullscreenToggle: toggleHostFullscreen,
 });
 document.body.append(engineManager.element);
+const engineManagerGesture = createTwoFingerDoubleTapRecognizer();
+syncHostFullscreenState();
+document.addEventListener("fullscreenchange", syncHostFullscreenState);
+document.addEventListener("webkitfullscreenchange", syncHostFullscreenState);
 exposeEngineManagerDebug();
 void preloadBgiFonts();
 
@@ -363,11 +374,29 @@ function readEngineManagerInfo() {
       canvas: `${canvas.width}x${canvas.height} @${scale}x`,
       audioQueued: mounted?.safeState?.entrySoundQueue?.recorded ?? 0,
       runtimeReady: mounted?.safeState?.runtimeSession?.ready === true,
+      fullscreen: readHostFullscreenState().active ? "Yes" : "No",
       upscale: settings.upscaleEnabled
         ? `${settings.upscaleScale}x ${settings.upscaleModel} ${settings.upscaleQualityMode}`
         : "Off",
     },
   };
+}
+
+function readHostFullscreenState() {
+  return readFullscreenState(document);
+}
+
+function toggleHostFullscreen() {
+  const result = toggleFullscreenMode(document);
+  syncHostFullscreenState();
+  return result;
+}
+
+function syncHostFullscreenState() {
+  const active = readHostFullscreenState().active;
+  document.documentElement.dataset.fullscreen = String(active);
+  engineManager?.refresh?.();
+  publishRuntimeState(true);
 }
 
 function readProgressSummary() {
@@ -904,6 +933,30 @@ canvas.addEventListener("wheel", (event) => {
   }
   event.preventDefault();
   event.stopPropagation();
+}, { passive: false, capture: true });
+function handleEngineManagerGesture(event, phase) {
+  const result = engineManagerGesture[phase]?.(event) ?? { suppress: false, recognized: false };
+  if (!result.suppress && !result.recognized) {
+    return;
+  }
+  input.cancelActivePointerClicks?.();
+  if (result.recognized) {
+    engineManager.toggle();
+  }
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+canvas.addEventListener("pointerdown", (event) => {
+  handleEngineManagerGesture(event, "pointerDown");
+}, { passive: false, capture: true });
+canvas.addEventListener("pointermove", (event) => {
+  handleEngineManagerGesture(event, "pointerMove");
+}, { passive: false, capture: true });
+canvas.addEventListener("pointerup", (event) => {
+  handleEngineManagerGesture(event, "pointerUp");
+}, { passive: false, capture: true });
+canvas.addEventListener("pointercancel", (event) => {
+  handleEngineManagerGesture(event, "pointerCancel");
 }, { passive: false, capture: true });
 globalThis.sakuraAdvanceBoot = () => {
   const mounted = activeInstall;
