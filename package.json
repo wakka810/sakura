@@ -54,7 +54,7 @@
     "node": ">=24"
   },
   "devDependencies": {
-    "playwright": "1.60.0"
+    "playwright": "1.61.1"
   },
   "dependencies": {
     "pl_mpeg.c": "1.2025.5"
